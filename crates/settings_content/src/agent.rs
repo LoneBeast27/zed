@@ -200,6 +200,12 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub show_merge_conflict_indicator: Option<bool>,
+    /// Whether to use the canonical agent-orchestration UI overrides
+    /// (Claude.ai / Antigravity 2.0 / Claude Desktop-inspired layout).
+    /// Currently scopes: wider model picker, taller list.
+    ///
+    /// Default: false
+    pub canonical_agent_ui: Option<bool>,
     /// Per-tool permission rules for granular control over which tool actions
     /// require confirmation.
     ///

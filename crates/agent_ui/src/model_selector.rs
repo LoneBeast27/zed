@@ -16,7 +16,7 @@ use gpui::{
 use itertools::Itertools;
 use ordered_float::OrderedFloat;
 use picker::{Picker, PickerDelegate};
-use settings::SettingsStore;
+use settings::{Settings, SettingsStore};
 use ui::{DocumentationAside, IntoElement, prelude::*};
 use util::ResultExt;
 use zed_actions::agent::OpenSettings;
@@ -36,11 +36,17 @@ pub fn acp_model_selector(
     window: &mut Window,
     cx: &mut Context<ModelSelector>,
 ) -> ModelSelector {
+    let canonical_ui = agent_settings::AgentSettings::get_global(cx).canonical_agent_ui;
+    let (width, max_height) = if canonical_ui {
+        (rems(24.), rems(28.))
+    } else {
+        (rems(20.), rems(20.))
+    };
     let delegate = ModelPickerDelegate::new(selector, agent_server, fs, focus_handle, window, cx);
     Picker::list(delegate, window, cx)
         .show_scrollbar(true)
-        .width(rems(20.))
-        .max_height(Some(rems(20.).into()))
+        .width(width)
+        .max_height(Some(max_height.into()))
 }
 
 enum ModelPickerEntry {
