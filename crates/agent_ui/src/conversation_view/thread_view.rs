@@ -4590,16 +4590,19 @@ impl ThreadView {
                     self.agent_id.clone()
                 };
 
+                let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
                 v_flex()
                     .id(("user_message", entry_ix))
                     .map(|this| {
-                        if is_first_indented {
+                        if canonical_ui {
+                            if is_first_indented { this.pt_2() } else { this.pt_5() }
+                        } else if is_first_indented {
                             this.pt_0p5()
                         } else {
                             this.pt_2()
                         }
                     })
-                    .pb_3()
+                    .map(|this| if canonical_ui { this.pb_5() } else { this.pb_3() })
                     .px_2()
                     .gap_1p5()
                     .w_full()
@@ -4627,14 +4630,18 @@ impl ThreadView {
                             .relative()
                             .child(
                                 div()
-                                    .py_3()
-                                    .px_2()
-                                    .rounded_md()
+                                    .map(|this| {
+                                        if canonical_ui {
+                                            // Canonical agent-UI: generous padding, larger radius, no shadow.
+                                            this.py_4().px_4().rounded_xl()
+                                        } else if is_indented {
+                                            this.py_2().px_2().rounded_md().shadow_sm()
+                                        } else {
+                                            this.py_3().px_2().rounded_md()
+                                        }
+                                    })
                                     .bg(cx.theme().colors().editor_background)
                                     .border_1()
-                                    .when(is_indented, |this| {
-                                        this.py_2().px_2().shadow_sm()
-                                    })
                                     .border_color(cx.theme().colors().border)
                                     .map(|this| {
                                         if !is_editable {
