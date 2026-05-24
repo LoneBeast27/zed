@@ -4800,6 +4800,7 @@ impl ThreadView {
                 } else {
                     let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
                     let agent_label = self.agent_id.clone();
+                    let agent_color = crate::canonical::agent_label_color(&agent_label.0);
                     v_flex()
                         .px_5()
                         .py_1p5()
@@ -4807,12 +4808,13 @@ impl ThreadView {
                         .w_full()
                         .text_ui(cx)
                         .when(canonical_ui, |this| {
-                            // Small muted identity marker — canonical agent-UI motif #9.
+                            // Small agent-tinted identity marker — canonical motif #9.
+                            // Orange = Claude · Green = Codex · Blue = Gemini.
                             this.child(
                                 div().pb_1().child(
                                     Label::new(agent_label.to_string())
                                         .size(LabelSize::XSmall)
-                                        .color(Color::Muted),
+                                        .color(agent_color),
                                 ),
                             )
                         })
