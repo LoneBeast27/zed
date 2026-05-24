@@ -3275,19 +3275,33 @@ impl ThreadView {
         };
 
         let max_content_width = AgentSettings::get_global(cx).effective_max_content_width();
+        let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
         let has_messages = self.list_state.item_count() > 0;
         let fills_container = !has_messages || editor_expanded;
 
         h_flex()
-            .p_2()
+            .map(|this| {
+                if canonical_ui {
+                    // Canonical: bigger padding for the outer band so the card "floats"
+                    // inside the panel with breathing room on all sides.
+                    this.p_3()
+                } else {
+                    this.p_2()
+                }
+            })
             .bg(editor_bg_color)
             .justify_center()
             .map(|this| {
                 if has_messages {
-                    this.on_action(cx.listener(Self::expand_message_editor))
-                        .border_t_1()
-                        .border_color(cx.theme().colors().border)
-                        .when(editor_expanded, |this| this.h(vh(0.8, window)))
+                    let base = this
+                        .on_action(cx.listener(Self::expand_message_editor))
+                        .when(editor_expanded, |this| this.h(vh(0.8, window)));
+                    if canonical_ui {
+                        // No top-edge band when the composer is a self-contained card.
+                        base
+                    } else {
+                        base.border_t_1().border_color(cx.theme().colors().border)
+                    }
                 } else {
                     this.flex_1().size_full()
                 }
@@ -3301,6 +3315,14 @@ impl ThreadView {
                     .flex_grow_0()
                     .justify_between()
                     .gap_2()
+                    .when(canonical_ui, |this| {
+                        // Canonical composer = bordered rounded card with elevated bg.
+                        this.p_3()
+                            .rounded_xl()
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .bg(cx.theme().colors().elevated_surface_background)
+                    })
                     .child(
                         v_flex()
                             .relative()
