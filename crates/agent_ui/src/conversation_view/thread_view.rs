@@ -3318,10 +3318,18 @@ impl ThreadView {
                     .gap_2()
                     .when(canonical_ui, |this| {
                         // Canonical composer = bordered rounded card with elevated bg.
+                        // Focus border tints to the active agent's accent (orange/green/blue)
+                        // when the composer has focus — slice 3.4.
+                        let composer_focused = focus_handle.is_focused(window);
+                        let composer_border = if composer_focused {
+                            crate::canonical::accent_hsla_for_agent(&self.agent_id.0)
+                        } else {
+                            cx.theme().colors().border
+                        };
                         this.p_3()
                             .rounded_xl()
                             .border_1()
-                            .border_color(cx.theme().colors().border)
+                            .border_color(composer_border)
                             .bg(cx.theme().colors().elevated_surface_background)
                     })
                     .child(
