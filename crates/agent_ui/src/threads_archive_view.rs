@@ -679,8 +679,10 @@ impl ThreadsArchiveView {
 
                 let archived_color = Color::Custom(cx.theme().colors().icon_muted.opacity(0.6));
 
+                let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
                 let base = ThreadItem::new(id, thread.display_title())
                     .icon(icon)
+                    .rounded(canonical_ui)
                     .when(is_archived, |this| {
                         this.archived(true)
                             .icon_color(archived_color)

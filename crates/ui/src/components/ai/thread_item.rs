@@ -396,7 +396,9 @@ impl RenderOnce for ThreadItem {
             .border_1()
             .border_color(gpui::transparent_black())
             .when(self.focused, |s| s.border_color(color.border_focused))
-            .when(self.rounded, |s| s.rounded_sm())
+            // Canonical agent-UI: floating tile feel — 8px radius + 2px horizontal inset
+            // so the hover/selected bg reads as a discrete card, not a strip.
+            .when(self.rounded, |s| s.rounded_lg().mx_1())
             .hover(|s| s.bg(hover_color))
             .on_hover(self.on_hover)
             .child(
