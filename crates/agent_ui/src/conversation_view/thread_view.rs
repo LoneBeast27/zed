@@ -2280,7 +2280,7 @@ impl ThreadView {
         let edits_expanded = self.edits_expanded;
         let queue_expanded = self.queue_expanded;
 
-        let max_content_width = AgentSettings::get_global(cx).max_content_width;
+        let max_content_width = AgentSettings::get_global(cx).effective_max_content_width();
 
         h_flex()
             .w_full()
@@ -3182,7 +3182,7 @@ impl ThreadView {
         let is_done = thread.read(cx).status() == ThreadStatus::Idle;
         let is_canceled_or_failed = self.is_subagent_canceled_or_failed(cx);
 
-        let max_content_width = AgentSettings::get_global(cx).max_content_width;
+        let max_content_width = AgentSettings::get_global(cx).effective_max_content_width();
 
         Some(
             h_flex()
@@ -3274,7 +3274,7 @@ impl ThreadView {
             (IconName::Maximize, "Expand Message Editor")
         };
 
-        let max_content_width = AgentSettings::get_global(cx).max_content_width;
+        let max_content_width = AgentSettings::get_global(cx).effective_max_content_width();
         let has_messages = self.list_state.item_count() > 0;
         let fills_container = !has_messages || editor_expanded;
 
@@ -4511,7 +4511,7 @@ impl Render for TokenUsageTooltip {
 
 impl ThreadView {
     fn render_entries(&mut self, cx: &mut Context<Self>) -> List {
-        let max_content_width = AgentSettings::get_global(cx).max_content_width;
+        let max_content_width = AgentSettings::get_global(cx).effective_max_content_width();
         let centered_container = move |content: AnyElement| {
             h_flex().w_full().justify_center().child(
                 div()
@@ -4798,12 +4798,24 @@ impl ThreadView {
                 if is_blank {
                     Empty.into_any()
                 } else {
+                    let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
+                    let agent_label = self.agent_id.clone();
                     v_flex()
                         .px_5()
                         .py_1p5()
                         .when(is_last, |this| this.pb_4())
                         .w_full()
                         .text_ui(cx)
+                        .when(canonical_ui, |this| {
+                            // Small muted identity marker — canonical agent-UI motif #9.
+                            this.child(
+                                div().pb_1().child(
+                                    Label::new(agent_label.to_string())
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                ),
+                            )
+                        })
                         .child(self.render_message_context_menu(entry_ix, message_body, cx))
                         .when_some(
                             self.entry_view_state

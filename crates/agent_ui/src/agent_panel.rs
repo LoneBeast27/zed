@@ -5225,7 +5225,7 @@ impl AgentPanel {
                 this.toggle_zoom(&ToggleZoom, window, cx);
             }));
 
-        let max_content_width = AgentSettings::get_global(cx).max_content_width;
+        let max_content_width = AgentSettings::get_global(cx).effective_max_content_width();
 
         let base_container = h_flex()
             .size_full()

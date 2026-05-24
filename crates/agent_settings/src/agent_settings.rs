@@ -205,6 +205,17 @@ impl AgentSettings {
         self.message_editor_min_lines * 2
     }
 
+    /// Effective max content width for the conversation column.
+    /// When canonical_agent_ui is on, clamp to 768px (Claude.ai-style reading width)
+    /// regardless of the user's `max_content_width` setting.
+    pub fn effective_max_content_width(&self) -> Option<Pixels> {
+        if self.canonical_agent_ui {
+            Some(px(768.))
+        } else {
+            self.max_content_width
+        }
+    }
+
     pub fn favorite_model_ids(&self) -> HashSet<acp::ModelId> {
         self.favorite_models
             .iter()
