@@ -3378,7 +3378,12 @@ impl ThreadView {
                                     .child(self.render_add_context_button(cx))
                                     .child(self.render_follow_toggle(cx))
                                     .children(self.render_fast_mode_control(cx))
-                                    .children(self.render_thinking_control(cx)),
+                                    .children(self.render_thinking_control(cx))
+                                    // Canonical: inline model pill at composer bottom-left
+                                    // (Claude.ai / Claude Desktop / Cursor placement).
+                                    .when(canonical_ui, |this| {
+                                        this.children(self.model_selector.clone())
+                                    }),
                             )
                             .child(
                                 h_flex()
@@ -3388,9 +3393,15 @@ impl ThreadView {
                                     .children(self.profile_selector.clone())
                                     .map(|this| match self.config_options_view.clone() {
                                         Some(config_view) => this.child(config_view),
-                                        None => this
-                                            .children(self.mode_selector.clone())
-                                            .children(self.model_selector.clone()),
+                                        None => {
+                                            let with_mode = this.children(self.mode_selector.clone());
+                                            // Stock: model picker stays in the right cluster.
+                                            if canonical_ui {
+                                                with_mode
+                                            } else {
+                                                with_mode.children(self.model_selector.clone())
+                                            }
+                                        }
                                     })
                                     .child(self.render_send_button(cx)),
                             ),
