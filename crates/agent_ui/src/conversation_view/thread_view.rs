@@ -3279,6 +3279,7 @@ impl ThreadView {
         let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
         let has_messages = self.list_state.item_count() > 0;
         let fills_container = !has_messages || editor_expanded;
+        let is_generating = self.thread.read(cx).status() == acp_thread::ThreadStatus::Generating;
 
         h_flex()
             .map(|this| {
@@ -3331,6 +3332,23 @@ impl ThreadView {
                             .border_1()
                             .border_color(composer_border)
                             .bg(cx.theme().colors().elevated_surface_background)
+                    })
+                    .when(canonical_ui && is_generating, |this| {
+                        // Slice 3.3 — "Agent is thinking…" indicator inside the composer
+                        // card, above the editor. Tinted with the active agent's accent.
+                        let agent_color = crate::canonical::accent_hsla_for_agent(&self.agent_id.0);
+                        let agent_id = self.agent_id.clone();
+                        this.child(
+                            h_flex()
+                                .gap_2()
+                                .pb_2()
+                                .child(SpinnerLabel::new().size(LabelSize::Small))
+                                .child(
+                                    Label::new(format!("{} is thinking…", agent_id))
+                                        .size(LabelSize::Small)
+                                        .color(Color::Custom(agent_color)),
+                                ),
+                        )
                     })
                     .child(
                         v_flex()
