@@ -309,8 +309,12 @@ impl ThreadsArchiveView {
                 ThreadFilter::All => true,
                 ThreadFilter::ArchivedOnly => t.archived,
                 ThreadFilter::Recent => {
+                    // "Recently opened" = last user interaction within window
+                    // (interacted_at if present, else fall back to metadata mtime).
+                    // Using created_at would exclude old threads the user re-opened
+                    // today, which is exactly the case we want to keep visible.
                     !t.archived
-                        && t.created_at.unwrap_or(t.updated_at) >= recent_cutoff
+                        && t.interacted_at.unwrap_or(t.updated_at) >= recent_cutoff
                 }
             })
             .sorted_by_cached_key(|t| t.created_at.unwrap_or(t.updated_at))
