@@ -49,10 +49,21 @@ use zed_actions::editor::{MoveDown, MoveUp};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum ThreadFilter {
+    /// Non-archived threads modified within RECENT_WINDOW_DAYS.
+    /// Default when `canonical_agent_ui` is on — the list shows only
+    /// recently-active threads, and the existing Archive action serves
+    /// as the "remove from recents" affordance.
     #[default]
+    Recent,
+    /// Every non-archived thread (stock upstream default).
     All,
+    /// Only threads the user has explicitly archived.
     ArchivedOnly,
 }
+
+/// Threads outside this window fall off the "Recent" list. Archived state
+/// is independent — archived threads never appear in Recent regardless of age.
+const RECENT_WINDOW_DAYS: i64 = 14;
 
 #[derive(Clone)]
 enum ArchiveListItem {
@@ -229,7 +240,14 @@ impl ThreadsArchiveView {
             archived_thread_ids: HashSet::default(),
             archived_branch_names: HashMap::default(),
             _load_branch_names_task: Task::ready(()),
-            thread_filter: ThreadFilter::All,
+            // Canonical: default to the "recently-active" subset; users
+            // can switch to All or ArchivedOnly via the filter toggle.
+            // Stock branch retains the upstream All-by-default behavior.
+            thread_filter: if AgentSettings::get_global(cx).canonical_agent_ui {
+                ThreadFilter::Recent
+            } else {
+                ThreadFilter::All
+            },
         };
 
         this.update_items(cx);
@@ -271,20 +289,29 @@ impl ThreadsArchiveView {
         let store = ThreadMetadataStore::global(cx).read(cx);
 
         // If we're filtering to archived threads but none remain (e.g. the
-        // user just deleted the last one), fall back to showing all threads
+        // user just deleted the last one), fall back to the default view
         // so they aren't stranded with an empty list and a disabled toggle.
         if self.thread_filter == ThreadFilter::ArchivedOnly
             && store.archived_entries().next().is_none()
         {
-            self.thread_filter = ThreadFilter::All;
+            self.thread_filter = if AgentSettings::get_global(cx).canonical_agent_ui {
+                ThreadFilter::Recent
+            } else {
+                ThreadFilter::All
+            };
         }
 
         let thread_filter = self.thread_filter;
+        let recent_cutoff = Utc::now() - TimeDelta::days(RECENT_WINDOW_DAYS);
         let sessions = store
             .entries()
             .filter(|t| match thread_filter {
                 ThreadFilter::All => true,
                 ThreadFilter::ArchivedOnly => t.archived,
+                ThreadFilter::Recent => {
+                    !t.archived
+                        && t.created_at.unwrap_or(t.updated_at) >= recent_cutoff
+                }
             })
             .sorted_by_cached_key(|t| t.created_at.unwrap_or(t.updated_at))
             .rev()
@@ -970,24 +997,25 @@ impl ThreadsArchiveView {
                             })),
                     )
                     .child(
-                        IconButton::new("filter-archived-only", IconName::Archive)
+                        IconButton::new("filter-thread-list", IconName::Archive)
                             .icon_size(IconSize::Small)
-                            .disabled(!has_archived_threads)
+                            .disabled(
+                                self.thread_filter != ThreadFilter::ArchivedOnly
+                                    && !has_archived_threads
+                            )
                             .toggle_state(self.thread_filter == ThreadFilter::ArchivedOnly)
-                            .tooltip(Tooltip::text(
-                                if self.thread_filter == ThreadFilter::ArchivedOnly {
-                                    "Show All Threads"
-                                } else {
-                                    "Show Only Archived Threads"
-                                },
-                            ))
+                            .tooltip(Tooltip::text(match self.thread_filter {
+                                ThreadFilter::Recent => "Show All Threads",
+                                ThreadFilter::All => "Show Only Archived",
+                                ThreadFilter::ArchivedOnly => "Show Recent Threads",
+                            }))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.thread_filter =
-                                    if this.thread_filter == ThreadFilter::ArchivedOnly {
-                                        ThreadFilter::All
-                                    } else {
-                                        ThreadFilter::ArchivedOnly
-                                    };
+                                // Three-state cycle: Recent → All → ArchivedOnly → Recent.
+                                this.thread_filter = match this.thread_filter {
+                                    ThreadFilter::Recent => ThreadFilter::All,
+                                    ThreadFilter::All => ThreadFilter::ArchivedOnly,
+                                    ThreadFilter::ArchivedOnly => ThreadFilter::Recent,
+                                };
                                 this.update_items(cx);
                             })),
                     ),
