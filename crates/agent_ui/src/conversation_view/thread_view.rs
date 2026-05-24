@@ -2939,6 +2939,7 @@ impl ThreadView {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
         v_flex()
             .px_5()
             .py_1p5()
@@ -2946,7 +2947,7 @@ impl ThreadView {
             .child(
                 v_flex()
                     .w_full()
-                    .rounded_md()
+                    .map(|this| if canonical_ui { this.rounded_lg() } else { this.rounded_md() })
                     .border_1()
                     .border_color(self.tool_card_border_color(cx))
                     .child(
@@ -4596,7 +4597,13 @@ impl ThreadView {
 
                 let editing = self.editing_message == Some(entry_ix);
                 let editor_focus = editor.focus_handle(cx).is_focused(window);
-                let focus_border = cx.theme().colors().border_focused;
+                let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
+                let focus_border = if canonical_ui {
+                    // Per-agent accent on focus border — orange Claude · green Codex · blue Gemini.
+                    crate::canonical::accent_hsla_for_agent(&self.agent_id.0)
+                } else {
+                    cx.theme().colors().border_focused
+                };
 
                 let has_checkpoint_button = message
                     .checkpoint
@@ -4612,7 +4619,6 @@ impl ThreadView {
                     self.agent_id.clone()
                 };
 
-                let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
                 v_flex()
                     .id(("user_message", entry_ix))
                     .map(|this| {
@@ -4691,7 +4697,7 @@ impl ThreadView {
                                     .top_neg_3p5()
                                     .right_3()
                                     .gap_1()
-                                    .rounded_sm()
+                                    .map(|this| if canonical_ui { this.rounded_md() } else { this.rounded_sm() })
                                     .border_1()
                                     .border_color(cx.theme().colors().border)
                                     .bg(cx.theme().colors().editor_background)
@@ -4833,7 +4839,7 @@ impl ThreadView {
                             // Small agent-tinted identity marker — canonical motif #9.
                             // Orange = Claude · Green = Codex · Blue = Gemini.
                             this.child(
-                                div().pb_1().child(
+                                div().pb_2().child(
                                     Label::new(agent_label.to_string())
                                         .size(LabelSize::XSmall)
                                         .color(agent_color),
@@ -4988,6 +4994,7 @@ impl ThreadView {
     }
 
     fn render_feedback_feedback_editor(editor: Entity<Editor>, cx: &Context<Self>) -> Div {
+        let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
         h_flex()
             .key_context("AgentFeedbackMessageEditor")
             .on_action(cx.listener(move |this, _: &menu::Cancel, _, cx| {
@@ -5001,7 +5008,7 @@ impl ThreadView {
             .mb_2()
             .mx_5()
             .gap_1()
-            .rounded_md()
+            .map(|this| if canonical_ui { this.rounded_lg() } else { this.rounded_md() })
             .border_1()
             .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().editor_background)
@@ -6062,6 +6069,7 @@ impl ThreadView {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
         let terminal_data = terminal.read(cx);
         let working_dir = terminal_data.working_dir();
         let started_at = terminal_data.started_at();
@@ -6281,7 +6289,7 @@ impl ThreadView {
                     .border_1()
                     .when(tool_failed || command_failed, |card| card.border_dashed())
                     .border_color(border_color)
-                    .rounded_md()
+                    .map(|this| if canonical_ui { this.rounded_lg() } else { this.rounded_md() })
             })
             .overflow_hidden()
             .child(
@@ -6419,6 +6427,7 @@ impl ThreadView {
         window: &Window,
         cx: &Context<Self>,
     ) -> Div {
+        let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
         let has_location = tool_call.locations.len() == 1;
         let card_header_id = SharedString::from("inner-tool-call-header");
 
@@ -6667,7 +6676,7 @@ impl ThreadView {
                     this
                 } else if use_card_layout {
                     this.my_1p5()
-                        .rounded_md()
+                        .map(|this| if canonical_ui { this.rounded_lg() } else { this.rounded_md() })
                         .border_1()
                         .when(failed_or_canceled, |this| this.border_dashed())
                         .border_color(self.tool_card_border_color(cx))
@@ -7929,6 +7938,7 @@ impl ThreadView {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
         let thread = thread_view
             .as_ref()
             .map(|view| view.read(cx).thread.clone());
@@ -8045,7 +8055,7 @@ impl ThreadView {
 
         v_flex()
             .w_full()
-            .rounded_md()
+            .map(|this| if canonical_ui { this.rounded_lg() } else { this.rounded_md() })
             .border_1()
             .when(has_no_title_or_canceled, |this| this.border_dashed())
             .border_color(self.tool_card_border_color(cx))
@@ -8068,7 +8078,7 @@ impl ThreadView {
                             .size_full()
                             .gap_2()
                             .justify_between()
-                            .rounded_sm()
+                            .map(|this| if canonical_ui { this.rounded_md() } else { this.rounded_sm() })
                             .overflow_hidden()
                             .child(
                                 h_flex()
