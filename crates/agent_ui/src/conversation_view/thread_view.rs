@@ -275,6 +275,11 @@ pub struct ThreadView {
     pub agent_icon: IconName,
     pub agent_icon_from_external_svg: Option<SharedString>,
     pub agent_id: AgentId,
+    /// Canonical W3.6: per-message agent override. When `Some`, the agent
+    /// picker pill displays this agent and the next outgoing message routes
+    /// to it (routing wired in a subsequent slice). When `None`, the thread's
+    /// primary `agent_id` is used. Reset to `None` after each send.
+    pub pending_agent_target: Option<AgentId>,
     pub focus_handle: FocusHandle,
     pub workspace: WeakEntity<Workspace>,
     pub entry_view_state: Entity<EntryViewState>,
@@ -577,6 +582,7 @@ impl ThreadView {
             plan_expanded: false,
             queue_expanded: true,
             editor_expanded: false,
+            pending_agent_target: None,
             should_be_following: false,
             editing_message: None,
             local_queued_messages: Vec::new(),
@@ -4389,17 +4395,34 @@ impl ThreadView {
             }))
     }
 
-    /// Canonical: small agent-identity pill for the composer's left cluster.
-    /// Shows the thread's primary agent (`@claude` / `@codex` / `@gemini`) with
-    /// its accent color. Cosmetic-only in this commit; clickable popover +
-    /// per-message routing land in subsequent slices (W3.6+).
-    fn render_agent_picker_pill(&self, _cx: &mut Context<Self>) -> impl IntoElement {
-        let agent_label = self.agent_id.to_string();
+    /// Canonical W3.6: small agent-identity pill for the composer's left cluster.
+    /// Shows either the thread's primary agent (`@claude-acp` etc.) OR the
+    /// per-message override set via click. Click cycles through known agents:
+    /// claude-acp → codex-acp → gemini → primary (None). Per-message routing on
+    /// send lands in the next slice.
+    fn render_agent_picker_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let displayed_agent = self
+            .pending_agent_target
+            .as_ref()
+            .unwrap_or(&self.agent_id);
+        let agent_label = displayed_agent.to_string();
+        let is_override = self.pending_agent_target.is_some();
         let accent = crate::canonical::accent_hsla_for_agent(&agent_label);
         let mut accent_bg = accent;
-        accent_bg.a = 0.12;
+        accent_bg.a = if is_override { 0.20 } else { 0.12 };
         let mut accent_border = accent;
-        accent_border.a = 0.35;
+        accent_border.a = if is_override { 0.60 } else { 0.35 };
+
+        let primary_label = self.agent_id.to_string();
+        let tooltip_text = if is_override {
+            format!(
+                "Next message → {} (override; click to cycle; primary is {})",
+                agent_label, primary_label
+            )
+        } else {
+            format!("Next message → {} (click to cycle target)", agent_label)
+        };
+
         h_flex()
             .id("agent-picker-pill")
             .px_1p5()
@@ -4409,17 +4432,35 @@ impl ThreadView {
             .bg(accent_bg)
             .border_1()
             .border_color(accent_border)
-            .child(
-                div()
-                    .size_1p5()
-                    .rounded_full()
-                    .bg(accent),
-            )
+            .cursor_pointer()
+            .child(div().size_1p5().rounded_full().bg(accent))
             .child(
                 Label::new(format!("@{}", agent_label))
                     .size(LabelSize::XSmall)
                     .color(Color::Custom(accent)),
             )
+            .tooltip(move |_window, cx| {
+                ui::Tooltip::simple(tooltip_text.clone(), cx)
+            })
+            .on_click(cx.listener(|this, _event, _window, cx| {
+                let cur_str: String = this
+                    .pending_agent_target
+                    .as_ref()
+                    .map(|a| a.0.as_ref())
+                    .unwrap_or_else(|| this.agent_id.0.as_ref())
+                    .to_string();
+                let next = if cur_str.contains("claude") {
+                    Some(AgentId::new("codex-acp"))
+                } else if cur_str.contains("codex") {
+                    Some(AgentId::new("gemini"))
+                } else if cur_str.contains("gemini") {
+                    None
+                } else {
+                    Some(AgentId::new("claude-acp"))
+                };
+                this.pending_agent_target = next;
+                cx.notify();
+            }))
     }
 }
 
