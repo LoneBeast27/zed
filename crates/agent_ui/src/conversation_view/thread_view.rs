@@ -3409,6 +3409,7 @@ impl ThreadView {
                                     // (Claude.ai / Claude Desktop / Cursor placement).
                                     .when(canonical_ui, |this| {
                                         this.children(self.model_selector.clone())
+                                            .child(self.render_agent_picker_pill(cx))
                                     }),
                             )
                             .child(
@@ -4386,6 +4387,39 @@ impl ThreadView {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.toggle_following(window, cx);
             }))
+    }
+
+    /// Canonical: small agent-identity pill for the composer's left cluster.
+    /// Shows the thread's primary agent (`@claude` / `@codex` / `@gemini`) with
+    /// its accent color. Cosmetic-only in this commit; clickable popover +
+    /// per-message routing land in subsequent slices (W3.6+).
+    fn render_agent_picker_pill(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        let agent_label = self.agent_id.to_string();
+        let accent = crate::canonical::accent_hsla_for_agent(&agent_label);
+        let mut accent_bg = accent;
+        accent_bg.a = 0.12;
+        let mut accent_border = accent;
+        accent_border.a = 0.35;
+        h_flex()
+            .id("agent-picker-pill")
+            .px_1p5()
+            .py_0p5()
+            .gap_1()
+            .rounded_md()
+            .bg(accent_bg)
+            .border_1()
+            .border_color(accent_border)
+            .child(
+                div()
+                    .size_1p5()
+                    .rounded_full()
+                    .bg(accent),
+            )
+            .child(
+                Label::new(format!("@{}", agent_label))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Custom(accent)),
+            )
     }
 }
 
