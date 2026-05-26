@@ -1059,6 +1059,26 @@ impl ThreadView {
         }
 
         cx.emit(AcpThreadViewEvent::Interacted);
+
+        // Canonical W3.6/A3 hook (mini-step): snapshot the pending agent
+        // override via .take(), resetting the pill to the thread primary
+        // after each send (W3.6 design — overrides last one message).
+        // Multi-agent ACP routing (A2 multi-connection + context bridging)
+        // is not yet implemented; for now we log the routing intent. Once
+        // A2 lands, this is where we will dispatch to the target agent's
+        // ACP connection instead of falling through to the primary.
+        if let Some(target) = self.pending_agent_target.take() {
+            log::info!(
+                "agent_picker: would route next message to {} \
+                 (thread primary: {}). ACP multi-connection not yet wired \
+                 — falling through to primary. See \
+                 MULTI_AGENT_ROUTING.md §4 (A2/A3).",
+                target.0,
+                self.agent_id.0,
+            );
+            cx.notify();
+        }
+
         self.send_impl(message_editor, window, cx)
     }
 
