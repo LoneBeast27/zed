@@ -168,6 +168,7 @@ pub struct AgentSettings {
     pub show_turn_stats: bool,
     pub show_merge_conflict_indicator: bool,
     pub canonical_agent_ui: bool,
+    pub show_resource_banner: bool,
     pub tool_permissions: ToolPermissions,
 }
 
@@ -684,6 +685,7 @@ impl Settings for AgentSettings {
             show_turn_stats: agent.show_turn_stats.unwrap(),
             show_merge_conflict_indicator: agent.show_merge_conflict_indicator.unwrap(),
             canonical_agent_ui: agent.canonical_agent_ui.unwrap_or(false),
+            show_resource_banner: agent.show_resource_banner.unwrap_or(true),
             tool_permissions: compile_tool_permissions(agent.tool_permissions),
         }
     }

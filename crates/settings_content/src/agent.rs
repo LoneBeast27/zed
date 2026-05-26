@@ -206,6 +206,13 @@ pub struct AgentSettingsContent {
     ///
     /// Default: false
     pub canonical_agent_ui: Option<bool>,
+    /// Whether to show the resource-orchestration banner at the top of the
+    /// agent panel. Reads `.claude/locks/` state (GPU lock + queue + events)
+    /// and surfaces lock contention across sessions. Gated additionally on
+    /// `canonical_agent_ui`.
+    ///
+    /// Default: true
+    pub show_resource_banner: Option<bool>,
     /// Per-tool permission rules for granular control over which tool actions
     /// require confirmation.
     ///

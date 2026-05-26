@@ -906,6 +906,10 @@ pub struct AgentPanel {
     _thread_metadata_store_subscription: Subscription,
     last_context_source: Option<AgentContextSource>,
 
+    /// Lazily-constructed resource-orchestration banner (R4). `None` until the
+    /// first render after a workspace root is known, or when the user has
+    /// disabled `canonical_agent_ui` / `show_resource_banner`.
+    resource_banner: Option<Entity<crate::resource_banner::ResourceBanner>>,
     is_active: bool,
 }
 
@@ -1323,6 +1327,7 @@ impl AgentPanel {
             _active_draft_reclaim_observation: None,
             _thread_metadata_store_subscription,
             last_context_source: None,
+            resource_banner: None,
             is_active: false,
         };
 
@@ -5642,6 +5647,43 @@ impl AgentPanel {
         key_context.add("AgentPanel");
         key_context
     }
+
+    /// Lazily initializes and returns the resource-orchestration banner
+    /// (R4 per `.planning/zed-fork/RESOURCE_ORCHESTRATION.md`). Returns `None`
+    /// when `canonical_agent_ui` is off, when the user disables the banner via
+    /// `agent.show_resource_banner`, or when the workspace has no visible
+    /// worktree to anchor `.claude/locks/` against.
+    fn resource_banner_entity(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<crate::resource_banner::ResourceBanner>> {
+        let settings = AgentSettings::get_global(cx);
+        if !settings.canonical_agent_ui || !settings.show_resource_banner {
+            // Drop any existing banner if the user just toggled the gate off,
+            // so the watcher task is reclaimed.
+            self.resource_banner = None;
+            return None;
+        }
+
+        if self.resource_banner.is_none() {
+            let workspace_root = self
+                .project
+                .read(cx)
+                .visible_worktrees(cx)
+                .next()
+                .map(|wt| wt.read(cx).abs_path().to_path_buf());
+            let Some(root) = workspace_root else {
+                return None;
+            };
+            let locks_dir = root.join(".claude").join("locks");
+            let fs = self.fs.clone();
+            self.resource_banner = Some(
+                cx.new(|cx| crate::resource_banner::ResourceBanner::new(locks_dir, "gpu", fs, cx)),
+            );
+        }
+
+        self.resource_banner.clone()
+    }
 }
 
 impl Render for AgentPanel {
@@ -5694,6 +5736,7 @@ impl Render for AgentPanel {
                     })
                 }
             }))
+            .children(self.resource_banner_entity(cx))
             .child(self.render_toolbar(window, cx))
             .children(self.render_new_user_onboarding(window, cx))
             .map(|parent| match self.visible_surface() {

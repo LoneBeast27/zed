@@ -27,6 +27,7 @@ mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
 mod profile_selector;
+mod resource_banner;
 mod terminal_codegen;
 mod terminal_inline_assistant;
 pub mod terminal_thread_metadata_store;
@@ -839,6 +840,7 @@ mod tests {
             sidebar_side: Default::default(),
             thinking_display: Default::default(),
             canonical_agent_ui: false,
+            show_resource_banner: true,
         };
 
         cx.update(|cx| {
