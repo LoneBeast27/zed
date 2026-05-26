@@ -731,7 +731,7 @@ impl AcpConnection {
                 .cloned()
         });
         let original_command = command.clone();
-        let (path, args, env) = project
+        let (path, args, mut env) = project
             .read_with(cx, |project, cx| {
                 project.remote_client().and_then(|client| {
                     let template = client
@@ -755,6 +755,18 @@ impl AcpConnection {
                     command.env.unwrap_or_default(),
                 )
             });
+
+        // Canonical R3: propagate AGENT_SESSION_ID so bash-side resource locks
+        // (.claude/locks/lib.sh) can identify the calling agent. Format:
+        // `{agent-id}:zed-{pid}-{counter}`. Counter ensures uniqueness when a
+        // single Zed instance spawns multiple connections to the same agent.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SPAWN_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let spawn_n = SPAWN_COUNTER.fetch_add(1, Ordering::Relaxed);
+        env.insert(
+            "AGENT_SESSION_ID".to_string(),
+            format!("{}:zed-{}-{}", agent_id.0, std::process::id(), spawn_n),
+        );
 
         let builder = ShellBuilder::new(&Shell::System, cfg!(windows)).non_interactive();
         let mut child = builder.build_std_command(Some(path.clone()), &args);
