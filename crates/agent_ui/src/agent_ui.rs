@@ -7,6 +7,7 @@ mod agent_registry_ui;
 mod buffer_codegen;
 mod canonical;
 mod completion_provider;
+mod workspace_modes;
 mod config_options;
 mod context;
 mod context_server_configuration;
