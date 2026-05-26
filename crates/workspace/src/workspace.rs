@@ -1368,6 +1368,14 @@ pub struct Workspace {
     pub(crate) modal_layer: Entity<ModalLayer>,
     toast_layer: Entity<ToastLayer>,
     titlebar_item: Option<AnyView>,
+    /// Optional left-edge workspace-mode activity bar.
+    ///
+    /// Set via `set_activity_bar_item` from `agent_ui` when the
+    /// `agent.workspace_modes` setting is enabled. When `None`, the workspace
+    /// renders exactly as stock Zed — no layout impact.
+    ///
+    /// See `.planning/zed-fork/WORKSPACE_MODES.md` §3 (M1 slice).
+    activity_bar_item: Option<AnyView>,
     notifications: Notifications,
     suppressed_notifications: HashSet<NotificationId>,
     project: Entity<Project>,
@@ -1808,6 +1816,7 @@ impl Workspace {
             modal_layer,
             toast_layer,
             titlebar_item: None,
+            activity_bar_item: None,
             notifications: Notifications::default(),
             suppressed_notifications: HashSet::default(),
             left_dock,
@@ -2936,6 +2945,26 @@ impl Workspace {
     pub fn set_titlebar_item(&mut self, item: AnyView, _: &mut Window, cx: &mut Context<Self>) {
         self.titlebar_item = Some(item);
         cx.notify();
+    }
+
+    /// Install the workspace-modes activity bar at the left edge of the
+    /// workspace. Called by `agent_ui` init when `agent.workspace_modes` is
+    /// enabled. Pass `None` to remove the bar (e.g. when the user toggles the
+    /// setting off mid-session).
+    ///
+    /// See `.planning/zed-fork/WORKSPACE_MODES.md` §3.
+    pub fn set_activity_bar_item(
+        &mut self,
+        item: Option<AnyView>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activity_bar_item = item;
+        cx.notify();
+    }
+
+    pub fn activity_bar_item(&self) -> Option<AnyView> {
+        self.activity_bar_item.clone()
     }
 
     pub fn set_prompt_for_new_path(&mut self, prompt: PromptForNewPath) {
@@ -8480,6 +8509,14 @@ impl Render for Workspace {
                     .flex_col()
                     .child(
                         div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .w_full()
+                            .overflow_hidden()
+                            .children(self.activity_bar_item.clone())
+                            .child(
+                        div()
                             .id("workspace")
                             .bg(colors.background)
                             .relative()
@@ -8836,6 +8873,7 @@ impl Render for Workspace {
                                 })
                             }))
                             .children(self.render_notifications(window, cx)),
+                            ),
                     )
                     .when(self.status_bar_visible(cx), |parent| {
                         parent.child(self.status_bar.clone())

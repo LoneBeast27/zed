@@ -1,3 +1,4 @@
+mod activity_bar;
 mod agent_configuration;
 pub mod agent_connection_store;
 mod agent_diff;
@@ -562,6 +563,35 @@ pub fn init(
     })
     .detach();
     cx.observe_new(ManageProfilesModal::register).detach();
+
+    // M1 wiring — install the workspace-modes activity bar when the
+    // `agent.workspace_modes` setting is enabled. When the setting is off
+    // (default), this observer registers nothing and the workspace renders
+    // identically to stock Zed.
+    cx.observe_new(|workspace: &mut Workspace, window, cx: &mut Context<Workspace>| {
+        let settings = AgentSettings::get_global(cx);
+        if !settings.workspace_modes {
+            return;
+        }
+        let Some(window) = window else {
+            return;
+        };
+        let workspace_root = workspace
+            .project()
+            .read(cx)
+            .visible_worktrees(cx)
+            .next()
+            .map(|wt| wt.read(cx).abs_path().to_path_buf());
+        let Some(root) = workspace_root else {
+            return;
+        };
+        let modes_dir_override = settings.modes_dir.clone();
+        let default_mode = settings.default_mode.clone();
+        let bar = activity_bar::build_activity_bar(root, modes_dir_override, default_mode, cx);
+        workspace.set_activity_bar_item(Some(bar.into()), window, cx);
+    })
+    .detach();
+
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(
             |workspace: &mut Workspace,
@@ -841,6 +871,9 @@ mod tests {
             thinking_display: Default::default(),
             canonical_agent_ui: false,
             show_resource_banner: true,
+            workspace_modes: false,
+            modes_dir: None,
+            default_mode: "orchestrator".to_string(),
         };
 
         cx.update(|cx| {

@@ -600,6 +600,12 @@ mod tests {
             show_merge_conflict_indicator: true,
             sidebar_side: Default::default(),
             thinking_display: Default::default(),
+            canonical_agent_ui: false,
+            show_resource_banner: true,
+            workspace_modes: false,
+            modes_dir: None,
+            default_mode: "orchestrator".to_string(),
+            tool_permissions,
         }
     }
 

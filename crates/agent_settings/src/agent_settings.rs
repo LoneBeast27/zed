@@ -169,6 +169,9 @@ pub struct AgentSettings {
     pub show_merge_conflict_indicator: bool,
     pub canonical_agent_ui: bool,
     pub show_resource_banner: bool,
+    pub workspace_modes: bool,
+    pub modes_dir: Option<std::path::PathBuf>,
+    pub default_mode: String,
     pub tool_permissions: ToolPermissions,
 }
 
@@ -686,6 +689,11 @@ impl Settings for AgentSettings {
             show_merge_conflict_indicator: agent.show_merge_conflict_indicator.unwrap(),
             canonical_agent_ui: agent.canonical_agent_ui.unwrap_or(false),
             show_resource_banner: agent.show_resource_banner.unwrap_or(true),
+            workspace_modes: agent.workspace_modes.unwrap_or(false),
+            modes_dir: agent.modes_dir,
+            default_mode: agent
+                .default_mode
+                .unwrap_or_else(|| "orchestrator".to_string()),
             tool_permissions: compile_tool_permissions(agent.tool_permissions),
         }
     }

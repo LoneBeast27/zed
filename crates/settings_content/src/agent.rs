@@ -213,6 +213,24 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub show_resource_banner: Option<bool>,
+    /// Master flag for workspace-modes activity bar (left-edge use-case
+    /// switcher per `.planning/zed-fork/WORKSPACE_MODES.md`). When false the
+    /// bar is not rendered and the workspace layout is identical to stock
+    /// Zed. M1 (render only) ships behind this flag; M2 (layout apply) and
+    /// M3 (Orchestrator default) will land next.
+    ///
+    /// Default: false
+    pub workspace_modes: Option<bool>,
+    /// Directory containing mode definition JSON files. When `None`, falls
+    /// back to `<workspace_root>/.agents/modes/`.
+    ///
+    /// Default: None
+    pub modes_dir: Option<std::path::PathBuf>,
+    /// Mode id to activate on workspace open. Must match an `id` in one of
+    /// the loaded `.agents/modes/*.json` files.
+    ///
+    /// Default: "orchestrator"
+    pub default_mode: Option<String>,
     /// Per-tool permission rules for granular control over which tool actions
     /// require confirmation.
     ///
