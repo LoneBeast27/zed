@@ -4,6 +4,7 @@ mod agent_diff;
 mod agent_model_selector;
 mod agent_panel;
 mod agent_registry_ui;
+mod agent_router;
 mod buffer_codegen;
 mod canonical;
 mod completion_provider;
@@ -837,6 +838,7 @@ mod tests {
             show_merge_conflict_indicator: true,
             sidebar_side: Default::default(),
             thinking_display: Default::default(),
+            canonical_agent_ui: false,
         };
 
         cx.update(|cx| {
