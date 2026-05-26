@@ -21,7 +21,7 @@ use markdown::{Markdown, MarkdownOptions};
 pub use mention::*;
 use project::lsp_store::{FormatTrigger, LspFormatTarget};
 use project::{
-    AgentLocation, Project,
+    AgentId, AgentLocation, Project,
     git_store::{GitStoreCheckpoint, GitStoreEvent, RepositoryEvent},
 };
 use serde::{Deserialize, Serialize};
@@ -132,6 +132,10 @@ pub struct AssistantMessage {
     pub chunks: Vec<AssistantMessageChunk>,
     pub indented: bool,
     pub is_subagent_output: bool,
+    /// Canonical W3.5/A1: which agent produced this message. `None` =
+    /// thread primary (back-compat). `Some(_)` = a different agent that
+    /// contributed to this multi-agent thread. Drives per-message accent.
+    pub agent_id: Option<AgentId>,
 }
 
 impl AssistantMessage {
@@ -1697,6 +1701,7 @@ impl AcpThread {
                 chunks,
                 indented: existing_indented,
                 is_subagent_output: _,
+                agent_id: _,
             }) = last_entry
             && *existing_indented == indented
         {
@@ -1730,6 +1735,7 @@ impl AcpThread {
                     chunks: vec![chunk],
                     indented,
                     is_subagent_output: false,
+                    agent_id: None,
                 }),
                 cx,
             );

@@ -4888,6 +4888,7 @@ impl ThreadView {
                 chunks,
                 indented: _,
                 is_subagent_output: _,
+                agent_id: msg_agent_id,
             }) => {
                 let mut is_blank = true;
                 let is_last = entry_ix + 1 == total_entries;
@@ -4939,7 +4940,13 @@ impl ThreadView {
                     Empty.into_any()
                 } else {
                     let canonical_ui = AgentSettings::get_global(cx).canonical_agent_ui;
-                    let agent_label = self.agent_id.clone();
+                    // Canonical A1: per-message agent_id wins over thread primary.
+                    // Today most messages have agent_id=None (back-compat); once
+                    // multi-agent routing (A3) lands, contributing agents tag their
+                    // messages and the accent flips per-message.
+                    let agent_label = msg_agent_id
+                        .clone()
+                        .unwrap_or_else(|| self.agent_id.clone());
                     let agent_color = crate::canonical::agent_label_color(&agent_label.0);
                     v_flex()
                         .px_5()
