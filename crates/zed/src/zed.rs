@@ -2147,7 +2147,26 @@ pub fn load_default_keymap(cx: &mut App) {
             KeymapFile::load_asset(VIM_KEYMAP_PATH, Some(KeybindSource::Vim), cx).unwrap(),
         );
     }
+
+    // Fork: workspace-modes keybindings (`Ctrl+Alt+1..9` -> activity-bar mode
+    // switch, M2). Loaded only when `agent.workspace_modes` is enabled so the
+    // keymap stays byte-identical to stock Zed with the flag off. Mirrors the
+    // conditional Vim keymap load above.
+    if agent_settings::AgentSettings::get_global(cx).workspace_modes {
+        cx.bind_keys(
+            KeymapFile::load_asset(
+                WORKSPACE_MODES_KEYMAP_PATH,
+                Some(KeybindSource::Default),
+                cx,
+            )
+            .unwrap(),
+        );
+    }
 }
+
+/// Keymap asset for the fork's workspace-modes activity bar (M2). Only loaded
+/// when `agent.workspace_modes` is on.
+const WORKSPACE_MODES_KEYMAP_PATH: &str = "keymaps/workspace_modes.json";
 
 pub fn open_new_ssh_project_from_project(
     workspace: &mut Workspace,

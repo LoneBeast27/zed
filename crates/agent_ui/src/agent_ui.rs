@@ -9,6 +9,7 @@ mod agent_router;
 mod buffer_codegen;
 mod canonical;
 mod completion_provider;
+pub mod workspace_mode_switcher;
 mod workspace_modes;
 mod config_options;
 mod context;
@@ -564,10 +565,10 @@ pub fn init(
     .detach();
     cx.observe_new(ManageProfilesModal::register).detach();
 
-    // M1 wiring — install the workspace-modes activity bar when the
-    // `agent.workspace_modes` setting is enabled. When the setting is off
-    // (default), this observer registers nothing and the workspace renders
-    // identically to stock Zed.
+    // M1+M2 wiring — install the workspace-modes activity bar and the
+    // mode-switch action when the `agent.workspace_modes` setting is enabled.
+    // When the setting is off (default), this observer registers nothing and
+    // the workspace renders + behaves identically to stock Zed.
     cx.observe_new(|workspace: &mut Workspace, window, cx: &mut Context<Workspace>| {
         let settings = AgentSettings::get_global(cx);
         if !settings.workspace_modes {
@@ -587,8 +588,31 @@ pub fn init(
         };
         let modes_dir_override = settings.modes_dir.clone();
         let default_mode = settings.default_mode.clone();
-        let bar = activity_bar::build_activity_bar(root, modes_dir_override, default_mode, cx);
+        let weak_workspace = cx.weak_entity();
+        let bar = activity_bar::build_activity_bar(
+            root,
+            modes_dir_override,
+            default_mode,
+            weak_workspace,
+            cx,
+        );
         workspace.set_activity_bar_item(Some(bar.into()), window, cx);
+
+        // M2 — `Ctrl+Alt+1..9` (keymap asset, loaded only when the flag is
+        // on) and the command palette dispatch this action.
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             action: &workspace_mode_switcher::SwitchWorkspaceMode,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                workspace_mode_switcher::handle_switch_mode_action(
+                    workspace,
+                    action.mode_index,
+                    window,
+                    cx,
+                );
+            },
+        );
     })
     .detach();
 

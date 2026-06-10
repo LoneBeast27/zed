@@ -1,0 +1,17 @@
+[
+  {
+    "context": "Workspace",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-alt-1": ["agent::SwitchWorkspaceMode", { "mode_index": 0 }],
+      "ctrl-alt-2": ["agent::SwitchWorkspaceMode", { "mode_index": 1 }],
+      "ctrl-alt-3": ["agent::SwitchWorkspaceMode", { "mode_index": 2 }],
+      "ctrl-alt-4": ["agent::SwitchWorkspaceMode", { "mode_index": 3 }],
+      "ctrl-alt-5": ["agent::SwitchWorkspaceMode", { "mode_index": 4 }],
+      "ctrl-alt-6": ["agent::SwitchWorkspaceMode", { "mode_index": 5 }],
+      "ctrl-alt-7": ["agent::SwitchWorkspaceMode", { "mode_index": 6 }],
+      "ctrl-alt-8": ["agent::SwitchWorkspaceMode", { "mode_index": 7 }],
+      "ctrl-alt-9": ["agent::SwitchWorkspaceMode", { "mode_index": 8 }]
+    }
+  }
+]

@@ -5,11 +5,11 @@
 //! per mode loaded from `<workspace_root>/.agents/modes/*.json` (the M0
 //! substrate at `workspace_modes::load_modes_from_dir`).
 //!
-//! Scope for M1:
+//! Scope for M1 (+M2):
 //!   - Enumerate modes via the existing loader.
 //!   - Render the bar (active mode tinted, inactive muted, hover bg, tooltip).
-//!   - On click, log "would switch to mode {id}" — actually reconfiguring the
-//!     dock layout (apply_layout) is M2.
+//!   - On click, switch the workspace to that mode — apply its dock layout via
+//!     `workspace_mode_switcher::switch_to_mode` (M2).
 //!
 //! Gated on `agent.workspace_modes` — when false the bar is never instantiated
 //! and the workspace render is byte-identical to stock Zed.
@@ -19,10 +19,12 @@ use std::str::FromStr;
 
 use gpui::{
     AnyElement, Context, Entity, Hsla, IntoElement, MouseButton, ParentElement, Rgba,
-    SharedString, Styled, Window, div, prelude::FluentBuilder, rgb,
+    SharedString, Styled, WeakEntity, Window, div, prelude::FluentBuilder, rgb,
 };
 use ui::{Color, Icon, IconName, IconSize, Tooltip, h_flex, prelude::*, v_flex};
+use workspace::Workspace;
 
+use crate::workspace_mode_switcher;
 use crate::workspace_modes::{PinnedPosition, WorkspaceMode, load_modes_from_dir};
 
 /// Fixed width of the activity bar in pixels. Mirrors VSCode (48 px) — see
@@ -47,6 +49,10 @@ pub struct ActivityBar {
     /// the configured default — in that case the first non-bottom-pinned
     /// mode is highlighted as a soft fallback.
     active_mode_id: String,
+    /// Weak handle to the hosting workspace, used by the M2 switcher to apply
+    /// a mode's dock layout on click. `None` in unit tests that exercise the
+    /// bar without a workspace — clicks then only update the highlight.
+    workspace: Option<WeakEntity<Workspace>>,
 }
 
 impl ActivityBar {
@@ -56,6 +62,7 @@ impl ActivityBar {
     pub fn new(
         modes_dir: PathBuf,
         default_mode: impl Into<String>,
+        workspace: Option<WeakEntity<Workspace>>,
         _cx: &mut Context<Self>,
     ) -> Self {
         let modes = load_modes_from_dir(&modes_dir);
@@ -63,6 +70,7 @@ impl ActivityBar {
         Self {
             modes,
             active_mode_id,
+            workspace,
         }
     }
 
@@ -246,14 +254,27 @@ fn render_mode_icon(
         .tooltip(move |_window, cx| Tooltip::simple(tooltip_text.clone(), cx))
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |this, _ev, _window, cx| {
-                // M1: log intent only. M2 will dispatch a SwitchModeAction
-                // and call apply_layout on the workspace.
-                log::info!(
-                    "activity_bar: click on mode '{}' — would switch (M2 TODO)",
-                    mode_id_for_click
-                );
+            cx.listener(move |this, _ev, window, cx| {
                 this.set_active(mode_id_for_click.clone(), cx);
+                // M2: apply the mode's dock layout on the hosting workspace.
+                let Some(mode) = this
+                    .modes
+                    .iter()
+                    .find(|m| m.id == mode_id_for_click)
+                    .cloned()
+                else {
+                    return;
+                };
+                let Some(workspace) = this.workspace.as_ref().and_then(|w| w.upgrade()) else {
+                    log::warn!(
+                        "activity_bar: no workspace handle — cannot apply mode '{}'",
+                        mode.id
+                    );
+                    return;
+                };
+                workspace.update(cx, |workspace, cx| {
+                    workspace_mode_switcher::switch_to_mode(&mode, workspace, window, cx);
+                });
             }),
         )
 }
@@ -265,11 +286,12 @@ pub fn build_activity_bar(
     workspace_root: PathBuf,
     modes_dir_override: Option<PathBuf>,
     default_mode: impl Into<String>,
+    workspace: WeakEntity<Workspace>,
     cx: &mut gpui::App,
 ) -> Entity<ActivityBar> {
     let modes_dir = modes_dir_override.unwrap_or_else(|| workspace_root.join(".agents/modes"));
     let default_mode = default_mode.into();
-    cx.new(|cx| ActivityBar::new(modes_dir, default_mode, cx))
+    cx.new(|cx| ActivityBar::new(modes_dir, default_mode, Some(workspace), cx))
 }
 
 #[cfg(test)]
@@ -388,7 +410,7 @@ mod tests {
 
         cx.update(|cx| {
             let entity = cx.new(|cx| {
-                ActivityBar::new(modes_dir.clone(), "nonexistent-mode".to_string(), cx)
+                ActivityBar::new(modes_dir.clone(), "nonexistent-mode".to_string(), None, cx)
             });
             entity.update(cx, |bar, _cx| {
                 // No mode matches "nonexistent-mode", so the bar falls back
@@ -408,8 +430,9 @@ mod tests {
         write_mode(&modes_dir, "symphony", "AiOpenAi", None);
 
         cx.update(|cx| {
-            let entity =
-                cx.new(|cx| ActivityBar::new(modes_dir.clone(), "orchestrator".to_string(), cx));
+            let entity = cx.new(|cx| {
+                ActivityBar::new(modes_dir.clone(), "orchestrator".to_string(), None, cx)
+            });
             entity.update(cx, |bar, cx| {
                 assert_eq!(bar.active_mode_id(), "orchestrator");
                 bar.set_active("symphony", cx);

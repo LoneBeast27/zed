@@ -30,6 +30,11 @@ pub struct WorkspaceMode {
     pub default_keybinding: Option<String>,
     #[serde(default)]
     pub pinned_position: Option<PinnedPosition>,
+    /// URL opened in the system default browser when switching to this mode
+    /// (M2). Used by web-surface modes (e.g. `browser` → the task-board /
+    /// scraper twin at `http://127.0.0.1:4530`).
+    #[serde(default)]
+    pub open_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +159,7 @@ mod tests {
             layout: HashMap::new(),
             default_keybinding: None,
             pinned_position: pin,
+            open_url: None,
         }
     }
 
@@ -195,6 +201,27 @@ mod tests {
         // visible defaults to true when missing
         let layout = mode.layout.get("center_dock").unwrap();
         assert!(layout.visible);
+        // open_url defaults to None when absent.
+        assert_eq!(mode.open_url, None);
+    }
+
+    #[test]
+    fn parses_open_url_field() {
+        // The `browser` mode (PRD_V2 §6) carries an `open_url` that the M2
+        // switcher opens in the system default browser on mode switch.
+        let json = r#"{
+            "schema_version": 1,
+            "id": "browser",
+            "display_name": "Browser",
+            "description": "Web surface",
+            "icon": "ToolWeb",
+            "accent_color_hex": "4285F4",
+            "layout": {},
+            "open_url": "http://127.0.0.1:4530"
+        }"#;
+        let mode: WorkspaceMode = serde_json::from_str(json).unwrap();
+        assert_eq!(mode.id, "browser");
+        assert_eq!(mode.open_url.as_deref(), Some("http://127.0.0.1:4530"));
     }
 
     #[test]
