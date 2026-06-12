@@ -53,6 +53,11 @@ pub struct TaskBoardPanel {
     /// The graph's `seenRuns` (run id → first graph render), driving
     /// fresh-node spawn + edge draw-in exactly once per run.
     graph_seen: std::collections::HashMap<SharedString, std::time::Instant>,
+    /// The inbox twin: run id → first board appearance. Rows attach their
+    /// `.rise` animation only inside the fresh window, so a row scrolling
+    /// back into the uniform_list viewport never replays its entrance
+    /// (element state drops on cull; this map persists outside it).
+    inbox_seen: std::collections::HashMap<SharedString, std::time::Instant>,
     /// The open run drawer, if any (right slide-over).
     drawer: Option<Entity<run_detail::RunDrawer>>,
     /// Seg-toggle 150ms state crossfade (web `.seg-toggle button` transition).
@@ -75,6 +80,7 @@ impl TaskBoardPanel {
             view: BoardView::Graph,
             position: DockPosition::Left,
             graph_seen: std::collections::HashMap::new(),
+            inbox_seen: std::collections::HashMap::new(),
             drawer: None,
             view_fade: StateFade::default(),
             hovered_row: None,
@@ -272,7 +278,13 @@ impl Render for TaskBoardPanel {
                         .as_ref()
                         .map(|(id, fade)| (id.clone(), fade.fresh())),
                 };
-                inbox::inbox_list(std::sync::Arc::new(rows), hover, cx.weak_entity(), cx)
+                inbox::inbox_list(
+                    std::sync::Arc::new(rows),
+                    &mut self.inbox_seen,
+                    hover,
+                    cx.weak_entity(),
+                    cx,
+                )
             }
             BoardView::Graph => {
                 let weak = cx.weak_entity();

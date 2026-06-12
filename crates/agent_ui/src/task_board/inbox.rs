@@ -7,7 +7,9 @@
 //! reconciliation (§5.6): hover state survives ticks and the running pill's
 //! pulse never restarts.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ElementId, FontWeight, SharedString,
@@ -28,6 +30,13 @@ use super::style::{ElapsedReveal, chip_reason, rel, status_pill};
 /// sub-line 13px ≈ 72px), required uniform for `uniform_list`.
 const ROW_HEIGHT: f32 = 72.;
 
+/// How long a run counts as fresh after first appearing on the board: the
+/// 300ms `.rise` plus margin. Outside the window rows render bare, so a row
+/// scrolled out of the uniform_list viewport (element state dropped) and
+/// back in can never replay its entrance — the web equivalent is the keyed
+/// DOM node persisting after `.rise` finished at creation.
+const RISE_WINDOW: Duration = Duration::from_millis(600);
+
 /// Snapshot of the panel's tracked row hover, handed to the row builders:
 /// `(run_id, crossfade-window-open)` for the hovered row and for the row
 /// that most recently lost hover (its 150ms fade-out).
@@ -38,22 +47,42 @@ pub struct RowHoverState {
 }
 
 /// Builds the virtualized inbox list. `rows` arrive newest-activity-first
-/// (the caller reverses the board, mirroring `board.js`).
+/// (the caller reverses the board, mirroring `board.js`). `seen` is the
+/// panel-owned first-appearance map driving one-shot `.rise` entrances.
 pub fn inbox_list(
     rows: Arc<Vec<RunRow>>,
+    seen: &mut HashMap<SharedString, Instant>,
     hover: RowHoverState,
     panel: WeakEntity<TaskBoardPanel>,
     cx: &App,
 ) -> AnyElement {
     if rows.is_empty() {
+        seen.clear();
         return empty_inbox(cx).into_any_element();
     }
+    // Stamp first sight at board-arrival time (not first viewport render),
+    // matching the web where `.rise` fires at node creation; prune the gone.
+    let now = Instant::now();
+    let fresh: Arc<Vec<bool>> = Arc::new(
+        rows.iter()
+            .map(|run| {
+                let first_seen = *seen
+                    .entry(SharedString::from(run.run_id.clone()))
+                    .or_insert(now);
+                now.duration_since(first_seen) < RISE_WINDOW
+            })
+            .collect(),
+    );
+    let live: std::collections::HashSet<&str> =
+        rows.iter().map(|run| run.run_id.as_str()).collect();
+    seen.retain(|run_id, _| live.contains(run_id.as_ref()));
+
     uniform_list(
         "task-board-inbox",
         rows.len(),
         move |range, _window, cx| {
             range
-                .map(|ix| inbox_row(&rows[ix], &hover, panel.clone(), cx))
+                .map(|ix| inbox_row(&rows[ix], fresh[ix], &hover, panel.clone(), cx))
                 .collect()
         },
     )
@@ -67,6 +96,7 @@ pub fn inbox_list(
 /// agent chip/reason sub-line · badge slot + relative time.
 fn inbox_row(
     run: &RunRow,
+    rise_fresh: bool,
     hover: &RowHoverState,
     panel: WeakEntity<TaskBoardPanel>,
     cx: &mut App,
@@ -231,10 +261,13 @@ fn inbox_row(
         row.into_any_element()
     };
 
-    // `.rise` entrance (web: `.3s var(--decel-curve)`) — one-shot per run
-    // identity (keyed by run id), so a tick never restarts it (the web
-    // `seenRuns`/keyed-DOM equivalent). Wraps outside the bg fade so the
-    // two animations compose.
+    // `.rise` entrance (web: `.3s var(--decel-curve)`) — attached only
+    // inside the panel-owned fresh window, so scroll culling (which drops
+    // GPUI element state) can never replay it; settled rows render bare.
+    // Wraps outside the bg fade so the two animations compose.
+    if !rise_fresh {
+        return row;
+    }
     div()
         .w_full()
         .h(px(ROW_HEIGHT))
