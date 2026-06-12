@@ -34,15 +34,16 @@ pub fn rel(seconds: f64) -> String {
     }
 }
 
-/// `statusLabel()` from board.js — pill text.
-pub fn status_label(status: &str) -> &'static str {
+/// `statusLabel()` from board.js — pill text (unknown statuses fall back to
+/// the raw status string, like the web).
+pub fn status_label(status: &str) -> String {
     match status {
-        "running" => "Running",
-        "completed" => "Done",
-        "failed" => "Blocked",
-        "killed" => "Killed",
-        "pending" | "idle" => "Idle",
-        _ => "—",
+        "running" => "Running".to_string(),
+        "completed" => "Done".to_string(),
+        "failed" => "Blocked".to_string(),
+        "killed" => "Killed".to_string(),
+        "pending" | "idle" => "Idle".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -117,7 +118,7 @@ pub fn status_pill(
         .font_weight(FontWeight::MEDIUM)
         .text_color(color)
         .children(dot)
-        .child(SharedString::from(status_label(status).to_string()))
+        .child(SharedString::from(status_label(status)))
         .when_some(elapsed, |this, elapsed| {
             // `.pill-elapsed` — compact↔extended island segment, revealed on
             // row hover (the inbox row carries `.group("inbox-row")`).
