@@ -23,7 +23,7 @@ use crate::agent_accents::accent_for_agent;
 use crate::bridge::{BRIDGE_BASE_URL, fetch_json};
 
 use super::motion::{DECEL, EFFECTS, STATE_FADE, StateFade, mix};
-use super::style::{HAIRLINE_HI, chip_reason, rel, status_pill};
+use super::style::{HAIRLINE_HI, raw_status_pill, rel, route_reason};
 
 /// Logs tail-poll cadence while the run is live (web: 1s).
 const LOG_POLL: Duration = Duration::from_secs(1);
@@ -236,10 +236,9 @@ impl RunDrawer {
         } else {
             detail.agent.clone()
         };
-        let reason = {
-            let r = chip_reason(detail.chip.as_deref(), &agent);
-            if r.is_empty() { "routed".to_string() } else { r }
-        };
+        // drawer.js:51-54 `routeReason` — plain second chip segment, NO
+        // forced-@agent rewrite (that vocabulary belongs to the inbox chip).
+        let reason = route_reason(detail.chip.as_deref());
         h_flex()
             .flex_none()
             .items_center()
@@ -277,7 +276,9 @@ impl RunDrawer {
                             ))),
                     ),
             )
-            .child(status_pill("drawer-pill", &detail.status, None, cx))
+            // Raw lowercase status — the web drawer's vocabulary
+            // (drawer.js:37-38), distinct from the inbox's `statusLabel`.
+            .child(raw_status_pill("drawer-pill", &detail.status, cx))
             .child(self.render_close(cx))
     }
 

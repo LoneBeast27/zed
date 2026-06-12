@@ -78,6 +78,23 @@ pub fn status_phrase(status: &str, elapsed_s: f64) -> String {
     }
 }
 
+/// `routeReason()` from drawer.js — the drawer meta line's second chip
+/// segment, WITHOUT the forced-@agent rewrite (the drawer runs the raw
+/// vocabulary), falling back to "routed".
+pub fn route_reason(chip: Option<&str>) -> String {
+    let reason = chip
+        .unwrap_or_default()
+        .split('·')
+        .map(str::trim)
+        .nth(1)
+        .unwrap_or("");
+    if reason.is_empty() {
+        "routed".to_string()
+    } else {
+        reason.to_string()
+    }
+}
+
 /// `chipReason()` from app.js — routing chip is `agent · reason · conf%`;
 /// "forced target"/"user override" reasons rewrite to `forced @agent`.
 pub fn chip_reason(chip: Option<&str>, agent: &str) -> String {
@@ -114,11 +131,30 @@ pub struct ElapsedReveal {
     pub fresh: bool,
 }
 
-/// The `.pill` element: status-colored label (+ pulsing dot while running,
-/// + optional elapsed segment). 11px/500, full-round, 12%-tinted fill.
+/// The `.pill` element with the inbox vocabulary (`statusLabel()`:
+/// "Running"/"Done"/…). 11px/500, full-round, 12%-tinted fill.
 pub fn status_pill(
     id: impl Into<ElementId>,
     status: &str,
+    elapsed: Option<ElapsedReveal>,
+    cx: &App,
+) -> Stateful<Div> {
+    pill_with_label(id, status, status_label(status), elapsed, cx)
+}
+
+/// The drawer's pill: RAW lowercase status text (drawer.js:37-38 — the web
+/// deliberately runs two vocabularies, capitalized inbox labels vs raw
+/// drawer status).
+pub fn raw_status_pill(id: impl Into<ElementId>, status: &str, cx: &App) -> Stateful<Div> {
+    pill_with_label(id, status, status.to_string(), None, cx)
+}
+
+/// Shared `.pill` builder: status-colored label (+ pulsing dot while
+/// running, + optional elapsed segment).
+fn pill_with_label(
+    id: impl Into<ElementId>,
+    status: &str,
+    label: String,
     elapsed: Option<ElapsedReveal>,
     cx: &App,
 ) -> Stateful<Div> {
@@ -156,7 +192,7 @@ pub fn status_pill(
         .font_features(tabular_nums())
         .text_color(color)
         .children(dot)
-        .child(SharedString::from(status_label(status)))
+        .child(SharedString::from(label))
         .when_some(elapsed, |this, reveal| {
             // `.pill-elapsed` — collapsed (absent) at rest, revealed on
             // tracked row hover with a 120ms effects opacity fade.
@@ -260,6 +296,22 @@ mod tests {
         assert_eq!(status_phrase("failed", 10.0), "Blocked · 10s");
         assert_eq!(status_phrase("killed", 10.0), "Killed");
         assert_eq!(status_phrase("pending", 0.0), "Queued");
+    }
+
+    #[test]
+    fn route_reason_extracts_without_rewrite() {
+        // drawer.js: `segs[1] || "routed"` — NO forced-@agent rewrite.
+        assert_eq!(
+            route_reason(Some("claude · code-heavy task · 92%")),
+            "code-heavy task"
+        );
+        assert_eq!(
+            route_reason(Some("codex · Forced target · 100%")),
+            "Forced target"
+        );
+        assert_eq!(route_reason(Some("gemini · user override")), "user override");
+        assert_eq!(route_reason(None), "routed");
+        assert_eq!(route_reason(Some("solo")), "routed");
     }
 
     #[test]
