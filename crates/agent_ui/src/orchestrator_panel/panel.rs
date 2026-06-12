@@ -312,7 +312,7 @@ impl OrchestratorPanel {
 impl Render for OrchestratorPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
-        v_flex()
+        let panel = v_flex()
             .key_context("OrchestratorPanel")
             .track_focus(&self.focus_handle)
             .size_full()
@@ -326,7 +326,16 @@ impl Render for OrchestratorPanel {
                     .pb(px(8.))
                     .child(self.render_body(cx)),
             )
-            .child(self.render_composer(window, cx))
+            .child(self.render_composer(window, cx));
+        // The single frame pump for every Instant-clocked motion value the
+        // panel renders bare (the §8.7a stable-identity rule: animated
+        // styles read `current()` per frame instead of riding identity-
+        // churning animation wrappers). Settled frames schedule nothing
+        // (§8 idle cost).
+        if self.tasks_island.visible() && self.tasks_island.any_animating() {
+            window.request_animation_frame();
+        }
+        panel
     }
 }
 

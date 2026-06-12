@@ -21,7 +21,7 @@
 use std::time::Duration;
 
 use db::kvp::KeyValueStore;
-use gpui::{Animation, AnimationExt as _, AnyElement, App, SharedString, Task};
+use gpui::{AnyElement, App, SharedString, Task};
 use ui::CommonAnimationExt as _;
 use ui::prelude::*;
 
@@ -265,6 +265,17 @@ fn spinner(id: impl Into<ElementId>) -> AnyElement {
 
 /// The island element: head + rows inside the emergence wrapper. Rendered
 /// by the orchestrator panel inside the composer column, above the deck.
+///
+/// Identity rule (§8.7a / Z3 fix #4): the element tree here is the SAME
+/// SHAPE whether settled or mid-morph — every animated style reads its
+/// Instant-clocked value's `current()` directly (settled values return
+/// their target), and the frame pump is the panel's single
+/// `request_animation_frame` (armed off [`TasksIsland::any_animating`]).
+/// gpui keys element state (incl. each spinner's rotate-start Instant) by
+/// the FULL ancestor-id path, so generation-keyed animation wrappers that
+/// appear/disappear around the rows or the island would snap every spinner
+/// phase to 0° on each toggle/settle — the web's infinite CSS animation on
+/// persistent DOM nodes never resets.
 pub fn render_tasks_island(
     island: &TasksIsland,
     cx: &mut gpui::Context<OrchestratorPanel>,
@@ -277,53 +288,41 @@ pub fn render_tasks_island(
     );
 
     // ── head: spinner + count + chevron (down⇄up stacked-glyph crossfade
-    //    — the web rotates 180°; see the `chev` field note) ──
-    let chevron: AnyElement = {
-        let stacked = |flip: f32| {
-            div()
-                .relative()
-                .size(px(16.))
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .opacity(1. - flip)
-                        .child(
-                            Icon::new(IconName::ChevronDown)
-                                .size(IconSize::Small)
-                                .color(Color::Placeholder),
-                        ),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .opacity(flip)
-                        .child(
-                            Icon::new(IconName::ChevronUp)
-                                .size(IconSize::Small)
-                                .color(Color::Placeholder),
-                        ),
-                )
-        };
-        if island.chev.animating() {
-            let chev = island.chev.clone();
-            div()
-                .with_animation(
-                    ElementId::NamedInteger("ti-chev".into(), island.chev.generation() as u64),
-                    Animation::new(CHEV_MORPH),
-                    move |wrap, _| wrap.child(stacked(chev.current().clamp(0., 1.))),
-                )
-                .into_any_element()
-        } else {
-            stacked(island.chev.target()).into_any_element()
-        }
+    //    — the web rotates 180°; see the `chev` field note). The flip
+    //    scalar is read per frame; no wrapper, no identity churn. ──
+    let chevron = {
+        let flip = island.chev.current().clamp(0., 1.);
+        div()
+            .relative()
+            .size(px(18.))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(1. - flip)
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .size(IconSize::Custom(rems_from_px(18.)))
+                            .color(Color::Placeholder),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(flip)
+                    .child(
+                        Icon::new(IconName::ChevronUp)
+                            .size(IconSize::Custom(rems_from_px(18.)))
+                            .color(Color::Placeholder),
+                    ),
+            )
     };
     let head = h_flex()
         .id("ti-head")
@@ -373,22 +372,18 @@ pub fn render_tasks_island(
             .child(spinner(ElementId::Name(format!("ti-spin-{run_id}").into())))
             .child(div().min_w_0().truncate().child(label.clone()))
     });
-    let rows_open = island.open;
+    // ONE stable id ("ti-rows") across the morph and the settled-open
+    // state, so each row spinner's rotate phase survives the expand/
+    // collapse morph and its settle. Rows still leave the tree entirely
+    // when settled-closed (§8 idle cost — ledgered divergence #12).
     let rows_body: AnyElement = if island.rows_reveal.animating() {
-        let reveal = island.rows_reveal.clone();
         v_flex()
+            .id("ti-rows")
             .overflow_hidden()
+            .max_h(px((ROWS_MAX_H * island.rows_reveal.current()).max(0.)))
             .children(rows)
-            .with_animation(
-                ElementId::NamedInteger(
-                    "ti-rows-morph".into(),
-                    island.rows_reveal.generation() as u64,
-                ),
-                Animation::new(ROWS_MORPH),
-                move |body, _| body.max_h(px((ROWS_MAX_H * reveal.current()).max(0.))),
-            )
             .into_any_element()
-    } else if rows_open {
+    } else if island.open {
         v_flex()
             .id("ti-rows")
             .max_h(px(ROWS_MAX_H))
@@ -399,164 +394,28 @@ pub fn render_tasks_island(
         gpui::Empty.into_any_element()
     };
 
-    // ── container + the §4.9 emergence wrapper ──
-    let container = v_flex()
-        .w_full()
-        .rounded(px(14.))
-        .bg(SURFACE_FLOAT)
-        .border_1()
-        .border_color(HAIRLINE_HI)
-        .overflow_hidden()
-        .child(head)
-        .child(rows_body);
-
-    if island.emerge.animating() || island.fade.animating() {
-        let (emerge, fade) = (island.emerge.clone(), island.fade.clone());
-        let generation =
-            (island.emerge.generation() as u64) << 8 ^ island.fade.generation() as u64;
-        // Frame pump over the Instant-clocked pair: translate toward/away
-        // from the composer anchor below while opacity crossfades
-        // concurrently (geometry + opacity from frame one, §4.9).
-        div()
-            .child(container)
-            .with_animation(
-                ElementId::NamedInteger("ti-emerge".into(), generation),
-                Animation::new(EMERGE),
-                move |wrap, _| {
-                    let offset = TUCK * emerge.current();
-                    wrap.mt(px(offset))
-                        .mb(px(ANCHOR_GAP - offset))
-                        .opacity(fade.current().clamp(0., 1.))
-                },
-            )
-            .into_any_element()
-    } else {
-        let offset = TUCK * island.emerge.target();
-        div()
-            .mt(px(offset))
-            .mb(px(ANCHOR_GAP - offset))
-            .opacity(island.fade.target())
-            .child(container)
-            .into_any_element()
-    }
+    // ── container + the §4.9 emergence pose, read per frame: translate
+    //    toward/away from the composer anchor below while opacity
+    //    crossfades concurrently (geometry + opacity from frame one) ──
+    let offset = TUCK * island.emerge.current();
+    div()
+        .mt(px(offset))
+        .mb(px(ANCHOR_GAP - offset))
+        .opacity(island.fade.current().clamp(0., 1.))
+        .child(
+            v_flex()
+                .w_full()
+                .rounded(px(14.))
+                .bg(SURFACE_FLOAT)
+                .border_1()
+                .border_color(HAIRLINE_HI)
+                .overflow_hidden()
+                .child(head)
+                .child(rows_body),
+        )
+        .into_any_element()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A bare island (no `db::kvp` global needed — the pure lifecycle
-    /// under test never touches persistence).
-    fn island() -> TasksIsland {
-        TasksIsland {
-            open: false,
-            visible: false,
-            emerge: AnimatedValue::settled(1., DECEL, EMERGE),
-            fade: AnimatedValue::settled(0., EFFECTS, FADE),
-            rows_reveal: AnimatedValue::settled(0., SPATIAL, ROWS_MORPH),
-            chev: AnimatedValue::settled(0., SPATIAL, CHEV_MORPH),
-            retracting: false,
-            hide_task: None,
-            rows: Vec::new(),
-        }
-    }
-
-    fn rows(ids: &[&str]) -> Vec<(SharedString, SharedString)> {
-        ids.iter()
-            .map(|id| (SharedString::from(id.to_string()), SharedString::from("t")))
-            .collect()
-    }
-
-    #[test]
-    fn retract_freezes_the_last_snapshot_and_clears_only_at_hide_commit() {
-        let mut island = island();
-        let outcome = island.ingest(rows(&["r-1", "r-2"]));
-        assert!(outcome.changed && !outcome.start_retract);
-        assert!(island.visible);
-        assert_eq!(island.rows.len(), 2);
-
-        // Runs hit 0 → the retract begins; the LAST representation stays
-        // frozen — the head must never read "0 subagent/tasks running"
-        // over empty rows during the 400ms exit.
-        let outcome = island.ingest(Vec::new());
-        assert!(outcome.changed && outcome.start_retract);
-        assert!(island.visible, "still in flow through the 400ms exit");
-        assert!(island.retracting);
-        assert_eq!(
-            island.rows.len(),
-            2,
-            "content keeps the last snapshot through the retract — no '0 running' flash"
-        );
-
-        // Further empty ticks mid-retract neither restart the exit nor
-        // wipe the frozen snapshot.
-        let outcome = island.ingest(Vec::new());
-        assert!(!outcome.changed && !outcome.start_retract);
-        assert_eq!(island.rows.len(), 2);
-
-        // The 400ms clock lands → only NOW the island leaves the flow and
-        // the snapshot clears.
-        assert!(island.commit_hide());
-        assert!(!island.visible);
-        assert!(!island.retracting);
-        assert!(island.rows.is_empty());
-    }
-
-    #[test]
-    fn mid_retract_arrival_cancels_the_hide_and_a_stale_clock_is_a_no_op() {
-        let mut island = island();
-        island.ingest(rows(&["r-1"]));
-        island.ingest(Vec::new());
-        assert!(island.retracting);
-
-        // A run arrives MID-retract: the island re-emerges with the fresh
-        // set; the pending hide is cancelled.
-        let outcome = island.ingest(rows(&["r-2"]));
-        assert!(outcome.changed && !outcome.start_retract);
-        assert!(!island.retracting);
-        assert!(island.visible);
-        assert_eq!(island.rows, rows(&["r-2"]));
-
-        // A stale clock that somehow still fires commits nothing.
-        assert!(!island.commit_hide());
-        assert!(island.visible);
-        assert_eq!(island.rows, rows(&["r-2"]));
-    }
-
-    fn run(id: &str, status: &str, task: Option<&str>, agent: &str) -> RunRow {
-        RunRow {
-            run_id: id.to_string(),
-            status: status.to_string(),
-            task: task.map(str::to_string),
-            agent: agent.to_string(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn rows_filter_running_and_fall_back_task_agent_task() {
-        let board = vec![
-            run("r-1", "running", Some("port wave Z3"), "claude"),
-            run("r-2", "completed", Some("done thing"), "codex"),
-            run("r-3", "running", None, "codex"),
-            run("r-4", "running", Some(""), "gemini"),
-            run("r-5", "running", None, ""),
-            run("r-6", "pending", None, "agy"),
-        ];
-        let rows = running_rows(&board);
-        let shaped: Vec<(&str, &str)> = rows
-            .iter()
-            .map(|(id, label)| (id.as_ref(), label.as_ref()))
-            .collect();
-        assert_eq!(
-            shaped,
-            [
-                ("r-1", "port wave Z3"), // task wins
-                ("r-3", "codex"),        // no task -> agent
-                ("r-4", "gemini"),       // empty task -> agent (JS falsy "")
-                ("r-5", "task"),         // nothing -> "task"
-            ],
-            "running-only, board order, task || agent || 'task' labels"
-        );
-    }
-}
+#[path = "tasks_island_tests.rs"]
+mod tests;
