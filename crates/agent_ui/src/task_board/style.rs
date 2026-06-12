@@ -51,6 +51,30 @@ pub fn rel(seconds: f64) -> String {
     }
 }
 
+/// `ago()` from app.js — relative wall-clock age for a unix-seconds ts
+/// ("now", "5m", "3h", "2d"). Shared by the chat meta row + sidebar rows.
+pub fn ago(ts: f64, now_unix: f64) -> String {
+    let d = now_unix - ts;
+    if d < 120.0 {
+        "now".to_string()
+    } else if d < 5400.0 {
+        format!("{}m", (d / 60.0).round() as i64)
+    } else if d < 90000.0 {
+        format!("{}h", (d / 3600.0).round() as i64)
+    } else {
+        format!("{}d", (d / 86400.0).round() as i64)
+    }
+}
+
+/// [`ago`] against the current system clock.
+pub fn ago_now(ts: f64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|epoch| epoch.as_secs_f64())
+        .unwrap_or(0.0);
+    ago(ts, now)
+}
+
 /// `statusLabel()` from board.js — pill text (unknown statuses fall back to
 /// the raw status string, like the web).
 pub fn status_label(status: &str) -> String {
@@ -286,6 +310,19 @@ mod tests {
         assert_eq!(rel(900.0), "15m");
         assert_eq!(rel(5400.0), "1.5h");
         assert_eq!(rel(-5.0), "0s");
+    }
+
+    #[test]
+    fn ago_matches_app_js_breakpoints() {
+        let now = 1_781_113_180.0;
+        assert_eq!(ago(now - 30.0, now), "now");
+        assert_eq!(ago(now - 119.0, now), "now");
+        assert_eq!(ago(now - 120.0, now), "2m");
+        assert_eq!(ago(now - 3600.0, now), "60m");
+        assert_eq!(ago(now - 5400.0, now), "2h"); // 1.5h rounds up like JS
+        assert_eq!(ago(now - 86400.0, now), "24h");
+        assert_eq!(ago(now - 90000.0, now), "1d");
+        assert_eq!(ago(now - 200000.0, now), "2d");
     }
 
     #[test]

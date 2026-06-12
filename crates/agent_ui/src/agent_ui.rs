@@ -30,6 +30,7 @@ mod mention_set;
 mod message_editor;
 mod mode_selector;
 mod model_selector;
+pub mod orchestrator_panel;
 mod model_selector_popover;
 mod profile_selector;
 mod resource_banner;
@@ -617,6 +618,21 @@ pub fn init(
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 workspace.toggle_panel_focus::<task_board::TaskBoardPanel>(window, cx);
+            },
+        );
+
+        // Z3 — the orchestrator chat panel, mounted so the `orchestrator`
+        // mode's layout can open it (same registration shape as the board).
+        let panel_workspace = cx.weak_entity();
+        let orchestrator =
+            cx.new(|cx| orchestrator_panel::OrchestratorPanel::new(panel_workspace, cx));
+        workspace.add_panel(orchestrator, window, cx);
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &orchestrator_panel::ToggleFocus,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                workspace.toggle_panel_focus::<orchestrator_panel::OrchestratorPanel>(window, cx);
             },
         );
 
