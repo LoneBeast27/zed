@@ -31,7 +31,7 @@ use workspace::Workspace;
 use crate::agent_accents::{STATUS_BLOCKED, STATUS_ERROR, accent_for_agent};
 use crate::bridge::{self, BridgeStore};
 use crate::task_board::TaskBoardPanel;
-use crate::task_board::motion::{DECEL, EFFECTS, SPATIAL, StateFade, exit_eval};
+use crate::task_board::motion::{AnimatedValue, DECEL, EFFECTS, MotionCurve, SPATIAL};
 use crate::task_board::style::{HAIRLINE_HI, SURFACE_1};
 
 use super::notif_logic::{
@@ -51,8 +51,7 @@ const FADE: Duration = Duration::from_millis(200);
 /// collapse 320ms (spatial) all start together; the slot is removed when
 /// the longest beat settles (web: `setTimeout(remove, 420)`).
 const RETRACT: Duration = Duration::from_millis(420);
-const RETRACT_SLIDE_MS: f32 = 400.;
-const RETRACT_FADE_MS: f32 = 200.;
+const RETRACT_SLIDE: Duration = Duration::from_millis(400);
 const RETRACT_COLLAPSE_MS: f32 = 320.;
 /// Slide overscan past the anchor edge (§4.9 emergence primitive).
 const OVERSCAN: f32 = 5.;
@@ -68,18 +67,28 @@ struct Toast {
     title: SharedString,
     agent: String,
     run_id: Option<SharedString>,
-    surfaced_at: Instant,
+    /// The §4.9 emergence scalar (web `--emerge`: 1 = tucked past the right
+    /// edge, 0 = fully out), ONE retargetable value reused by both
+    /// directions — DECEL/500ms in, exit-spline/400ms out — so a mid-emerge
+    /// dismiss continues from the CURRENT offset instead of snapping to
+    /// fully-emerged first (§8.7a).
+    slide: AnimatedValue,
+    /// Concurrent opacity crossfade (EFFECTS/200ms both directions),
+    /// retargetable for the same interrupt continuity.
+    fade: AnimatedValue,
     /// Hover-pausable expiry bookkeeping + the live timer task.
     expire: super::notif_logic::ExpireTimer,
     expire_task: Option<Task<()>>,
-    /// `Some(started)` while retracting (slide-out + slot collapse).
+    /// `Some(started)` while retracting (slot collapse + removal clock).
     retracting: Option<Instant>,
     /// Height frozen at retract start — the collapse animates it to 0.
     retract_from_h: f32,
     /// Canvas-captured painted height (kept current every frame).
     measured_h: f32,
     hovered: bool,
-    hover_fade: StateFade,
+    /// Dismiss-× reveal opacity — retargetable so a quick hover-out
+    /// reverses from the current opacity, not the opposite endpoint.
+    x_reveal: AnimatedValue,
 }
 
 pub struct NotifStack {
@@ -139,6 +148,12 @@ impl NotifStack {
             return false;
         }
         let id = SharedString::from(payload.id);
+        // §4.9 emergence: slide in from past the edge (1 → 0) on decel-in
+        // while opacity rises on effects — concurrent from frame one.
+        let mut slide = AnimatedValue::settled(1.0, DECEL, EMERGE);
+        slide.retarget(0.0);
+        let mut fade = AnimatedValue::settled(0.0, EFFECTS, FADE);
+        fade.retarget(1.0);
         self.toasts.insert(
             0,
             Toast {
@@ -147,14 +162,15 @@ impl NotifStack {
                 title: SharedString::from(payload.title),
                 agent: payload.agent,
                 run_id: payload.run_id.map(SharedString::from),
-                surfaced_at: Instant::now(),
+                slide,
+                fade,
                 expire: super::notif_logic::ExpireTimer::armed(TOAST_TIMEOUT),
                 expire_task: None,
                 retracting: None,
                 retract_from_h: FALLBACK_H,
                 measured_h: FALLBACK_H,
                 hovered: false,
-                hover_fade: StateFade::default(),
+                x_reveal: AnimatedValue::settled(0.0, EFFECTS, X_REVEAL),
             },
         );
         self.arm_expire(&id, cx);
@@ -191,9 +207,11 @@ impl NotifStack {
         }));
     }
 
-    /// The 3-beat retract: freeze the measured slot height, start the
-    /// slide/fade/collapse (one animation key — beats are concurrent), and
-    /// remove the slot when the envelope settles.
+    /// The 3-beat retract: freeze the measured slot height, retarget the
+    /// emergence pair onto the sharper exit (continuing from the CURRENT
+    /// offset/opacity — a mid-emerge dismiss never snaps to fully-emerged
+    /// first, §8.7a), start the slot collapse, and remove the slot when the
+    /// envelope settles. All three beats start the same frame.
     fn retract(&mut self, id: &SharedString, cx: &mut Context<Self>) {
         let Some(toast) = self.toast_mut(id) else {
             return;
@@ -203,6 +221,10 @@ impl NotifStack {
         }
         toast.retract_from_h = toast.measured_h.max(1.);
         toast.retracting = Some(Instant::now());
+        toast
+            .slide
+            .retarget_with(1.0, MotionCurve::Exit, RETRACT_SLIDE);
+        toast.fade.retarget(0.0);
         toast.expire_task = None;
         let id = id.clone();
         cx.spawn(async move |this, cx| {
@@ -227,7 +249,9 @@ impl NotifStack {
             return;
         }
         toast.hovered = hovered;
-        toast.hover_fade.bump();
+        // Retargetable reveal: a quick hover-out mid-fade reverses from the
+        // current opacity (web: a plain CSS opacity transition).
+        toast.x_reveal.retarget(if hovered { 1.0 } else { 0.0 });
         if hovered {
             toast.expire.pause();
             toast.expire_task = None;
@@ -354,7 +378,6 @@ impl NotifStack {
 
         let dismiss = {
             let id = id.clone();
-            let (from_o, to_o) = if toast.hovered { (0., 1.) } else { (1., 0.) };
             let base = div()
                 .id(ElementId::Name(format!("toast-x-{id}").into()))
                 .flex_none()
@@ -371,19 +394,21 @@ impl NotifStack {
                     this.retract(&id, cx);
                 }))
                 .child(Icon::new(IconName::Close).size(IconSize::Small));
-            // Hover-reveal ×: 140ms effects fade, settled states bare.
-            if toast.hover_fade.fresh() {
+            // Hover-reveal ×: 140ms effects fade (Instant-clocked — the
+            // wrapper is a frame pump), settled states bare.
+            if toast.x_reveal.animating() {
+                let reveal = toast.x_reveal.clone();
                 base.with_animation(
                     ElementId::NamedInteger(
                         format!("toast-x-fade-{}", toast.id).into(),
-                        toast.hover_fade.generation() as u64,
+                        toast.x_reveal.generation() as u64,
                     ),
-                    Animation::new(X_REVEAL).with_easing(EFFECTS.easing()),
-                    move |x, t| x.opacity(from_o + (to_o - from_o) * t),
+                    Animation::new(X_REVEAL),
+                    move |x, _| x.opacity(reveal.current()),
                 )
                 .into_any_element()
             } else {
-                base.opacity(to_o).into_any_element()
+                base.opacity(toast.x_reveal.target()).into_any_element()
             }
         };
 
@@ -436,37 +461,33 @@ impl NotifStack {
             .child(dismiss);
 
         // §4.9 emergence: translate from past the right edge (100% +
-        // overscan) on decel-in while opacity rises on effects — one clock,
-        // two property classes, concurrent from frame one. Retracting cards
-        // run the sharper exit instead (same dual-class shape).
-        if retracting {
+        // overscan) on decel-in while opacity rises on effects — concurrent
+        // from frame one. Retract retargets the SAME pair onto the sharper
+        // exit, so either direction continues from wherever the card is
+        // right now (mid-emerge dismiss included — §8.7a). The wrapper is a
+        // frame pump over the Instant-clocked values; its restarts re-base
+        // nothing.
+        if toast.slide.animating() || toast.fade.animating() {
+            let (slide, fade) = (toast.slide.clone(), toast.fade.clone());
+            let generation =
+                (toast.slide.generation() as u64) << 8 ^ (toast.fade.generation() as u64);
             card.with_animation(
-                ElementId::Name(format!("toast-slide-out-{id}").into()),
-                Animation::new(RETRACT),
-                move |card, t| {
-                    let ms = t * RETRACT.as_millis() as f32;
-                    let slide = exit_eval((ms / RETRACT_SLIDE_MS).min(1.));
-                    let fade = EFFECTS.eval((ms / RETRACT_FADE_MS).min(1.));
-                    let offset = slide * (STACK_W + OVERSCAN);
-                    card.ml(px(offset)).mr(px(-offset)).opacity(1. - fade)
-                },
-            )
-            .into_any_element()
-        } else if toast.surfaced_at.elapsed() < EMERGE + Duration::from_millis(20) {
-            card.with_animation(
-                ElementId::Name(format!("toast-emerge-{id}").into()),
+                ElementId::NamedInteger(format!("toast-motion-{id}").into(), generation),
                 Animation::new(EMERGE),
-                move |card, t| {
-                    let ms = t * EMERGE.as_millis() as f32;
-                    let slide = 1. - DECEL.eval(t);
-                    let fade = EFFECTS.eval((ms / FADE.as_millis() as f32).min(1.));
-                    let offset = slide * (STACK_W + OVERSCAN);
-                    card.ml(px(offset)).mr(px(-offset)).opacity(fade)
+                move |card, _| {
+                    let offset = slide.current() * (STACK_W + OVERSCAN);
+                    card.ml(px(offset))
+                        .mr(px(-offset))
+                        .opacity(fade.current().clamp(0., 1.))
                 },
             )
             .into_any_element()
         } else {
-            card.into_any_element()
+            let offset = toast.slide.target() * (STACK_W + OVERSCAN);
+            card.ml(px(offset))
+                .mr(px(-offset))
+                .opacity(toast.fade.target())
+                .into_any_element()
         }
     }
 }
