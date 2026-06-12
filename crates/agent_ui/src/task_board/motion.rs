@@ -18,8 +18,10 @@
 
 mod animated;
 mod curves;
+mod fades;
 
 pub use animated::{
     AnimatedColor, AnimatedValue, STATE_FADE, STATE_FADE_WINDOW, StateFade, mix,
 };
 pub use curves::{CubicBezier, DECEL, EFFECTS, EXIT_POINTS, MotionCurve, SPATIAL, exit_eval};
+pub use fades::StateFades;

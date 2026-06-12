@@ -13,7 +13,7 @@ use ui::prelude::*;
 
 use crate::agent_accents::accent_for_agent;
 use crate::bridge::TranscriptRun;
-use crate::task_board::motion::{DECEL, EFFECTS};
+use crate::task_board::motion::{DECEL, EFFECTS, STATE_FADE, StateFades, mix};
 use crate::task_board::style::{HAIRLINE_HI, SURFACE_1, ago_now, chip_reason, rel, tabular_nums};
 use markdown::MarkdownElement;
 
@@ -25,6 +25,12 @@ const RISE: Duration = Duration::from_millis(300);
 /// The newest agent block's one-shot streaming fade (the idiom ruling).
 const STREAM_FADE: Duration = Duration::from_millis(200);
 
+/// The tracked-hover key for a message's meta-trio reveal (also the agent
+/// block's element id).
+fn msg_hover_id(ix: usize) -> ElementId {
+    ElementId::NamedInteger("msg-agent".into(), ix as u64)
+}
+
 /// One transcript list item. `live` rides only on a trailing agent reply
 /// while busy (the rolling worked-for tick — its label renders
 /// `worked_s + seen_at.elapsed()` on the panel's 1s ticker).
@@ -32,7 +38,7 @@ pub(super) fn render_message(
     view: &MessageView,
     ix: usize,
     live: bool,
-    hover: (bool, bool),
+    fades: &StateFades,
     window: &mut Window,
     cx: &mut Context<OrchestratorPanel>,
 ) -> AnyElement {
@@ -40,7 +46,7 @@ pub(super) fn render_message(
         render_user_card(view, window, cx)
     } else {
         let live_extra_s = live.then(|| view.seen_at.elapsed().as_secs_f64());
-        render_agent_block(view, ix, live_extra_s, hover, window, cx)
+        render_agent_block(view, ix, live_extra_s, fades, window, cx)
     };
 
     // Entrance: user cards rise 4px on decel (web `rise`); agent replies get
@@ -97,16 +103,16 @@ fn render_agent_block(
     view: &MessageView,
     ix: usize,
     live_extra_s: Option<f64>,
-    hover: (bool, bool),
+    fades: &StateFades,
     window: &mut Window,
     cx: &mut Context<OrchestratorPanel>,
 ) -> AnyElement {
-    let worked = render_worked_for(view, ix, live_extra_s, cx);
-    let meta = render_meta_row(view, ix, hover, cx);
+    let worked = render_worked_for(view, ix, live_extra_s, fades, cx);
+    let meta = render_meta_row(view, ix, fades, cx);
     v_flex()
-        .id(ElementId::NamedInteger("msg-agent".into(), ix as u64))
+        .id(msg_hover_id(ix))
         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-            this.set_message_hover(ix, *hovered, cx);
+            this.set_fade(msg_hover_id(ix), *hovered, STATE_FADE, cx);
         }))
         .children(worked)
         .child(MarkdownElement::new(
@@ -117,14 +123,17 @@ fn render_agent_block(
         .into_any_element()
 }
 
-/// The "Worked for Ns · N agent(s)" collapsible (§4.1) — `ui::Disclosure`
-/// chevron in a hairline pill; expand is INSTANT (accepted ruling: GPUI has
-/// no animated-height idiom; VSCode-instant chrome is on-spec here). The
-/// label's counter rolls on the panel's 1s busy ticker.
+/// The "Worked for Ns · N agent(s)" collapsible (§4.1) — chevron + label in
+/// a hairline pill; expand is INSTANT (accepted ruling: GPUI has no
+/// animated-height idiom; VSCode-instant chrome is on-spec here). The
+/// label's counter rolls on the panel's 1s busy ticker, and ONLY the
+/// counter renders bright (`.wtick { color: var(--text) }`,
+/// unconditionally) — the chrome words stay muted, settled or live.
 fn render_worked_for(
     view: &MessageView,
     ix: usize,
     live_extra_s: Option<f64>,
+    fades: &StateFades,
     cx: &mut Context<OrchestratorPanel>,
 ) -> Option<AnyElement> {
     if view.runs.is_empty() && view.worked_s <= 3.0 {
@@ -132,55 +141,82 @@ fn render_worked_for(
     }
     let colors = cx.theme().colors();
     let open = view.worked_open;
-    let ticking = live_extra_s.is_some();
     let shown_s = view.worked_s + live_extra_s.unwrap_or(0.0);
     let n = view.runs.len();
-    let label = format!(
-        "Worked for {}{}",
-        rel(shown_s),
-        if n > 0 {
-            format!(" · {n} agent{}", if n > 1 { "s" } else { "" })
-        } else {
-            String::new()
-        }
-    );
+
+    // Hover crossfade (`summary { transition: color/border-color .15s
+    // var(--effects-curve) }` + `summary:hover { color: var(--text);
+    // border-color: var(--hairline-hi) }`).
+    let summary_id = ElementId::NamedInteger("worked-summary".into(), ix as u64);
+    let hover_t = fades.t(&summary_id);
+    let chrome_color = mix(colors.text_muted, colors.text, hover_t);
+    let border_color = if open {
+        HAIRLINE_HI.into()
+    } else {
+        mix(colors.border, HAIRLINE_HI.into(), hover_t)
+    };
 
     let summary = h_flex()
-        .id(ElementId::NamedInteger("worked-summary".into(), ix as u64))
+        .id(summary_id.clone())
         .items_center()
         .gap(px(6.))
-        .pl(px(8.))
+        // Open relaxes the pill into a card header: pl 8→9, py 5→7 (+1px
+        // bottom standing in for the dropped transparent border's height).
+        .pl(px(if open { 9. } else { 8. }))
         .pr(px(12.))
-        .py(px(if open { 7. } else { 5. }))
-        .border_1()
-        .border_color(if open { HAIRLINE_HI.into() } else { colors.border })
+        .pt(px(if open { 7. } else { 5. }))
+        .pb(px(if open { 8. } else { 5. }))
+        .border_color(border_color)
         .when(open, |this| {
-            this.rounded_t(px(12.))
+            // `border-bottom-color: transparent` — the header flows
+            // seamlessly into the timeline card (per-side widths stand in
+            // for CSS per-side colors).
+            this.border_t_1()
+                .border_l_1()
+                .border_r_1()
+                .rounded_t(px(12.))
                 .bg(SURFACE_1)
         })
-        .when(!open, |this| this.rounded_full())
+        .when(!open, |this| this.border_1().rounded_full())
         .cursor_pointer()
+        .on_hover(cx.listener({
+            let summary_id = summary_id.clone();
+            move |this, hovered: &bool, _, cx| {
+                this.set_fade(summary_id.clone(), *hovered, STATE_FADE, cx);
+            }
+        }))
         .on_click(cx.listener(move |this, _, _, cx| this.toggle_worked(ix, cx)))
         .child(
-            ui::Disclosure::new(
-                ElementId::NamedInteger("worked-chev".into(), ix as u64),
-                open,
-            )
-            .on_click({
-                let weak = cx.weak_entity();
-                move |_, _, cx| {
-                    weak.update(cx, |this, cx| this.toggle_worked(ix, cx)).ok();
-                }
-            }),
+            // `.chev` — 16px, rides the summary's color ramp (the web
+            // rotates 90°; the down-glyph swap is the in-tree idiom).
+            Icon::new(if open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .size(IconSize::Medium)
+            .color(Color::Custom(chrome_color)),
         )
         .child(
             h_flex()
                 .gap(px(4.))
                 .text_size(px(13.))
-                .text_color(colors.text_muted)
-                .font_features(tabular_nums())
-                .when(ticking, |this| this.text_color(colors.text))
-                .child(SharedString::from(label)),
+                .text_color(chrome_color)
+                .child("Worked for")
+                .child(
+                    // `.wtick`: the ticking number alone, always at full
+                    // `--text`, tabular so rolls never reflow.
+                    div()
+                        .text_color(colors.text)
+                        .font_features(tabular_nums())
+                        .child(SharedString::from(rel(shown_s))),
+                )
+                .children((n > 0).then(|| {
+                    SharedString::from(format!(
+                        "· {n} agent{}",
+                        if n > 1 { "s" } else { "" }
+                    ))
+                })),
         );
 
     let body = open.then(|| {
@@ -199,11 +235,15 @@ fn render_worked_for(
             view.runs
                 .iter()
                 .enumerate()
-                .map(|(row_ix, run)| render_step_row(run, ix, row_ix, cx))
+                .map(|(row_ix, run)| render_step_row(run, ix, row_ix, fades, cx))
                 .collect()
         };
-        // `.step-timeline`: card body under the relaxed pill, 1px left rail.
+        // `.step-timeline`: card body under the relaxed pill, 1px left
+        // rail, spanning the full message column (the web's block-level
+        // grid inside the full-width `.msg`; only the summary is
+        // inline-flex).
         div()
+            .w_full()
             .border_1()
             .border_t_0()
             .border_color(HAIRLINE_HI)
@@ -236,6 +276,7 @@ fn render_step_row(
     run: &TranscriptRun,
     msg_ix: usize,
     row_ix: usize,
+    fades: &StateFades,
     cx: &mut Context<OrchestratorPanel>,
 ) -> AnyElement {
     let colors = cx.theme().colors();
@@ -246,11 +287,13 @@ fn render_step_row(
         reason
     };
     let run_id = SharedString::from(run.run_id.clone());
+    let row_id = ElementId::NamedInteger(format!("step-{msg_ix}").into(), row_ix as u64);
+    // `.step-row { transition: background .15s var(--effects-curve) }` —
+    // the hover wash crossfades (the color flip in chat.css:118 is dead CSS
+    // in the reference too; refuted finding #2).
+    let hover_t = fades.t(&row_id);
     h_flex()
-        .id(ElementId::NamedInteger(
-            format!("step-{msg_ix}").into(),
-            row_ix as u64,
-        ))
+        .id(row_id.clone())
         .w_full()
         .items_center()
         .gap(px(9.))
@@ -258,7 +301,10 @@ fn render_step_row(
         .py(px(6.))
         .rounded(px(8.))
         .cursor_pointer()
-        .hover(|row| row.bg(cx.theme().colors().element_hover))
+        .bg(colors.element_hover.opacity(hover_t))
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            this.set_fade(row_id.clone(), *hovered, STATE_FADE, cx);
+        }))
         .on_click(cx.listener(move |this, _, window, cx| {
             this.open_run(run_id.clone(), window, cx);
         }))
@@ -294,10 +340,20 @@ fn render_step_row(
 fn render_meta_row(
     view: &MessageView,
     ix: usize,
-    (hovered, fresh): (bool, bool),
+    fades: &StateFades,
     cx: &mut Context<OrchestratorPanel>,
 ) -> AnyElement {
-    let colors = cx.theme().colors();
+    // Copy the Hsla tokens out so the action builder can take `cx` mutably
+    // (the theme borrow must not outlive this).
+    let (placeholder, text, text_muted, hover_bg) = {
+        let colors = cx.theme().colors();
+        (
+            colors.text_placeholder,
+            colors.text,
+            colors.text_muted,
+            colors.element_hover,
+        )
+    };
     let mut ts_label = if view.ts > 0.0 {
         ago_now(view.ts)
     } else {
@@ -309,50 +365,49 @@ fn render_meta_row(
         }
         ts_label.push_str(brain);
     }
-
-    let action = |id: &'static str, icon: IconName, ix: usize| {
+    // `.meta-actions .ic { transition: color/background .15s }`: 16px glyph
+    // at --text-3 rest → --text + hover wash, each button fading
+    // independently (per-element CSS transitions).
+    let action = |id: &'static str, icon: IconName, cx: &mut Context<OrchestratorPanel>| {
+        let button_id = ElementId::NamedInteger(id.into(), ix as u64);
+        let hover_t = fades.t(&button_id);
+        let hover_id = button_id.clone();
         div()
-            .id(ElementId::NamedInteger(id.into(), ix as u64))
+            .id(button_id)
             .size(px(26.))
             .flex()
             .items_center()
             .justify_center()
             .rounded(px(8.))
-            .text_color(cx.theme().colors().text_placeholder)
-            .hover(|x| {
-                x.bg(cx.theme().colors().element_hover)
-                    .text_color(cx.theme().colors().text)
-            })
+            .bg(hover_bg.opacity(hover_t))
             .cursor_pointer()
-            .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                this.set_fade(hover_id.clone(), *hovered, STATE_FADE, cx);
+            }))
+            .child(
+                Icon::new(icon)
+                    .size(IconSize::Medium)
+                    .color(Color::Custom(mix(placeholder, text, hover_t))),
+            )
     };
     let copy_text = view.text.clone();
     let trio = h_flex()
         .gap(px(4.))
         .child(
-            action("msg-copy", IconName::Copy, ix).on_click(cx.listener(move |_, _, _, cx| {
+            action("msg-copy", IconName::Copy, cx).on_click(cx.listener(move |_, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
             })),
         )
         // Feedback buttons are anatomy-only (the web ships them without
         // handlers — wiring is banked).
-        .child(action("msg-up", IconName::ThumbsUp, ix))
-        .child(action("msg-down", IconName::ThumbsDown, ix));
+        .child(action("msg-up", IconName::ThumbsUp, cx))
+        .child(action("msg-down", IconName::ThumbsDown, cx));
 
-    // Tracked-hover reveal: settled states render at 0/1; a flip animates
-    // through the 150ms crossfade window.
-    let target = if hovered { 1.0 } else { 0.0 };
-    let trio: AnyElement = if fresh {
-        let (from, to) = (1.0 - target, target);
-        trio.with_animation(
-            ElementId::NamedInteger("meta-trio-fade".into(), ix as u64),
-            Animation::new(Duration::from_millis(150)).with_easing(EFFECTS.easing()),
-            move |trio, t| trio.opacity(from + (to - from) * t),
-        )
-        .into_any_element()
-    } else {
-        trio.opacity(target).into_any_element()
-    };
+    // Tracked-hover reveal (`.msg.agent:hover .meta-actions { opacity: 1 }`
+    // on the .15s effects transition): the scalar is read per frame off the
+    // panel's fade map — mid-fade flips re-base continuously, and sweeping
+    // across messages fades every departed trio concurrently.
+    let trio = trio.opacity(fades.t(&msg_hover_id(ix)));
 
     h_flex()
         .mt(px(8.))
@@ -361,7 +416,7 @@ fn render_meta_row(
         .child(
             div()
                 .text_size(px(13.))
-                .text_color(colors.text_muted)
+                .text_color(text_muted)
                 .child(SharedString::from(ts_label)),
         )
         .child(trio)

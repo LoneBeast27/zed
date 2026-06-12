@@ -20,6 +20,7 @@ use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
 use crate::bridge::{BRIDGE_BASE_URL, post_json};
+use crate::task_board::motion::{STATE_FADE, mix};
 use crate::task_board::style::{HAIRLINE_HI, SURFACE_2, SURFACE_2B};
 
 use super::panel::{OrchestratorPanel, Send};
@@ -202,6 +203,12 @@ impl OrchestratorPanel {
             .read(cx)
             .focus_handle(cx)
             .is_focused(window);
+        // `:focus-within { border-color: var(--hairline-hi) }` on the .15s
+        // effects transition — render-driven retarget (same-target calls
+        // are no-ops, the SendCircle::update_motion idiom).
+        let focus_id = ElementId::Name("composer-focus".into());
+        self.fades.set(focus_id.clone(), focused, STATE_FADE);
+        let focus_t = self.fades.t(&focus_id);
 
         let deck = v_flex()
             .key_context("OrchestratorComposer")
@@ -210,8 +217,7 @@ impl OrchestratorPanel {
             .rounded(px(16.))
             .bg(SURFACE_2)
             .border_1()
-            // `:focus-within { border-color: var(--hairline-hi) }`.
-            .border_color(if focused { HAIRLINE_HI.into() } else { colors.border })
+            .border_color(mix(colors.border, HAIRLINE_HI.into(), focus_t))
             .overflow_hidden()
             .child(
                 // textarea: padding 15px 17px 4px, 15px/1.55 UI font.
@@ -288,28 +294,45 @@ impl OrchestratorPanel {
             .pr(px(10.))
             .pb(px(8.))
             .pl(px(12.))
-            .child(
+            .child({
                 // `.ghost-btn` — attach affordance (anatomy-only, like the
-                // web: no handler ships in this pass).
+                // web: no handler ships in this pass). Hover rides the
+                // .15s effects crossfade: + glyph --text-3 → --text-2,
+                // hairline → hairline-hi; web glyph is 18px.
+                let ghost_id = ElementId::Name("composer-attach".into());
+                let hover_t = self.fades.t(&ghost_id);
                 div()
-                    .id("composer-attach")
+                    .id(ghost_id.clone())
                     .size(px(32.))
                     .rounded_full()
                     .border_1()
-                    .border_color(colors.border)
+                    .border_color(mix(colors.border, HAIRLINE_HI.into(), hover_t))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(colors.text_placeholder)
-                    .hover(|this| this.text_color(colors.text_muted).border_color(HAIRLINE_HI))
                     .cursor_pointer()
-                    .child(Icon::new(IconName::Plus).size(IconSize::Small).color(Color::Muted)),
-            )
-            .child(
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        this.set_fade(ghost_id.clone(), *hovered, STATE_FADE, cx);
+                    }))
+                    .child(
+                        Icon::new(IconName::Plus)
+                            .size(IconSize::Custom(rems_from_px(18.)))
+                            .color(Color::Custom(mix(
+                                colors.text_placeholder,
+                                colors.text_muted,
+                                hover_t,
+                            ))),
+                    )
+            })
+            .child({
                 // `.brain-pill` — store.brain or "idle" + chevron
                 // (anatomy-only; the web ships no click handler either).
+                // Hover: text --text-2 → --text, hairline → hairline-hi on
+                // the .15s effects crossfade; the 16px chevron stays --text-3.
+                let brain_id = ElementId::Name("composer-brain".into());
+                let hover_t = self.fades.t(&brain_id);
                 h_flex()
-                    .id("composer-brain")
+                    .id(brain_id.clone())
                     .items_center()
                     .gap(px(4.))
                     .pl(px(12.))
@@ -317,18 +340,20 @@ impl OrchestratorPanel {
                     .py(px(6.))
                     .rounded_full()
                     .border_1()
-                    .border_color(colors.border)
+                    .border_color(mix(colors.border, HAIRLINE_HI.into(), hover_t))
                     .text_size(px(13.))
-                    .text_color(colors.text_muted)
-                    .hover(|this| this.text_color(colors.text).border_color(HAIRLINE_HI))
+                    .text_color(mix(colors.text_muted, colors.text, hover_t))
                     .cursor_pointer()
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        this.set_fade(brain_id.clone(), *hovered, STATE_FADE, cx);
+                    }))
                     .child(SharedString::from(brain))
                     .child(
                         Icon::new(IconName::ChevronDown)
-                            .size(IconSize::Small)
+                            .size(IconSize::Medium)
                             .color(Color::Placeholder),
-                    ),
-            )
+                    )
+            })
             .child(div().flex_1())
             .child(self.composer.send_circle.render(has_text || busy, cx))
             .into_any_element()
@@ -348,17 +373,24 @@ impl OrchestratorPanel {
             )
         };
         let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
+        let fades = &self.fades;
         let hint = |label: &'static str, ins: &'static str, cx: &mut gpui::Context<Self>| {
+            // `.hint { transition: color/background .15s var(--effects-curve) }`.
+            let hint_id = ElementId::Name(format!("hint-{label}").into());
+            let hover_t = fades.t(&hint_id);
             div()
-                .id(ElementId::Name(format!("hint-{label}").into()))
+                .id(hint_id.clone())
                 .px(px(4.))
                 .py(px(1.))
                 .rounded(px(6.))
                 .font_family(mono.clone())
                 .text_size(px(12.))
-                .text_color(placeholder)
-                .hover(move |this| this.text_color(muted).bg(hover_bg))
+                .text_color(mix(placeholder, muted, hover_t))
+                .bg(hover_bg.opacity(hover_t))
                 .cursor_pointer()
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    this.set_fade(hint_id.clone(), *hovered, STATE_FADE, cx);
+                }))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.insert_hint(ins, window, cx);
                 }))
@@ -386,9 +418,14 @@ impl OrchestratorPanel {
     /// flow here while visible (its height displaces the deck downward —
     /// the choreography), and is absent from the tree otherwise.
     fn render_tasks_island_slot(&mut self, cx: &mut gpui::Context<Self>) -> Option<AnyElement> {
-        self.tasks_island
-            .visible()
-            .then(|| crate::islands::tasks_island::render_tasks_island(&self.tasks_island, cx))
+        if !self.tasks_island.visible() {
+            return None;
+        }
+        Some(crate::islands::tasks_island::render_tasks_island(
+            &self.tasks_island,
+            &self.fades,
+            cx,
+        ))
     }
 }
 

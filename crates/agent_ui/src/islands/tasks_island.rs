@@ -28,7 +28,7 @@ use ui::prelude::*;
 use crate::agent_accents::STATUS_RUNNING;
 use crate::bridge::RunRow;
 use crate::orchestrator_panel::OrchestratorPanel;
-use crate::task_board::motion::{AnimatedValue, DECEL, EFFECTS, MotionCurve, SPATIAL};
+use crate::task_board::motion::{AnimatedValue, DECEL, EFFECTS, MotionCurve, SPATIAL, StateFades, mix};
 use crate::task_board::style::{HAIRLINE_HI, tabular_nums};
 
 use super::usage_island::SURFACE_FLOAT;
@@ -54,6 +54,11 @@ const ROWS_MAX_H: f32 = 176.;
 
 /// The persisted open-state key (the web's localStorage `ti-open`).
 const OPEN_KEY: &str = "orchestrator_tasks_island_open";
+
+/// Island chrome hover crossfade (`.ti-head`/`.ti-row { transition: … .12s
+/// var(--effects-curve) }` — the island runs 120ms where chat chrome runs
+/// 150ms).
+const ISLAND_FADE: Duration = Duration::from_millis(120);
 
 /// The island's view state — owned by the orchestrator panel (TranscriptView
 /// pattern); this module owns its lifecycle and what it looks like.
@@ -278,6 +283,7 @@ fn spinner(id: impl Into<ElementId>) -> AnyElement {
 /// persistent DOM nodes never resets.
 pub fn render_tasks_island(
     island: &TasksIsland,
+    fades: &StateFades,
     cx: &mut gpui::Context<OrchestratorPanel>,
 ) -> AnyElement {
     let colors = cx.theme().colors();
@@ -324,15 +330,20 @@ pub fn render_tasks_island(
                     ),
             )
     };
+    let head_id = ElementId::Name("ti-head".into());
+    let head_t = fades.t(&head_id);
     let head = h_flex()
-        .id("ti-head")
+        .id(head_id.clone())
         .w_full()
         .items_center()
         .gap(px(9.))
         .px(px(12.))
         .py(px(9.))
         .cursor_pointer()
-        .hover(|head| head.bg(cx.theme().colors().element_hover))
+        .bg(colors.element_hover.opacity(head_t))
+        .on_hover(cx.listener(move |panel, hovered: &bool, _, cx| {
+            panel.set_fade(head_id.clone(), *hovered, ISLAND_FADE, cx);
+        }))
         .on_click(cx.listener(|panel, _, _, cx| panel.tasks_island.toggle_open(cx)))
         .child(spinner("ti-head-spin"))
         .child(
@@ -350,8 +361,11 @@ pub fn render_tasks_island(
     //    the element id is stable across frames, §5.6) ──
     let rows = island.rows.iter().map(|(run_id, label)| {
         let open_id = run_id.clone();
+        let row_id = ElementId::Name(format!("ti-row-{run_id}").into());
+        let row_t = fades.t(&row_id);
+        let hover_id = row_id.clone();
         h_flex()
-            .id(ElementId::Name(format!("ti-row-{run_id}").into()))
+            .id(row_id)
             .w_full()
             .items_center()
             .gap(px(9.))
@@ -361,11 +375,15 @@ pub fn render_tasks_island(
             .border_color(cx.theme().colors().border)
             .cursor_pointer()
             .text_size(px(12.5))
-            .text_color(cx.theme().colors().text_muted)
-            .hover(|row| {
-                row.bg(cx.theme().colors().element_hover)
-                    .text_color(cx.theme().colors().text)
-            })
+            .text_color(mix(
+                cx.theme().colors().text_muted,
+                cx.theme().colors().text,
+                row_t,
+            ))
+            .bg(cx.theme().colors().element_hover.opacity(row_t))
+            .on_hover(cx.listener(move |panel, hovered: &bool, _, cx| {
+                panel.set_fade(hover_id.clone(), *hovered, ISLAND_FADE, cx);
+            }))
             .on_click(cx.listener(move |panel, _, window, cx| {
                 panel.open_run(open_id.clone(), window, cx);
             }))

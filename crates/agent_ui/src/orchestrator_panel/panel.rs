@@ -22,7 +22,7 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 use crate::bridge::{self, BridgeStore, TranscriptSnapshot, TranscriptWatch};
 use crate::islands::TasksIsland;
 use crate::task_board::TaskBoardPanel;
-use crate::task_board::motion::StateFade;
+use crate::task_board::motion::StateFades;
 
 use super::composer::Composer;
 use super::message::render_message;
@@ -62,10 +62,11 @@ pub struct OrchestratorPanel {
     /// Change gate for the store observer (the store also notifies at 1Hz
     /// for board elapsed this panel renders only via the busy tick).
     last_snapshot: Option<TranscriptSnapshot>,
-    /// Tracked message hover (the meta-trio 150ms reveal — same idiom as
-    /// the board's row hover).
-    hovered_msg: Option<(usize, StateFade)>,
-    unhovered_msg: Option<(usize, StateFade)>,
+    /// Every tracked hover/focus crossfade in the panel (meta-trio reveals,
+    /// summary pills, step rows, composer chrome, island chrome) — the §0
+    /// "hovers are gentle fades" class, read per frame and pumped by ONE
+    /// `request_animation_frame` in [`Render::render`].
+    pub(crate) fades: StateFades,
     /// Held only while the dock shows this panel ([`Panel::set_active`]) —
     /// the RAII guard whose presence keeps the `/transcript` poll alive.
     transcript_watch: Option<TranscriptWatch>,
@@ -92,8 +93,7 @@ impl OrchestratorPanel {
             busy: false,
             busy_ticker: None,
             last_snapshot: None,
-            hovered_msg: None,
-            unhovered_msg: None,
+            fades: StateFades::new(),
             transcript_watch: None,
             _store_subscription,
         }
@@ -194,37 +194,18 @@ impl OrchestratorPanel {
             .ok();
     }
 
-    /// Tracked-hover flip for a message's meta trio (board row idiom).
-    pub(super) fn set_message_hover(&mut self, ix: usize, hovered: bool, cx: &mut Context<Self>) {
-        if hovered {
-            if self.hovered_msg.as_ref().is_some_and(|(at, _)| *at == ix) {
-                return;
-            }
-            if let Some((old, _)) = self.hovered_msg.take() {
-                self.unhovered_msg = Some((old, StateFade::begun()));
-            }
-            self.hovered_msg = Some((ix, StateFade::begun()));
-            cx.notify();
-        } else if self.hovered_msg.as_ref().is_some_and(|(at, _)| *at == ix) {
-            let (old, _) = self.hovered_msg.take().unwrap();
-            self.unhovered_msg = Some((old, StateFade::begun()));
+    /// Flip a tracked interactive element's hover/focus crossfade (the §0
+    /// gentle-fades class). `pub(crate)`: island chrome rides the same map.
+    pub(crate) fn set_fade(
+        &mut self,
+        id: impl Into<gpui::ElementId>,
+        engaged: bool,
+        duration: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        if self.fades.set(id, engaged, duration) {
             cx.notify();
         }
-    }
-
-    /// (hovered, mid-crossfade) for a message index.
-    fn hover_state(&self, ix: usize) -> (bool, bool) {
-        if let Some((at, fade)) = &self.hovered_msg
-            && *at == ix
-        {
-            return (true, fade.fresh());
-        }
-        if let Some((at, fade)) = &self.unhovered_msg
-            && *at == ix
-        {
-            return (false, fade.fresh());
-        }
-        (false, false)
     }
 
     /// `.chat-crumb`: `project / Conversation Title`, 13px, shown once the
@@ -288,8 +269,7 @@ impl OrchestratorPanel {
             cx.processor(move |this, ix: usize, window, cx| {
                 let content: AnyElement = if let Some(view) = this.transcript.message(ix) {
                     let live = live_ix == Some(ix);
-                    let hover = this.hover_state(ix);
-                    render_message(view, ix, live, hover, window, cx)
+                    render_message(view, ix, live, &this.fades, window, cx)
                 } else if ix == message_count {
                     render_shimmer(cx)
                 } else {
@@ -332,7 +312,9 @@ impl Render for OrchestratorPanel {
         // styles read `current()` per frame instead of riding identity-
         // churning animation wrappers). Settled frames schedule nothing
         // (§8 idle cost).
-        if self.tasks_island.visible() && self.tasks_island.any_animating() {
+        if self.fades.any_animating()
+            || (self.tasks_island.visible() && self.tasks_island.any_animating())
+        {
             window.request_animation_frame();
         }
         panel

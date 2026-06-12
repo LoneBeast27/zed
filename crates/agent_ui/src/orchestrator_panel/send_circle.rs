@@ -109,8 +109,10 @@ impl SendCircle {
                         .justify_center()
                         .opacity(1. - glyph)
                         .child(
+                            // `.ic-send .ms { font-size: 20px }` — the 40px
+                            // accent circle carries a 20px arrow.
                             Icon::new(IconName::ArrowUp)
-                                .size(IconSize::Small)
+                                .size(IconSize::Custom(rems_from_px(20.)))
                                 .color(Color::Custom(gpui::white())),
                         ),
                 )
