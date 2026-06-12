@@ -118,9 +118,9 @@ pub fn usage_meta_from_object(object: &serde_json::Map<String, serde_json::Value
 }
 
 /// `resetPhrase()` from usage-island.js — the first non-empty
-/// `reset_phrases[0]` across `_scraped.vendors`. (serde_json maps iterate
-/// alphabetically rather than in JS insertion order; with one phrase-bearing
-/// vendor — the live shape — the result is identical.)
+/// `reset_phrases[0]` across `_scraped.vendors`. (The workspace builds
+/// serde_json with `preserve_order`, so vendor iteration matches JS
+/// `Object.values` insertion order exactly.)
 fn first_reset_phrase(scraped: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
     let vendors = scraped.get("vendors")?.as_object()?;
     for vendor in vendors.values() {
@@ -137,7 +137,11 @@ fn first_reset_phrase(scraped: &serde_json::Map<String, serde_json::Value>) -> O
 }
 
 /// Shape a usage JSON object (from `GET /usage` or a flattened `usage` event)
-/// into sorted pool rows, skipping `_`-prefixed metadata keys.
+/// into pool rows in WIRE ORDER, skipping `_`-prefixed metadata keys. The
+/// workspace builds serde_json with `preserve_order`, so iteration matches
+/// the server's insertion order (orchestrator/usage.py: claude, codex, agy,
+/// gemini) exactly as JS `Object.entries` does — dots, card rows, and panel
+/// cards all render in the approved order.
 pub fn pools_from_object(object: &serde_json::Map<String, serde_json::Value>) -> Vec<PoolRow> {
     let mut rows = Vec::new();
     for (name, entry) in object {
@@ -153,8 +157,6 @@ pub fn pools_from_object(object: &serde_json::Map<String, serde_json::Value>) ->
                 .map(str::to_string),
         });
     }
-    // Deterministic render order regardless of JSON map ordering.
-    rows.sort_by(|a, b| a.name.cmp(&b.name));
     rows
 }
 
@@ -214,7 +216,8 @@ mod tests {
             panic!("expected Usage, got {event:?}");
         };
         let pools = pools_from_object(&fields);
-        // Sorted by name, "_"-metadata filtered, "type" consumed by the tag.
+        // Wire order preserved, "_"-metadata filtered, "type" consumed by
+        // the tag.
         assert_eq!(pools.len(), 3);
         assert_eq!(pools[0].name, "claude_sdk_credit");
         assert_eq!(pools[0].headroom_pct, Some(100.0));
@@ -224,6 +227,37 @@ mod tests {
         assert_eq!(pools[1].window, None); // missing key
         assert_eq!(pools[2].name, "gemini_free_rpd");
         assert_eq!(pools[2].headroom_pct, Some(99.5));
+    }
+
+    #[test]
+    fn pools_render_in_wire_order_not_alphabetical() {
+        // The JSON order authority is the server's insertion order
+        // (orchestrator/usage.py: claude, codex, agy, gemini — NOT
+        // alphabetical, which would put antigravity first). preserve_order
+        // carries it through, exactly like Python json → JS Object.entries.
+        let event: BridgeEvent = serde_json::from_str(
+            r#"{"type": "usage",
+                "claude_sdk_credit": {"headroom_pct": 18},
+                "codex_plan": {"headroom_pct": 50},
+                "antigravity_weekly": {"headroom_pct": 80},
+                "gemini_free_rpd": {"headroom_pct": 99}}"#,
+        )
+        .unwrap();
+        let BridgeEvent::Usage { fields } = event else {
+            panic!("expected Usage");
+        };
+        let pools = pools_from_object(&fields);
+        let names: Vec<&str> = pools.iter().map(|pool| pool.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "claude_sdk_credit",
+                "codex_plan",
+                "antigravity_weekly",
+                "gemini_free_rpd"
+            ],
+            "pool order must match the wire, not a sort"
+        );
     }
 
     #[test]
