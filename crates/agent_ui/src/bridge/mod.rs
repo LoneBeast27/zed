@@ -15,5 +15,5 @@ pub mod client;
 pub mod protocol;
 pub mod sse;
 
-pub use client::{BRIDGE_BASE_URL, BridgeStore, fetch_json, init};
+pub use client::{BRIDGE_BASE_URL, BridgeStore, fetch_json, global_store, init};
 pub use protocol::{BridgeEvent, PoolRow, RunRow};

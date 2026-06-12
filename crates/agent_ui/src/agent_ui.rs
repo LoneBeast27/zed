@@ -32,6 +32,7 @@ mod model_selector;
 mod model_selector_popover;
 mod profile_selector;
 mod resource_banner;
+pub mod task_board;
 mod terminal_codegen;
 mod terminal_inline_assistant;
 pub mod terminal_thread_metadata_store;
@@ -54,7 +55,8 @@ use command_palette_hooks::CommandPaletteFilter;
 use feature_flags::FeatureFlagAppExt as _;
 use fs::Fs;
 use gpui::{
-    Action, App, Context, Entity, ImageSource, Resource, SharedString, SharedUri, Window, actions,
+    Action, App, AppContext as _, Context, Entity, ImageSource, Resource, SharedString, SharedUri,
+    Window, actions,
 };
 use language::{
     LanguageRegistry,
@@ -599,6 +601,21 @@ pub fn init(
             cx,
         );
         workspace.set_activity_bar_item(Some(bar.into()), window, cx);
+
+        // Z1 — the task board panel, mounted so the `taskboard` mode's
+        // layout (and `apply_mode_layout`'s persistent-name lookup) can
+        // open it. Registered only alongside workspace modes: stock Zed
+        // stays untouched when the flag is off.
+        let task_board = cx.new(|cx| task_board::TaskBoardPanel::new(cx));
+        workspace.add_panel(task_board, window, cx);
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &task_board::ToggleFocus,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                workspace.toggle_panel_focus::<task_board::TaskBoardPanel>(window, cx);
+            },
+        );
 
         // M2 — `Ctrl+Alt+1..9` (keymap asset, loaded only when the flag is
         // on) and the command palette dispatch this action.

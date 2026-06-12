@@ -9,7 +9,7 @@ use gpui::{Hsla, Rgba};
 
 /// Builds an [`Rgba`] from a `0xRRGGBBAA` literal in const context
 /// (gpui's `rgba()` is not `const fn`).
-const fn rgba_hex(hex: u32) -> Rgba {
+pub(crate) const fn rgba_hex(hex: u32) -> Rgba {
     Rgba {
         r: ((hex >> 24) & 0xFF) as f32 / 255.0,
         g: ((hex >> 16) & 0xFF) as f32 / 255.0,
@@ -58,7 +58,7 @@ pub fn color_for_status(status: &str) -> Hsla {
     let rgba = match status.as_str() {
         "running" | "active" | "working" => STATUS_RUNNING,
         "blocked" | "warn" | "warning" | "waiting" | "stalled" => STATUS_BLOCKED,
-        "error" | "failed" | "dead" => STATUS_ERROR,
+        "error" | "failed" | "dead" | "killed" => STATUS_ERROR,
         "done" | "complete" | "completed" | "success" | "merged" => STATUS_DONE,
         _ => STATUS_IDLE,
     };

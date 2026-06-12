@@ -217,6 +217,7 @@ fn resolve_panel_persistent_name(raw: &str) -> Option<&'static str> {
         "outlinepanel" => Some("Outline Panel"),
         "collabpanel" => Some("CollabPanel"),
         "debugpanel" | "debuggerpanel" => Some("DebugPanel"),
+        "taskboard" | "taskboardpanel" | "board" => Some("TaskBoardPanel"),
         _ => None,
     }
 }
@@ -259,6 +260,23 @@ mod tests {
         assert_eq!(
             resolve_panel_persistent_name("agentpanel"),
             Some("AgentPanel")
+        );
+    }
+
+    #[test]
+    fn resolve_panel_names_maps_task_board() {
+        // Z1 — the `taskboard` mode mounts the native task board panel.
+        assert_eq!(
+            resolve_panel_persistent_name("TaskBoard"),
+            Some("TaskBoardPanel")
+        );
+        assert_eq!(
+            resolve_panel_persistent_name("task_board_panel"),
+            Some("TaskBoardPanel")
+        );
+        assert_eq!(
+            resolve_panel_persistent_name("Board"),
+            Some("TaskBoardPanel")
         );
     }
 

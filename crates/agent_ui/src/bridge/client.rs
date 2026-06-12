@@ -78,6 +78,22 @@ impl BridgeStore {
     }
 }
 
+struct GlobalBridgeStore(Entity<BridgeStore>);
+
+impl gpui::Global for GlobalBridgeStore {}
+
+/// The app-wide shared store. Created lazily on first access — the bridge
+/// connection task starts non-blocking when the first consumer (a Z1+ panel)
+/// builds, per the Lightness Mandate's lazy-startup rule.
+pub fn global_store(cx: &mut App) -> Entity<BridgeStore> {
+    if let Some(global) = cx.try_global::<GlobalBridgeStore>() {
+        return global.0.clone();
+    }
+    let store = init(cx);
+    cx.set_global(GlobalBridgeStore(store.clone()));
+    store
+}
+
 /// Creates the store entity and detaches the connection loop. The loop exits
 /// on its own once the entity is dropped (weak-handle update failure).
 pub fn init(cx: &mut App) -> Entity<BridgeStore> {
