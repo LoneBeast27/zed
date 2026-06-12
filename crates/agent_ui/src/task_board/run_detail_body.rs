@@ -2,16 +2,68 @@
 //! `logs()`): Summary fields (Routing/Task/Error/Usage/Run), Result text
 //! (markdown), and the mono kind/payload log tail.
 
-use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window};
-use markdown::{Markdown, MarkdownElement};
+use gpui::{
+    AnyElement, App, Entity, FontWeight, SharedString, TextStyleRefinement, UnderlineStyle,
+    Window, relative,
+};
+use markdown::{Markdown, MarkdownElement, MarkdownStyle};
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
-use crate::agent_configuration::configure_context_server_modal::default_markdown_style;
-
 use super::run_detail::{DrawerTab, RunDetail};
 use super::style::{SURFACE_2B, rel};
+
+/// Board-local markdown base style — `kind` picks the web type spec for the
+/// surface: Summary Task = 13px UI `--text-2` at 1.5 (board.css:205 `.fv`),
+/// Result = 12.5px mono full-strength `--text` at 1.6 (board.css:207-211
+/// `.field pre`). Replaces the borrowed context-server-modal style (10px
+/// XSmall muted), which matched neither.
+enum BodyMarkdown {
+    Task,
+    Result,
+}
+
+fn body_markdown_style(kind: BodyMarkdown, window: &Window, cx: &App) -> MarkdownStyle {
+    let theme_settings = ThemeSettings::get_global(cx);
+    let colors = cx.theme().colors();
+    let mut text_style = window.text_style();
+    let refinement = match kind {
+        BodyMarkdown::Task => TextStyleRefinement {
+            font_family: Some(theme_settings.ui_font.family.clone()),
+            font_fallbacks: theme_settings.ui_font.fallbacks.clone(),
+            font_features: Some(theme_settings.ui_font.features.clone()),
+            font_size: Some(px(13.).into()),
+            line_height: Some(relative(1.5)),
+            color: Some(colors.text_muted),
+            ..Default::default()
+        },
+        BodyMarkdown::Result => TextStyleRefinement {
+            font_family: Some(theme_settings.buffer_font.family.clone()),
+            font_fallbacks: theme_settings.buffer_font.fallbacks.clone(),
+            font_features: Some(theme_settings.buffer_font.features.clone()),
+            font_size: Some(px(12.5).into()),
+            line_height: Some(relative(1.6)),
+            color: Some(colors.text),
+            ..Default::default()
+        },
+    };
+    text_style.refine(&refinement);
+    MarkdownStyle {
+        base_text_style: text_style,
+        selection_background_color: colors.element_selection_background,
+        link: TextStyleRefinement {
+            background_color: Some(colors.editor_foreground.opacity(0.025)),
+            underline: Some(UnderlineStyle {
+                color: Some(colors.text_accent.opacity(0.5)),
+                thickness: px(1.),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
 
 /// Renders the active tab's body content.
 pub(super) fn render_body(
@@ -100,9 +152,8 @@ fn render_summary(
             .join("  ·  ")
     });
     let task_body: AnyElement = match task_md {
-        Some(md) => {
-            MarkdownElement::new(md.clone(), default_markdown_style(window, cx)).into_any_element()
-        }
+        Some(md) => MarkdownElement::new(md.clone(), body_markdown_style(BodyMarkdown::Task, window, cx))
+            .into_any_element(),
         None => text_value(String::new()),
     };
     v_flex()
@@ -148,7 +199,7 @@ fn render_result(
             .py(px(14.))
             .child(MarkdownElement::new(
                 md.clone(),
-                default_markdown_style(window, cx),
+                body_markdown_style(BodyMarkdown::Result, window, cx),
             ))
             .into_any_element(),
         (None, Some(detail)) => {
