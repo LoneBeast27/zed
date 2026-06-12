@@ -169,12 +169,13 @@ fn inbox_row(run: &RunRow, panel: WeakEntity<TaskBoardPanel>, cx: &mut App) -> A
                 ),
         );
 
-    // `.rise` entrance — one-shot per run identity (keyed by run id), so a
-    // tick never restarts it (web `seenRuns`/keyed-DOM equivalent).
+    // `.rise` entrance (web: `.3s var(--decel-curve)`) — one-shot per run
+    // identity (keyed by run id), so a tick never restarts it (the web
+    // `seenRuns`/keyed-DOM equivalent).
     row.with_animation(
         ElementId::Name(format!("rise-{run_id}").into()),
         Animation::new(std::time::Duration::from_millis(300))
-            .with_easing(gpui::ease_out_quint()),
+            .with_easing(super::motion::DECEL.easing()),
         |row, t| row.opacity(t),
     )
     .into_any_element()

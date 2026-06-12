@@ -36,10 +36,11 @@ pub enum BoardView {
 }
 
 /// Row/node click event — consumers (and the panel itself) open the run
-/// drawer from it.
+/// drawer from it; root-node clicks select the conversation.
 #[derive(Debug, Clone)]
 pub enum TaskBoardEvent {
     OpenRun(SharedString),
+    SelectConversation(SharedString),
 }
 
 pub struct TaskBoardPanel {
@@ -47,6 +48,9 @@ pub struct TaskBoardPanel {
     store: Entity<BridgeStore>,
     view: BoardView,
     position: DockPosition,
+    /// The graph's `seenRuns` (run id → first graph render), driving
+    /// fresh-node spawn + edge draw-in exactly once per run.
+    graph_seen: std::collections::HashMap<SharedString, std::time::Instant>,
     _store_subscription: Subscription,
 }
 
@@ -59,6 +63,7 @@ impl TaskBoardPanel {
             store,
             view: BoardView::Graph,
             position: DockPosition::Left,
+            graph_seen: std::collections::HashMap::new(),
             _store_subscription,
         }
     }
@@ -66,6 +71,12 @@ impl TaskBoardPanel {
     /// Row/node click → emit `OpenRun` (the run drawer consumes it — Task 4).
     pub fn open_run(&mut self, run_id: SharedString, cx: &mut Context<Self>) {
         cx.emit(TaskBoardEvent::OpenRun(run_id));
+    }
+
+    /// Graph root click → emit (the web's `selectConv`; the native
+    /// orchestrator panel consumes this when Z3 lands).
+    pub fn select_conversation(&mut self, conv: SharedString, cx: &mut Context<Self>) {
+        cx.emit(TaskBoardEvent::SelectConversation(conv));
     }
 
     fn set_view(&mut self, view: BoardView, cx: &mut Context<Self>) {
@@ -171,15 +182,10 @@ impl Render for TaskBoardPanel {
                 rows.reverse();
                 inbox::inbox_list(std::sync::Arc::new(rows), cx.weak_entity(), cx)
             }
-            // Spawn-tree graph lands in the next task; until then the graph
-            // view shows its empty state.
-            BoardView::Graph => super::style::empty_state(
-                IconName::ListTree,
-                "No spawn tree yet",
-                "When the orchestrator delegates, subagents grow under their conversation root here.",
-                cx,
-            )
-            .into_any_element(),
+            BoardView::Graph => {
+                let weak = cx.weak_entity();
+                super::graph::graph_view(board, &mut self.graph_seen, weak, cx)
+            }
         };
 
         let colors = cx.theme().colors();

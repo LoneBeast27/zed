@@ -5,9 +5,13 @@
 //! Concern split mirrors the web file shape:
 //! - [`panel`] — workspace `Panel` impl: header, seg-toggle, body dispatch.
 //! - [`inbox`] — virtualized run list (grid view).
+//! - [`graph`] — the spawn-tree graph (graph view).
+//! - [`motion`] — exact CSS cubic-bezier motion tokens (§4.9).
 //! - [`style`] — shared board vocabulary (tokens, pills, chips, phrases).
 
+pub mod graph;
 pub mod inbox;
+pub mod motion;
 pub mod panel;
 pub mod style;
 
