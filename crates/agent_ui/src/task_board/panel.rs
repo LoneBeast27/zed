@@ -50,9 +50,9 @@ pub struct TaskBoardPanel {
     store: Entity<BridgeStore>,
     view: BoardView,
     position: DockPosition,
-    /// The graph's `seenRuns` (run id → first graph render), driving
-    /// fresh-node spawn + edge draw-in exactly once per run.
-    graph_seen: std::collections::HashMap<SharedString, std::time::Instant>,
+    /// The graph's `seenRuns` (run id → first sight + per-run spawn
+    /// deadline), driving fresh-node spawn + edge draw-in exactly once.
+    graph_seen: std::collections::HashMap<SharedString, super::graph::GraphSeen>,
     /// The inbox twin: run id → first board appearance. Rows attach their
     /// `.rise` animation only inside the fresh window, so a row scrolling
     /// back into the uniform_list viewport never replays its entrance

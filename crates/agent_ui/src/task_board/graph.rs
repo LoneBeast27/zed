@@ -40,10 +40,25 @@ const STEP: f32 = 56.;
 const EDGE_DRAW: Duration = Duration::from_millis(700);
 /// Node spawn duration (web `node-spawn .5s`).
 const NODE_SPAWN: Duration = Duration::from_millis(500);
-/// How long a run counts as fresh after first sight on the graph: covers the
-/// longest stagger + spawn + edge draw with margin, so mid-animation renders
-/// keep their animated wrappers (the web's `seenRuns` keeps the DOM node).
-const FRESH_WINDOW: Duration = Duration::from_secs(3);
+/// Margin added to each run's spawn-choreography deadline, absorbing render
+/// latency between board arrival and the animation's first frame.
+const FRESH_MARGIN: Duration = Duration::from_millis(500);
+
+/// First-sight record for a graph run: when it appeared, and how long its
+/// spawn choreography needs to complete (per-run — sibling index 34+ used
+/// to outlive the old flat 3s window and snap in from nothing).
+#[derive(Debug, Clone, Copy)]
+pub struct GraphSeen {
+    first_seen: Instant,
+    fresh_for: Duration,
+}
+
+/// How long run `i`'s choreography runs: max(edge draw, stagger
+/// `0.15 + 0.07·i` + spawn) + margin. `i` is known at insertion.
+fn fresh_duration(i: usize) -> Duration {
+    let spawn_end = 0.15 + 0.07 * i as f32 + NODE_SPAWN.as_secs_f32();
+    Duration::from_secs_f32(spawn_end.max(EDGE_DRAW.as_secs_f32()) + FRESH_MARGIN.as_secs_f32())
+}
 /// Vertical slack around the scroll viewport before a conv tree is culled —
 /// trees partially entering the view are always fully built.
 const CULL_MARGIN: f32 = 200.;
@@ -68,7 +83,7 @@ fn tree_in_viewport(tree_top: f32, height: f32, scroll_top: f32, viewport_height
 /// when its bounds don't intersect the window's content mask.
 pub(super) fn graph_view(
     board: Vec<RunRow>,
-    seen: &mut HashMap<SharedString, Instant>,
+    seen: &mut HashMap<SharedString, GraphSeen>,
     scroll: &ScrollHandle,
     cache: &SharedPaintCache,
     panel: WeakEntity<TaskBoardPanel>,
@@ -115,14 +130,20 @@ pub(super) fn graph_view(
             let height = Y0 + runs.len() as f32 * STEP + 6.;
             // Stamp first sight at board arrival even when culled, so a
             // tree scrolled into view later doesn't replay settled spawns
-            // (the web's seenRuns adds during every render pass).
+            // (the web's seenRuns adds during every render pass). The
+            // per-run deadline freezes at insertion, from the sibling index
+            // that determines its stagger.
             let fresh: Vec<bool> = runs
                 .iter()
-                .map(|run| {
-                    let first_seen = *seen
+                .enumerate()
+                .map(|(i, run)| {
+                    let entry = seen
                         .entry(SharedString::from(run.run_id.clone()))
-                        .or_insert(now);
-                    now.duration_since(first_seen) < FRESH_WINDOW
+                        .or_insert_with(|| GraphSeen {
+                            first_seen: now,
+                            fresh_for: fresh_duration(i),
+                        });
+                    now.duration_since(entry.first_seen) < entry.fresh_for
                 })
                 .collect();
             let visible = viewport_height <= 0.
@@ -388,6 +409,22 @@ mod tests {
         assert!(edge_path(origin, Y0 + 3. * STEP, 0.5).is_some());
         // Zero prefix paints nothing (guards the dash split_range edge case).
         assert!(edge_path(origin, Y0, 0.0).is_none());
+    }
+
+    #[test]
+    fn fresh_duration_covers_every_sibling_index() {
+        // i ≥ 34 outlived the old flat 3s window (0.15 + 34·0.07 + 0.5 =
+        // 3.03s); the per-run deadline must clear the full choreography.
+        for i in [0usize, 10, 33, 34, 41, 80] {
+            let spawn_end = 0.15 + 0.07 * i as f32 + 0.5;
+            let window = fresh_duration(i).as_secs_f32();
+            assert!(
+                window > spawn_end,
+                "i={i}: window {window}s ends before spawn at {spawn_end}s"
+            );
+        }
+        // Small indices still cover the 700ms edge draw-in.
+        assert!(fresh_duration(0).as_secs_f32() > 0.7);
     }
 
     #[test]
