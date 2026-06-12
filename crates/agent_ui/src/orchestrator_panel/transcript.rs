@@ -192,6 +192,29 @@ pub(super) fn render_shimmer(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+/// Resolve a greeting display family with a non-mono safety net: gpui's
+/// unknown-family fallback stack tries `.ZedMono` → embedded Lilex FIRST
+/// (text_system.rs), so a missing display font would silently render the
+/// PARITY_SPEC §2 signature lines in MONOSPACE. Outfit + Source Serif 4
+/// ship embedded under `assets/fonts/` (both OFL, licenses alongside), so
+/// this resolves to the requested family everywhere the loader ran; the
+/// guard keeps the degrade path UI-font (Inter class), never mono.
+fn greeting_family(name: &'static str, cx: &App) -> SharedString {
+    if cx
+        .text_system()
+        .all_font_names()
+        .iter()
+        .any(|family| family == name)
+    {
+        name.into()
+    } else {
+        theme_settings::ThemeSettings::get_global(cx)
+            .ui_font
+            .family
+            .clone()
+    }
+}
+
 /// The empty-state greeting (`.chat-greeting`): Outfit headline, serif
 /// sub-line, mono force-hints, and the accent bloom (a real BoxShadow —
 /// RUST_PORT_NOTES §1 allows glow-shadows where the spec calls for bloom;
@@ -234,7 +257,7 @@ pub(super) fn render_greeting(cx: &App) -> AnyElement {
         )
         .child(
             div()
-                .font_family("Outfit")
+                .font_family(greeting_family("Outfit", cx))
                 .text_size(px(30.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(colors.text)
@@ -242,7 +265,7 @@ pub(super) fn render_greeting(cx: &App) -> AnyElement {
         )
         .child(
             div()
-                .font_family("Source Serif 4")
+                .font_family(greeting_family("Source Serif 4", cx))
                 .text_size(px(17.))
                 .text_color(colors.text_muted)
                 .child("The orchestrator routes your task to the best-fit agent."),
