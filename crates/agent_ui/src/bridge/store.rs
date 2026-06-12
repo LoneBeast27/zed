@@ -3,13 +3,16 @@
 //! frames (serve.py's board digest ignores `elapsed_s` — clients tick
 //! elapsed locally; RUST_PORT_NOTES §5's worked-for ticker).
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext as _, Entity, Task};
 
-use super::client::connection_loop;
+use super::client::{connection_loop, fetch_and_apply_transcript, transcript_poll_loop};
 use super::protocol::{
-    BridgeEvent, PoolRow, RunRow, UsageMeta, pools_from_object, usage_meta_from_object,
+    BridgeEvent, PoolRow, ProjectRow, RunRow, TranscriptSnapshot, UsageMeta, pools_from_object,
+    usage_meta_from_object,
 };
 
 /// Local elapsed-tick cadence while any run is `running`.
@@ -25,6 +28,16 @@ pub struct BridgeStore {
     /// usage panel's staleness banner + the island's reset phrase).
     pub usage_meta: UsageMeta,
     pub connected: bool,
+    /// The last `/transcript` snapshot (Z3) — `None` until the first fetch.
+    /// Polled (not pushed): SSE carries only board/usage today; the bridge-
+    /// side transcript event is deferred work.
+    pub transcript: Option<TranscriptSnapshot>,
+    /// The conversation the transcript poll follows. `None` = the bridge's
+    /// default (latest); the poll canonicalizes it to the served id.
+    pub transcript_conv: Option<String>,
+    /// `GET /projects` rows — fetched lazily by the transcript poll when the
+    /// crumb can't resolve the conversation's project name yet.
+    projects: Vec<ProjectRow>,
     /// When the current board snapshot arrived. The server value re-bases the
     /// local tick offset on every board frame; running runs render
     /// `elapsed_s + (now − board_received_at)`.
@@ -32,6 +45,14 @@ pub struct BridgeStore {
     /// The 1s ticker task — `Some` only while any run is `running`
     /// (Lightness Mandate: no idle timers).
     ticker: Option<Task<()>>,
+    /// Live [`TranscriptWatch`] count. The poll task reads it each cycle and
+    /// exits at zero — panel presence gates the poll, never a free timer.
+    transcript_watchers: Arc<AtomicUsize>,
+    /// The transcript poll task — replaced on every 0→1 watcher transition
+    /// (dropping the old task cancels it, so two loops never overlap).
+    transcript_task: Option<Task<()>>,
+    /// In-flight one-shot refetch (post-send / conv switch).
+    transcript_refetch: Option<Task<()>>,
 }
 
 impl Default for BridgeStore {
@@ -41,9 +62,28 @@ impl Default for BridgeStore {
             usage: Vec::new(),
             usage_meta: UsageMeta::default(),
             connected: false,
+            transcript: None,
+            transcript_conv: None,
+            projects: Vec::new(),
             board_received_at: Instant::now(),
             ticker: None,
+            transcript_watchers: Arc::new(AtomicUsize::new(0)),
+            transcript_task: None,
+            transcript_refetch: None,
         }
+    }
+}
+
+/// RAII registration of a live transcript consumer (a chat panel). Dropping
+/// it decrements the watcher count; the poll task notices on its next wake
+/// and exits — cx-free teardown, so panel drops never need a context.
+pub struct TranscriptWatch {
+    watchers: Arc<AtomicUsize>,
+}
+
+impl Drop for TranscriptWatch {
+    fn drop(&mut self) {
+        self.watchers.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -96,6 +136,87 @@ impl BridgeStore {
             BridgeEvent::Unknown => {}
         }
         if changed {
+            cx.notify();
+        }
+    }
+
+    /// Registers a transcript consumer and (re)starts the poll task on the
+    /// 0→1 transition. The returned guard keeps the poll alive; dropping the
+    /// last one pauses it (the next wake exits the loop).
+    pub fn watch_transcript(&mut self, cx: &mut gpui::Context<Self>) -> TranscriptWatch {
+        let watchers = self.transcript_watchers.clone();
+        if watchers.fetch_add(1, Ordering::SeqCst) == 0 {
+            let http_client = cx.http_client();
+            let loop_watchers = watchers.clone();
+            // Replacing the slot drops (cancels) any old loop mid-sleep, so
+            // a fast unwatch→watch can never run two loops at once.
+            self.transcript_task = Some(cx.spawn(async move |this, cx| {
+                transcript_poll_loop(http_client, loop_watchers, this, cx).await
+            }));
+        }
+        TranscriptWatch { watchers }
+    }
+
+    /// Follow a different conversation (`None` = the bridge default) and
+    /// refetch at once — the web's `selectConv` + immediate `loop()`.
+    pub fn set_conversation(&mut self, conv: Option<String>, cx: &mut gpui::Context<Self>) {
+        if self.transcript_conv != conv {
+            self.transcript_conv = conv;
+            self.refetch_transcript_soon(cx);
+        }
+    }
+
+    /// One-shot out-of-cadence transcript fetch (post-send, conv switch) —
+    /// racing the poll loop is harmless: both apply the same source and
+    /// [`Self::apply_transcript`] is change-gated.
+    pub fn refetch_transcript_soon(&mut self, cx: &mut gpui::Context<Self>) {
+        let http_client = cx.http_client();
+        self.transcript_refetch = Some(cx.spawn(async move |this, cx| {
+            fetch_and_apply_transcript(&http_client, &this, cx).await.ok();
+        }));
+    }
+
+    /// The crumb's project resolution: the project whose conversation list
+    /// contains `conv` (web: `state.projects.find(p => p.conversations…)`).
+    pub fn project_name_for_conv(&self, conv: &str) -> Option<&str> {
+        if conv.is_empty() {
+            return None;
+        }
+        self.projects
+            .iter()
+            .find(|project| {
+                project
+                    .conversations
+                    .iter()
+                    .any(|conversation| conversation.id == conv)
+            })
+            .map(|project| project.name.as_str())
+    }
+
+    pub(super) fn apply_transcript(
+        &mut self,
+        snapshot: TranscriptSnapshot,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        // Canonicalize the followed conversation to the served id (the web's
+        // `state.conv = t.id`) so the next poll pins what the bridge chose.
+        let mut changed = false;
+        if !snapshot.id.is_empty() && self.transcript_conv.as_deref() != Some(&snapshot.id) {
+            self.transcript_conv = Some(snapshot.id.clone());
+            changed = true;
+        }
+        if self.transcript.as_ref() != Some(&snapshot) {
+            self.transcript = Some(snapshot);
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn apply_projects(&mut self, projects: Vec<ProjectRow>, cx: &mut gpui::Context<Self>) {
+        if self.projects != projects {
+            self.projects = projects;
             cx.notify();
         }
     }
@@ -227,6 +348,116 @@ mod tests {
                 (5.0..6.0).contains(&ticked[0].elapsed_s),
                 "identical frame must still re-base, got {}",
                 ticked[0].elapsed_s
+            );
+        });
+    }
+
+    fn transcript(id: &str, busy: bool, texts: &[&str]) -> TranscriptSnapshot {
+        TranscriptSnapshot {
+            id: id.to_string(),
+            title: texts.first().unwrap_or(&"").to_string(),
+            busy,
+            brain: None,
+            messages: texts
+                .iter()
+                .map(|text| super::super::protocol::TranscriptMessage {
+                    role: "user".into(),
+                    text: text.to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+        }
+    }
+
+    #[gpui::test]
+    fn transcript_watch_refcount_gates_the_poll(cx: &mut gpui::TestAppContext) {
+        let store = cx.new(|_| BridgeStore::default());
+        store.update(cx, |store, cx| {
+            assert!(
+                store.transcript_task.is_none(),
+                "no poll task before any watcher"
+            );
+            let first = store.watch_transcript(cx);
+            assert_eq!(store.transcript_watchers.load(Ordering::SeqCst), 1);
+            assert!(store.transcript_task.is_some(), "0→1 spawns the poll");
+
+            let second = store.watch_transcript(cx);
+            assert_eq!(store.transcript_watchers.load(Ordering::SeqCst), 2);
+
+            drop(first);
+            assert_eq!(store.transcript_watchers.load(Ordering::SeqCst), 1);
+            drop(second);
+            assert_eq!(
+                store.transcript_watchers.load(Ordering::SeqCst),
+                0,
+                "dropping the last watch pauses the poll (loop exits on next wake)"
+            );
+
+            // A fresh watch respawns (replacing any drained task).
+            let third = store.watch_transcript(cx);
+            assert_eq!(store.transcript_watchers.load(Ordering::SeqCst), 1);
+            assert!(store.transcript_task.is_some());
+            drop(third);
+        });
+    }
+
+    #[gpui::test]
+    fn apply_transcript_canonicalizes_conv_and_change_gates(cx: &mut gpui::TestAppContext) {
+        let store = cx.new(|_| BridgeStore::default());
+        let notifies = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let _subscription = cx.update(|cx| {
+            cx.observe(&store, {
+                let notifies = notifies.clone();
+                move |_, _| notifies.set(notifies.get() + 1)
+            })
+        });
+
+        store.update(cx, |store, cx| {
+            store.apply_transcript(transcript("c-1", false, &["hi"]), cx);
+            assert_eq!(store.transcript_conv.as_deref(), Some("c-1"));
+            assert_eq!(store.transcript.as_ref().unwrap().messages.len(), 1);
+        });
+        cx.run_until_parked();
+        let after_first = notifies.get();
+        assert!(after_first >= 1, "a new snapshot notifies");
+
+        // An identical snapshot is a no-op (poll ticks while idle).
+        store.update(cx, |store, cx| {
+            store.apply_transcript(transcript("c-1", false, &["hi"]), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(notifies.get(), after_first, "unchanged snapshot must not notify");
+
+        // Growth notifies again.
+        store.update(cx, |store, cx| {
+            store.apply_transcript(transcript("c-1", true, &["hi", "more"]), cx);
+        });
+        cx.run_until_parked();
+        assert!(notifies.get() > after_first);
+    }
+
+    #[gpui::test]
+    fn project_name_resolves_via_conversation_membership(cx: &mut gpui::TestAppContext) {
+        let store = cx.new(|_| BridgeStore::default());
+        store.update(cx, |store, cx| {
+            assert_eq!(store.project_name_for_conv("c-1"), None);
+            store.apply_projects(
+                vec![ProjectRow {
+                    id: "p-1".into(),
+                    name: "default".into(),
+                    conversations: vec![super::super::protocol::ConversationRow {
+                        id: "c-1".into(),
+                        ..Default::default()
+                    }],
+                }],
+                cx,
+            );
+            assert_eq!(store.project_name_for_conv("c-1"), Some("default"));
+            assert_eq!(store.project_name_for_conv("c-404"), None);
+            assert_eq!(
+                store.project_name_for_conv(""),
+                None,
+                "empty conv id never matches"
             );
         });
     }

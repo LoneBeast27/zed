@@ -6,6 +6,11 @@
 //! `/board` polling whenever `/sse` is unreachable, reconnecting with
 //! 1s→5s-capped backoff.
 //!
+//! The transcript (Z3) is the one POLLED feed: SSE carries only board/usage
+//! today (transcript-over-SSE is bridge-side work, deferred). The poll runs
+//! at the web cadences (900ms busy / 2.5s idle) and ONLY while a chat panel
+//! holds a [`TranscriptWatch`] — refcount-gated, never free-running.
+//!
 //! Concern split (CLAUDE.md modularity):
 //! - [`protocol`] — wire types (`RunRow`, `PoolRow`, tagged [`BridgeEvent`]).
 //! - [`sse`] — incremental SSE line-parser (in-tree Pattern B idiom).
@@ -18,5 +23,8 @@ pub mod sse;
 pub mod store;
 
 pub use client::{BRIDGE_BASE_URL, fetch_json};
-pub use protocol::{BridgeEvent, PoolRow, RunRow, ScrapeMeta, UsageMeta};
-pub use store::{BridgeStore, global_store, init};
+pub use protocol::{
+    BridgeEvent, PoolRow, RunRow, ScrapeMeta, TranscriptMessage, TranscriptRun,
+    TranscriptSnapshot, UsageMeta,
+};
+pub use store::{BridgeStore, TranscriptWatch, global_store, init};

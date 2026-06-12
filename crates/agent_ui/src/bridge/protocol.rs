@@ -57,6 +57,85 @@ pub enum BridgeEvent {
     Unknown,
 }
 
+/// One spawned-run reference riding a transcript message (`runs` array) —
+/// only identity + routing chip; live status/elapsed come from the board.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct TranscriptRun {
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub chip: Option<String>,
+}
+
+/// One transcript message from `GET /transcript`. `role` is `"user"` or
+/// `"orchestrator"`; agent replies carry `brain`/`worked_s`/`runs`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct TranscriptMessage {
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub ts: f64,
+    #[serde(default)]
+    pub brain: Option<String>,
+    #[serde(default)]
+    pub worked_s: f64,
+    #[serde(default)]
+    pub runs: Vec<TranscriptRun>,
+}
+
+impl TranscriptMessage {
+    pub fn is_user(&self) -> bool {
+        self.role == "user"
+    }
+}
+
+/// The full `GET /transcript?conv=<id>` snapshot (fixture truth: live
+/// bridge, 2026-06-12). The wire calls the message array `transcript`;
+/// `messages` here. Liberal like the rest of the protocol — every field
+/// defaults so bridge drift never breaks the panel.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct TranscriptSnapshot {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default)]
+    pub brain: Option<String>,
+    #[serde(default, rename = "transcript")]
+    pub messages: Vec<TranscriptMessage>,
+}
+
+/// One conversation row from `GET /projects` / `GET /conversations`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct ConversationRow {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub updated: f64,
+    #[serde(default)]
+    pub busy: bool,
+}
+
+/// One project row from `GET /projects` — the crumb resolves a
+/// conversation's project name through these.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct ProjectRow {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub conversations: Vec<ConversationRow>,
+}
+
 /// Scrape metadata off the usage object's `_scraped` key.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ScrapeMeta {
@@ -312,6 +391,79 @@ mod tests {
         let scraped = meta.scraped.unwrap();
         assert_eq!(scraped.age_h, Some(36.2));
         assert_eq!(scraped.reset_phrase, None);
+    }
+
+    #[test]
+    fn transcript_fixture_parses() {
+        // Fixture truth: trimmed from the live `GET /transcript`, 2026-06-12
+        // (curl http://localhost:4530/transcript).
+        let snapshot: TranscriptSnapshot = serde_json::from_str(
+            r#"{"id": "943f60c82558",
+                "title": "@codex In one short sentence: what is a race condition?",
+                "transcript": [
+                  {"role": "user",
+                   "text": "@codex In one short sentence: what is a race condition?",
+                   "ts": 1781110195.6625888},
+                  {"role": "orchestrator",
+                   "text": "A race condition is a bug where a program's behavior depends on the unpredictable timing or order of concurrent operations.",
+                   "ts": 1781110224.9794393, "brain": "qwen", "worked_s": 29.3,
+                   "runs": [{"run_id": "codex-71ac95fd03", "agent": "codex",
+                             "chip": "codex · User requested a single-sentence definition. · 100%"}]}
+                ],
+                "busy": false, "brain": null}"#,
+        )
+        .unwrap();
+        assert_eq!(snapshot.id, "943f60c82558");
+        assert!(!snapshot.busy);
+        assert_eq!(snapshot.brain, None); // explicit null tolerated
+        assert_eq!(snapshot.messages.len(), 2);
+        let user = &snapshot.messages[0];
+        assert!(user.is_user());
+        assert_eq!(user.brain, None);
+        assert!(user.runs.is_empty());
+        let reply = &snapshot.messages[1];
+        assert!(!reply.is_user());
+        assert_eq!(reply.brain.as_deref(), Some("qwen"));
+        assert_eq!(reply.worked_s, 29.3);
+        assert_eq!(reply.runs.len(), 1);
+        assert_eq!(reply.runs[0].run_id, "codex-71ac95fd03");
+        assert_eq!(reply.runs[0].agent, "codex");
+        assert!(reply.runs[0].chip.as_deref().unwrap().starts_with("codex"));
+    }
+
+    #[test]
+    fn transcript_is_liberal_in_what_it_accepts() {
+        // Bare/partial payloads default instead of erroring.
+        let snapshot: TranscriptSnapshot = serde_json::from_str("{}").unwrap();
+        assert_eq!(snapshot, TranscriptSnapshot::default());
+        let snapshot: TranscriptSnapshot = serde_json::from_str(
+            r#"{"id": "c-1", "busy": true,
+                "transcript": [{"role": "orchestrator", "unknown_future": 7}]}"#,
+        )
+        .unwrap();
+        assert!(snapshot.busy);
+        assert_eq!(snapshot.messages.len(), 1);
+        assert_eq!(snapshot.messages[0].text, "");
+        assert_eq!(snapshot.messages[0].worked_s, 0.0);
+    }
+
+    #[test]
+    fn project_fixture_parses() {
+        // Fixture truth: live `GET /projects`, 2026-06-12.
+        let project: ProjectRow = serde_json::from_str(
+            r#"{"id": "4612d040", "name": "default",
+                "cwd": "L:\\Projects\\agentic-ide", "created": 1781112961.853328,
+                "skills": {"universal": ["house-style"], "project": []},
+                "conversations": [{"id": "943f60c82558",
+                                   "title": "@codex In one short sentence: what is a race condition?",
+                                   "updated": 1781113180.5183203, "busy": false,
+                                   "project": "4612d040"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(project.name, "default");
+        assert_eq!(project.conversations.len(), 1);
+        assert_eq!(project.conversations[0].id, "943f60c82558");
+        assert!(!project.conversations[0].busy);
     }
 
     #[test]

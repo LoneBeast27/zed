@@ -21,7 +21,8 @@ use gpui::{AppContext as _, AsyncApp, WeakEntity};
 use http_client::{AsyncBody, HttpClient, Response};
 
 use super::protocol::{
-    BridgeEvent, PoolRow, RunRow, UsageMeta, pools_from_object, usage_meta_from_object,
+    BridgeEvent, PoolRow, ProjectRow, RunRow, TranscriptSnapshot, UsageMeta, pools_from_object,
+    usage_meta_from_object,
 };
 use super::sse::SseParser;
 use super::store::BridgeStore;
@@ -36,6 +37,12 @@ const BOARD_POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(12);
 /// When the bridge is fully offline, back off to slow poll retries.
 const OFFLINE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+/// `/transcript` cadence while the orchestrator is busy (the web's 900ms
+/// busy poll — SSE carries only board/usage today; transcript-over-SSE is
+/// bridge-side work, deferred).
+const TRANSCRIPT_POLL_BUSY: Duration = Duration::from_millis(900);
+/// `/transcript` cadence while idle (web 2.5s).
+const TRANSCRIPT_POLL_IDLE: Duration = Duration::from_millis(2500);
 /// SSE reconnect backoff: start here…
 const SSE_BACKOFF_START: Duration = Duration::from_secs(1);
 /// …grow by this much per failed attach…
@@ -230,6 +237,97 @@ async fn poll_window(
     }
 }
 
+/// The transcript poll cadence for a busy flag (PARITY_SPEC §5: 900ms while
+/// the orchestrator is busy, 2.5s idle).
+pub(super) fn transcript_cadence(busy: bool) -> Duration {
+    if busy {
+        TRANSCRIPT_POLL_BUSY
+    } else {
+        TRANSCRIPT_POLL_IDLE
+    }
+}
+
+/// The `/transcript` poll task — spawned by the store ONLY while at least
+/// one chat panel holds a [`super::store::TranscriptWatch`] (Lightness: the
+/// poll is refcount-gated by panel presence, never free-running). Exits as
+/// soon as the watcher count drops to zero or the store is gone; the next
+/// watcher respawns it.
+pub(super) async fn transcript_poll_loop(
+    http_client: Arc<dyn HttpClient>,
+    watchers: Arc<std::sync::atomic::AtomicUsize>,
+    this: WeakEntity<BridgeStore>,
+    cx: &mut AsyncApp,
+) {
+    loop {
+        if watchers.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            return; // no chat panel alive — pause until the next watch
+        }
+        let busy = match fetch_and_apply_transcript(&http_client, &this, cx).await {
+            Err(()) => return, // store dropped
+            Ok(busy) => busy,
+        };
+        // Fetch failure (bridge restarting) keeps the last representation
+        // and retries at the idle cadence — the web's silent catch.
+        cx.background_executor()
+            .timer(transcript_cadence(busy.unwrap_or(false)))
+            .await;
+    }
+}
+
+/// One `/transcript` fetch applied to the store, fetching `/projects`
+/// alongside when the snapshot's conversation can't be resolved to a
+/// project name yet (the crumb's `project / title`). Returns the snapshot's
+/// busy flag, `Ok(None)` on a fetch failure, and `Err` only when the store
+/// entity is gone. Also the one-shot refetch body (post-send, conv switch).
+pub(super) async fn fetch_and_apply_transcript(
+    http_client: &Arc<dyn HttpClient>,
+    this: &WeakEntity<BridgeStore>,
+    cx: &mut AsyncApp,
+) -> Result<Option<bool>, ()> {
+    let conv = this
+        .read_with(cx, |store, _| store.transcript_conv.clone())
+        .map_err(|_| ())?;
+    let client = http_client.clone();
+    let fetched = cx
+        .background_spawn(async move {
+            let url = format!(
+                "{BRIDGE_BASE_URL}/transcript?conv={}",
+                conv.unwrap_or_default()
+            );
+            let raw = fetch_json(client.as_ref(), &url).await?;
+            parse_transcript(&raw)
+        })
+        .await;
+    let Ok(snapshot) = fetched else {
+        return Ok(None);
+    };
+    let needs_projects = this
+        .read_with(cx, |store, _| {
+            store.project_name_for_conv(&snapshot.id).is_none()
+        })
+        .map_err(|_| ())?;
+    let projects = if needs_projects {
+        let client = http_client.clone();
+        cx.background_spawn(async move {
+            let raw = fetch_json(client.as_ref(), &format!("{BRIDGE_BASE_URL}/projects")).await?;
+            parse_projects(&raw)
+        })
+        .await
+        .ok()
+    } else {
+        None
+    };
+    let busy = snapshot.busy;
+    this.update(cx, |store, cx| {
+        if let Some(projects) = projects {
+            store.apply_projects(projects, cx);
+        }
+        store.apply_transcript(snapshot, cx);
+    })
+    .map_err(|_| ())?;
+    Ok(Some(busy))
+}
+
 pub async fn fetch_json(client: &dyn HttpClient, url: &str) -> Result<String> {
     let mut response = client.get(url, AsyncBody::default(), true).await?;
     let mut body = String::new();
@@ -250,6 +348,20 @@ fn parse_board(raw: &str) -> Result<Vec<RunRow>> {
     }
     let response: BoardResponse = serde_json::from_str(raw)?;
     Ok(response.board)
+}
+
+fn parse_transcript(raw: &str) -> Result<TranscriptSnapshot> {
+    Ok(serde_json::from_str(raw)?)
+}
+
+fn parse_projects(raw: &str) -> Result<Vec<ProjectRow>> {
+    #[derive(Default, serde::Deserialize)]
+    struct ProjectsResponse {
+        #[serde(default)]
+        projects: Vec<ProjectRow>,
+    }
+    let response: ProjectsResponse = serde_json::from_str(raw)?;
+    Ok(response.projects)
 }
 
 fn parse_usage(raw: &str) -> Result<(Vec<PoolRow>, UsageMeta)> {
@@ -274,6 +386,38 @@ mod tests {
             "11s in: not due — the old per-window tick reset fired here"
         );
         assert!(usage_due(Some(now), now + Duration::from_secs(12)));
+    }
+
+    #[test]
+    fn transcript_cadence_is_busy_aware() {
+        assert_eq!(transcript_cadence(true), TRANSCRIPT_POLL_BUSY);
+        assert_eq!(transcript_cadence(false), TRANSCRIPT_POLL_IDLE);
+        assert!(transcript_cadence(true) < transcript_cadence(false));
+    }
+
+    #[test]
+    fn transcript_endpoint_fixture_parses() {
+        let snapshot =
+            parse_transcript(r#"{"id": "c-1", "title": "t", "transcript": [], "busy": true}"#)
+                .unwrap();
+        assert_eq!(snapshot.id, "c-1");
+        assert!(snapshot.busy);
+        // (serde structs also accept JSON sequences, so `[]` parses to all-
+        // defaults — a scalar is the genuinely-invalid shape.)
+        assert!(parse_transcript("42").is_err());
+    }
+
+    #[test]
+    fn projects_endpoint_fixture_parses() {
+        let projects = parse_projects(
+            r#"{"projects": [{"id": "p-1", "name": "default",
+                "conversations": [{"id": "c-1", "title": "t"}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "default");
+        assert_eq!(projects[0].conversations[0].id, "c-1");
+        assert_eq!(parse_projects("{}").unwrap(), Vec::new());
     }
 
     #[test]
