@@ -7,10 +7,9 @@
 //! fallback — no panel-owned timers).
 //!
 //! Meters NEVER silently vanish — a `None` used-% degrades to the unknown
-//! tone at full width (the Antigravity quota-opacity lesson). Fill widths
-//! animate value changes on the spatial curve (500ms) via the retargetable
-//! [`AnimatedValue`]; tone flips crossfade 200ms on effects (§8.7: no
-//! property snaps).
+//! tone at full width (the Antigravity quota-opacity lesson). Meter motion
+//! (600ms spatial fills, 300ms effects tone fades on band flips only)
+//! lives in [`crate::usage_panel_meter`].
 
 use std::collections::HashMap;
 

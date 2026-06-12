@@ -12,13 +12,15 @@ use ui::prelude::*;
 use crate::agent_accents::{Tone, tone_for_used};
 use crate::task_board::motion::{AnimatedColor, AnimatedValue, EFFECTS, SPATIAL};
 
-/// Meter-fill morph duration — width changes ride the spatial curve
-/// (PARITY_SPEC §4.9 geometry class).
-const FILL_MORPH: std::time::Duration = std::time::Duration::from_millis(500);
-/// Meter tone crossfade (effects class) — band flips only; width-only
-/// changes hold the color steady (web: `background .3s` transitions only
-/// when the band class actually swaps).
-const TONE_FADE: std::time::Duration = std::time::Duration::from_millis(200);
+/// Meter-fill morph duration — web `.meter i { transition: width .6s
+/// var(--spatial-curve) }` (panels.css:57; the §4.9 geometry class at the
+/// meter's own scaled duration).
+const FILL_MORPH: std::time::Duration = std::time::Duration::from_millis(600);
+/// Meter tone crossfade — web `background .3s var(--effects-curve)`
+/// (panels.css:57). Band flips only: width-only changes hold the color
+/// steady (the web transitions background only when the band class
+/// actually swaps). 600/300 keeps §4.9's ~2:1 spatial:effects split.
+const TONE_FADE: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Per-pool meter animation state: the retargetable width fill plus the
 /// retargetable tone-color crossfade. Both are Instant-clocked, so a
@@ -55,7 +57,7 @@ impl MeterState {
 }
 
 /// The thin meter: tone-colored fill whose width morphs on the spatial
-/// curve (500ms) while its color crossfades on effects (200ms, band flips
+/// curve (600ms) while its color crossfades on effects (300ms, band flips
 /// only) — ONE animation wrapper carrying both property classes so they
 /// are concurrent from the first frame (§8.7b). The wrapper is a frame
 /// pump over Instant-clocked values: a width-only retarget restarting it
