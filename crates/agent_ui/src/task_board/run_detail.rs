@@ -27,6 +27,10 @@ use super::style::{HAIRLINE_HI, chip_reason, rel, status_pill};
 
 /// Logs tail-poll cadence while the run is live (web: 1s).
 const LOG_POLL: Duration = Duration::from_secs(1);
+/// Tail-poll backoff cap while the bridge is erroring — the poll never stops
+/// on a transient fetch error (web drawer.js skips the tick and the interval
+/// retries); it just slows down until the bridge answers again.
+const LOG_POLL_ERROR_CAP: Duration = Duration::from_secs(5);
 /// Slide-over duration (web: transform .4s decel).
 const SLIDE: Duration = Duration::from_millis(400);
 /// Scrim crossfade (web: opacity .22s effects).
@@ -93,6 +97,7 @@ impl RunDrawer {
     pub fn new(run_id: SharedString, cx: &mut Context<Self>) -> Self {
         let http_client: Arc<dyn HttpClient> = cx.http_client();
         let poll = cx.spawn(async move |this, cx| {
+            let mut failures: u32 = 0;
             loop {
                 let client = http_client.clone();
                 let url = format!("{BRIDGE_BASE_URL}/run/{run_id}");
@@ -104,6 +109,7 @@ impl RunDrawer {
                     .await;
                 let running = match fetched {
                     Ok(detail) => {
+                        failures = 0;
                         let running = detail.status == "running";
                         if this
                             .update(cx, |this, cx| this.set_detail(detail, cx))
@@ -113,13 +119,28 @@ impl RunDrawer {
                         }
                         running
                     }
-                    // Bridge hiccup — keep the last detail, stop tailing.
-                    Err(_) => false,
+                    // Bridge hiccup — keep the last detail and keep tailing;
+                    // continuation follows the last-known status (web
+                    // drawer.js catches, skips the tick, and retries).
+                    Err(_) => {
+                        failures += 1;
+                        match this.update(cx, |this, _| {
+                            this.detail
+                                .as_ref()
+                                .is_none_or(|detail| detail.status == "running")
+                        }) {
+                            Ok(running) => running,
+                            Err(_) => return,
+                        }
+                    }
                 };
                 if !running {
                     return;
                 }
-                cx.background_executor().timer(LOG_POLL).await;
+                // 1s healthy cadence; back off 1s per consecutive failure,
+                // capped at 5s, so an offline bridge isn't hammered.
+                let delay = (LOG_POLL * (failures + 1)).min(LOG_POLL_ERROR_CAP);
+                cx.background_executor().timer(delay).await;
             }
         });
         Self {
