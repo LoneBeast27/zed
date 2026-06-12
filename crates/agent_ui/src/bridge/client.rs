@@ -123,8 +123,11 @@ async fn consume_sse(
 ) -> Result<(), ()> {
     // Attached: the bridge pushes a full board+usage snapshot on connect, so
     // flipping `connected` here never shows stale data for long.
-    this.update(cx, |store, cx| store.set_connected(true, cx))
-        .map_err(|_| ())?;
+    this.update(cx, |store, cx| {
+        store.set_connected(true, cx);
+        store.set_transport(super::store::Transport::Sse, cx);
+    })
+    .map_err(|_| ())?;
 
     let (tx, mut rx) = mpsc::unbounded::<BridgeEvent>();
     let reader = cx.background_spawn(async move {
@@ -200,6 +203,7 @@ async fn poll_window(
         this.update(cx, |store, cx| match fetched {
             Ok((board, usage)) => {
                 store.apply_event(BridgeEvent::Board { board }, cx);
+                store.set_transport(super::store::Transport::Polling, cx);
                 if let Some((usage, meta)) = usage {
                     let mut changed = false;
                     if store.usage != usage {

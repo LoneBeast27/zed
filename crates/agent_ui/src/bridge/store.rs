@@ -18,6 +18,19 @@ use super::protocol::{
 /// Local elapsed-tick cadence while any run is `running`.
 const ELAPSED_TICK: Duration = Duration::from_secs(1);
 
+/// Which transport is feeding the store right now (Z4: the settings status
+/// panel's bridge-connection section). Falls back to [`Transport::None`]
+/// whenever the bridge goes offline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Transport {
+    #[default]
+    None,
+    /// The `/sse` push stream.
+    Sse,
+    /// The `/board`+`/usage` polling fallback window.
+    Polling,
+}
+
 /// The bridge snapshot Z1+ panels render from. `connected == false` means the
 /// bridge is offline — the last snapshot is kept so panels can grey-out rather
 /// than blank.
@@ -28,6 +41,9 @@ pub struct BridgeStore {
     /// usage panel's staleness banner + the island's reset phrase).
     pub usage_meta: UsageMeta,
     pub connected: bool,
+    /// The transport currently feeding the store (Z4 settings status) —
+    /// [`Transport::None`] while offline.
+    pub transport: Transport,
     /// The last `/transcript` snapshot (Z3) — `None` until the first fetch.
     /// Polled (not pushed): SSE carries only board/usage today; the bridge-
     /// side transcript event is deferred work.
@@ -42,6 +58,9 @@ pub struct BridgeStore {
     /// local tick offset on every board frame; running runs render
     /// `elapsed_s + (now − board_received_at)`.
     board_received_at: Instant,
+    /// When the last bridge event (any type) was applied — `None` until the
+    /// first frame. The settings status panel renders its age.
+    last_event_at: Option<Instant>,
     /// The 1s ticker task — `Some` only while any run is `running`
     /// (Lightness Mandate: no idle timers).
     ticker: Option<Task<()>>,
@@ -62,10 +81,12 @@ impl Default for BridgeStore {
             usage: Vec::new(),
             usage_meta: UsageMeta::default(),
             connected: false,
+            transport: Transport::None,
             transcript: None,
             transcript_conv: None,
             projects: Vec::new(),
             board_received_at: Instant::now(),
+            last_event_at: None,
             ticker: None,
             transcript_watchers: Arc::new(AtomicUsize::new(0)),
             transcript_task: None,
@@ -107,9 +128,15 @@ impl BridgeStore {
         board
     }
 
+    /// Age of the last applied bridge event — `None` until the first frame.
+    pub fn last_event_age(&self) -> Option<Duration> {
+        self.last_event_at.map(|at| at.elapsed())
+    }
+
     pub(super) fn apply_event(&mut self, event: BridgeEvent, cx: &mut gpui::Context<Self>) {
         let mut changed = !self.connected;
         self.connected = true;
+        self.last_event_at = Some(Instant::now());
         match event {
             BridgeEvent::Board { board } => {
                 // The server's elapsed_s is authoritative at receive time —
@@ -222,8 +249,26 @@ impl BridgeStore {
     }
 
     pub(super) fn set_connected(&mut self, connected: bool, cx: &mut gpui::Context<Self>) {
+        let mut changed = false;
         if self.connected != connected {
             self.connected = connected;
+            changed = true;
+        }
+        // Offline has no transport; reconnection sets the real one.
+        if !connected && self.transport != Transport::None {
+            self.transport = Transport::None;
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Which transport is feeding the store (set by the connection loop:
+    /// `Sse` on stream attach, `Polling` on a successful fallback fetch).
+    pub(super) fn set_transport(&mut self, transport: Transport, cx: &mut gpui::Context<Self>) {
+        if self.transport != transport {
+            self.transport = transport;
             cx.notify();
         }
     }

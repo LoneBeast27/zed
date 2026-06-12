@@ -36,4 +36,4 @@ pub use protocol::{
     BridgeEvent, PoolRow, RunRow, ScrapeMeta, TranscriptMessage, TranscriptRun,
     TranscriptSnapshot, UsageMeta,
 };
-pub use store::{BridgeStore, TranscriptWatch, global_store, init};
+pub use store::{BridgeStore, Transport, TranscriptWatch, global_store, init};

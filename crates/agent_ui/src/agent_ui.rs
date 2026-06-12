@@ -35,6 +35,7 @@ pub mod orchestrator_panel;
 mod model_selector_popover;
 mod profile_selector;
 mod resource_banner;
+pub mod settings_status_panel;
 pub mod symphony_panel;
 pub mod task_board;
 mod terminal_codegen;
@@ -661,6 +662,20 @@ pub fn init(
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 workspace.toggle_panel_focus::<adversary_panel::AdversaryPanel>(window, cx);
+            },
+        );
+
+        // Z4 — the settings status panel (read-only, §4.6), mounted so the
+        // `settings` mode's layout can open it.
+        let settings_status = cx.new(|cx| settings_status_panel::SettingsStatusPanel::new(cx));
+        workspace.add_panel(settings_status, window, cx);
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &settings_status_panel::ToggleFocus,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                workspace
+                    .toggle_panel_focus::<settings_status_panel::SettingsStatusPanel>(window, cx);
             },
         );
 

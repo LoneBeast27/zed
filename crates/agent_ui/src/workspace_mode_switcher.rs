@@ -256,6 +256,7 @@ fn resolve_panel_persistent_name(raw: &str) -> Option<&'static str> {
         "orchestrator" | "orchestratorpanel" | "chat" => Some("OrchestratorPanel"),
         "adversary" | "adversarypanel" => Some("AdversaryPanel"),
         "symphony" | "symphonypanel" => Some("SymphonyPanel"),
+        "settings" | "settingspanel" | "settingsstatuspanel" => Some("SettingsStatusPanel"),
         _ => None,
     }
 }
@@ -360,6 +361,23 @@ mod tests {
         assert_eq!(
             resolve_panel_persistent_name("Symphony Panel"),
             Some("SymphonyPanel")
+        );
+    }
+
+    #[test]
+    fn resolve_panel_names_maps_settings_status() {
+        // Z4 — the `settings` mode mounts the read-only status panel.
+        assert_eq!(
+            resolve_panel_persistent_name("settings"),
+            Some("SettingsStatusPanel")
+        );
+        assert_eq!(
+            resolve_panel_persistent_name("SettingsPanel"),
+            Some("SettingsStatusPanel")
+        );
+        assert_eq!(
+            resolve_panel_persistent_name("settings_status_panel"),
+            Some("SettingsStatusPanel")
         );
     }
 
