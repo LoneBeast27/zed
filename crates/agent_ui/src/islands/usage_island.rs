@@ -27,7 +27,7 @@ use workspace::Workspace;
 
 use crate::agent_accents::{STATUS_ERROR, Tone, tone_for_used, used_pct};
 use crate::bridge::{self, BridgeStore};
-use crate::task_board::motion::{AnimatedValue, EFFECTS, SPATIAL, StateFade, mix};
+use crate::task_board::motion::{AnimatedColor, AnimatedValue, EFFECTS, SPATIAL, StateFade};
 use crate::task_board::style::HAIRLINE_HI;
 use crate::usage_panel::{UsagePanel, fmt_pct};
 
@@ -42,9 +42,11 @@ const NOTIFY_HOLD: std::time::Duration = std::time::Duration::from_secs(6);
 const FACE_IN: std::time::Duration = std::time::Duration::from_millis(200);
 /// Outgoing face fade-out (web `.isl-face.out` 120ms).
 const FACE_OUT: std::time::Duration = std::time::Duration::from_millis(120);
-/// Container tint crossfade share of the morph (200ms of the 500ms,
-/// concurrent — §4.9 split).
-const TINT_RESCALE: f32 = 2.5;
+/// Container tint crossfade — web `background-color .2s / border-color .2s
+/// var(--effects-curve)`, concurrent with the geometry morph (§4.9 split).
+/// Instant-clocked on its own [`AnimatedColor`]s, so it is independent of
+/// the morph duration and of wrapper restarts.
+const TINT_FADE: std::time::Duration = std::time::Duration::from_millis(200);
 /// `--surface-float: #1e1e1e` — floating-layer fill (no backdrop material
 /// natively; the solid fallback is the spec'd non-blur path). Shared with
 /// the toast cards (one corner system, one surface).
@@ -77,9 +79,12 @@ pub struct UsageIsland {
     geom_h: AnimatedValue,
     geom_r: AnimatedValue,
     geom_init: bool,
-    /// Critical tint state (held = error-tinted container).
-    was_held: bool,
-    tint_fade: StateFade,
+    /// Critical tint (held = error-tinted container) — retargetable colors,
+    /// so any interrupt re-bases from the CURRENTLY RENDERED tint, never
+    /// the opposite endpoint (web: bg/border transition only when
+    /// `.critical` actually flips).
+    tint_bg: AnimatedColor,
+    tint_border: AnimatedColor,
     /// `Some` only while armed — dropping cancels (no idle timers).
     hold_task: Option<Task<()>>,
     pump_task: Option<Task<()>>,
@@ -91,6 +96,7 @@ impl UsageIsland {
         let store = bridge::global_store(cx);
         let _store_subscription =
             cx.observe(&store, |this: &mut Self, _, cx| this.sync_from_store(cx));
+        let (rest_bg, rest_border) = Self::tint(false);
         let mut this = Self {
             store,
             workspace,
@@ -104,8 +110,8 @@ impl UsageIsland {
             geom_h: AnimatedValue::settled(0., SPATIAL, MORPH),
             geom_r: AnimatedValue::settled(0., SPATIAL, MORPH),
             geom_init: false,
-            was_held: false,
-            tint_fade: StateFade::default(),
+            tint_bg: AnimatedColor::settled(rest_bg, EFFECTS, TINT_FADE),
+            tint_border: AnimatedColor::settled(rest_border, EFFECTS, TINT_FADE),
             hold_task: None,
             pump_task: None,
             _store_subscription,
@@ -348,12 +354,11 @@ impl Render for UsageIsland {
             self.geom_r.jump(metrics.r);
         }
         let held = self.machine.state() == IslandState::Held;
-        if held != self.was_held {
-            self.was_held = held;
-            self.tint_fade.bump();
-        }
+        // Same-target retargets are no-ops; a real flip crossfades from the
+        // CURRENTLY RENDERED tint — never the opposite endpoint (§8.7a).
         let (to_bg, to_border) = Self::tint(held);
-        let (from_bg, from_border) = Self::tint(!held);
+        self.tint_bg.retarget(to_bg);
+        self.tint_border.retarget(to_border);
 
         // ── faces (dual-layer: outgoing overlays + fades out 120ms,
         //    incoming fades in 200ms — both effects-curve, concurrent with
@@ -404,31 +409,36 @@ impl Render for UsageIsland {
 
         let geometry_live =
             self.geom_w.animating() || self.geom_h.animating() || self.geom_r.animating();
-        if geometry_live || self.tint_fade.fresh() {
+        let tint_live = self.tint_bg.animating() || self.tint_border.animating();
+        if geometry_live || tint_live {
             let (w, h, r) = (
                 self.geom_w.clone(),
                 self.geom_h.clone(),
                 self.geom_r.clone(),
             );
+            let (bg, border) = (self.tint_bg.clone(), self.tint_border.clone());
             let generation = (self.geom_w.generation() as u64) << 24
                 ^ (self.geom_h.generation() as u64) << 16
                 ^ (self.geom_r.generation() as u64) << 8
-                ^ (self.tint_fade.generation() as u64);
+                ^ (self.tint_bg.generation() as u64) << 4
+                ^ (self.tint_border.generation() as u64);
             base.with_animation(
                 ElementId::NamedInteger("usage-island-morph".into(), generation),
-                // Linear delta in; SPATIAL is mapped inside value_at and the
-                // tint inside EFFECTS — concurrent classes, one wrapper
-                // (motion.rs GUARD: overshoot never reaches gpui's easing
-                // assert).
+                // The wrapper is only a FRAME PUMP: every axis is Instant-
+                // clocked inside AnimatedValue/AnimatedColor (SPATIAL mapped
+                // inside `current()` — motion GUARD; tint on its own 200ms
+                // EFFECTS clock). A wrapper restart (any generation bump)
+                // re-bases NOTHING — non-retargeted axes keep their own
+                // flight and the tint continues from its current mix, so
+                // interrupts are continuous on ALL axes (§8.7a).
                 Animation::new(MORPH),
-                move |container, t| {
-                    let tint_t = EFFECTS.eval((t * TINT_RESCALE).min(1.));
+                move |container, _| {
                     container
-                        .w(px(w.value_at(t)))
-                        .h(px(h.value_at(t)))
-                        .rounded(px(r.value_at(t).max(0.)))
-                        .bg(mix(from_bg, to_bg, tint_t))
-                        .border_color(mix(from_border, to_border, tint_t))
+                        .w(px(w.current()))
+                        .h(px(h.current()))
+                        .rounded(px(r.current().max(0.)))
+                        .bg(bg.current())
+                        .border_color(border.current())
                 },
             )
             .into_any_element()
@@ -436,8 +446,8 @@ impl Render for UsageIsland {
             base.w(px(self.geom_w.target()))
                 .h(px(self.geom_h.target()))
                 .rounded(px(self.geom_r.target()))
-                .bg(to_bg)
-                .border_color(to_border)
+                .bg(self.tint_bg.target())
+                .border_color(self.tint_border.target())
                 .into_any_element()
         }
     }
