@@ -35,6 +35,7 @@ pub mod orchestrator_panel;
 mod model_selector_popover;
 mod profile_selector;
 mod resource_banner;
+pub mod symphony_panel;
 pub mod task_board;
 mod terminal_codegen;
 pub mod usage_panel;
@@ -634,6 +635,19 @@ pub fn init(
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 workspace.toggle_panel_focus::<orchestrator_panel::OrchestratorPanel>(window, cx);
+            },
+        );
+
+        // Z4 — the symphony panel, mounted so the `symphony` mode's
+        // layout can open it.
+        let symphony = cx.new(|cx| symphony_panel::SymphonyPanel::new(cx));
+        workspace.add_panel(symphony, window, cx);
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &symphony_panel::ToggleFocus,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                workspace.toggle_panel_focus::<symphony_panel::SymphonyPanel>(window, cx);
             },
         );
 

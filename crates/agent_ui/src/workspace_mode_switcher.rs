@@ -255,6 +255,7 @@ fn resolve_panel_persistent_name(raw: &str) -> Option<&'static str> {
         // and closing the dock instead (fixed alongside Z4's entries).
         "orchestrator" | "orchestratorpanel" | "chat" => Some("OrchestratorPanel"),
         "adversary" | "adversarypanel" => Some("AdversaryPanel"),
+        "symphony" | "symphonypanel" => Some("SymphonyPanel"),
         _ => None,
     }
 }
@@ -346,6 +347,19 @@ mod tests {
         assert_eq!(
             resolve_panel_persistent_name("Adversary Panel"),
             Some("AdversaryPanel")
+        );
+    }
+
+    #[test]
+    fn resolve_panel_names_maps_symphony() {
+        // Z4 — the `symphony` mode mounts the native symphony panel.
+        assert_eq!(
+            resolve_panel_persistent_name("symphony"),
+            Some("SymphonyPanel")
+        );
+        assert_eq!(
+            resolve_panel_persistent_name("Symphony Panel"),
+            Some("SymphonyPanel")
         );
     }
 

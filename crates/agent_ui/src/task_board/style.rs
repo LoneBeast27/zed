@@ -176,6 +176,13 @@ pub fn raw_status_pill(id: impl Into<ElementId>, status: &str, cx: &App) -> Stat
     pill_with_label(id, status, status.to_string(), None, cx)
 }
 
+/// Symphony's `.pill.pending` (PARITY_SPEC §4.3): the task cards run a
+/// THIRD pill vocabulary — "Queued", where the inbox maps pending to
+/// "Idle" (symphony.js `card()` hardcodes the label).
+pub fn queued_pill(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
+    pill_with_label(id, "pending", "Queued".to_string(), None, cx)
+}
+
 /// Shared `.pill` builder: status-colored label (+ pulsing dot while
 /// running, + optional elapsed segment).
 fn pill_with_label(
