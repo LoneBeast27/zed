@@ -187,6 +187,32 @@ pub const DECEL: CubicBezier = CubicBezier::new(0.05, 0.7, 0.1, 1.0);
 /// color crossfades. Stays in [0,1].
 pub const EFFECTS: CubicBezier = CubicBezier::new(0.34, 0.8, 0.34, 1.0);
 
+/// `--exit-curve` — Caelestia's `emphasized` two-segment spline, carried as
+/// the same `linear()` sample table the web ships (app.css): fast middle,
+/// no overshoot. Exits are sharper than entries and never symmetric with
+/// them (§4.9). Evaluated by piecewise-linear interpolation, exactly like
+/// CSS `linear()`.
+pub const EXIT_POINTS: [f32; 21] = [
+    0.0, 0.021, 0.094, 0.274, 0.635, 0.773, 0.84, 0.883, 0.912, 0.934, 0.95, 0.963, 0.973, 0.981,
+    0.987, 0.991, 0.995, 0.997, 0.999, 1.0, 1.0,
+];
+
+/// y for progress-x on the exit curve (CSS `linear()` semantics: stops
+/// spread evenly across [0,1], segments interpolate linearly).
+pub fn exit_eval(x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let span = (EXIT_POINTS.len() - 1) as f32;
+    let pos = x * span;
+    let ix = pos.floor() as usize;
+    let frac = pos - ix as f32;
+    EXIT_POINTS[ix] + (EXIT_POINTS[ix + 1] - EXIT_POINTS[ix]) * frac
+}
+
 impl CubicBezier {
     pub const fn new(x1: f32, y1: f32, x2: f32, y2: f32) -> Self {
         Self { x1, y1, x2, y2 }

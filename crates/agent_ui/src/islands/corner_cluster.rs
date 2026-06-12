@@ -13,21 +13,30 @@
 use gpui::{Context, Entity};
 use ui::prelude::*;
 
+use super::notif_stack::{NotifStack, STACK_W};
 use super::usage_island::UsageIsland;
 
 /// Corner inset for the cluster head (web `#usage-island { top: 14px;
 /// right: 14px }`).
 const CORNER_INSET: f32 = 14.;
+/// Where the toast stack starts: below the island head (14px inset + 28px
+/// rest pill + 14px gap — web `#notif-stack { top: 56px }`).
+const STACK_TOP: f32 = 56.;
 
 pub struct CornerCluster {
     island: Entity<UsageIsland>,
+    stack: Entity<NotifStack>,
 }
 
 impl CornerCluster {
-    pub fn new(island: Entity<UsageIsland>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        island: Entity<UsageIsland>,
+        stack: Entity<NotifStack>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // The backdrop renders off the island's state — repaint with it.
         cx.observe(&island, |_, _, cx| cx.notify()).detach();
-        Self { island }
+        Self { island, stack }
     }
 }
 
@@ -49,6 +58,16 @@ impl Render for CornerCluster {
                         })),
                 )
             })
+            // Toasts stack beneath the head; the island paints last so the
+            // expanded card grows DOWN over them (one corner system).
+            .child(
+                div()
+                    .absolute()
+                    .top(px(STACK_TOP))
+                    .right(px(CORNER_INSET))
+                    .w(px(STACK_W))
+                    .child(self.stack.clone()),
+            )
             .child(
                 div()
                     .absolute()

@@ -46,10 +46,12 @@ const FACE_OUT: std::time::Duration = std::time::Duration::from_millis(120);
 /// concurrent — §4.9 split).
 const TINT_RESCALE: f32 = 2.5;
 /// `--surface-float: #1e1e1e` — floating-layer fill (no backdrop material
-/// natively; the solid fallback is the spec'd non-blur path).
-const SURFACE_FLOAT: gpui::Rgba = crate::agent_accents::rgba_hex(0x1e1e1eff);
+/// natively; the solid fallback is the spec'd non-blur path). Shared with
+/// the toast cards (one corner system, one surface).
+pub(crate) const SURFACE_FLOAT: gpui::Rgba = crate::agent_accents::rgba_hex(0x1e1e1eff);
 
 /// One pool as the island renders it.
+#[derive(PartialEq)]
 struct PoolView {
     name: String,
     short: SharedString,
@@ -148,15 +150,17 @@ impl UsageIsland {
     }
 
     /// A bridge snapshot arrived: rebuild the pool views and feed the
-    /// threshold machine.
+    /// threshold machine. The store notifies every second while a run
+    /// ticks, so repaint only when the usage data or the machine state
+    /// actually changed (§8 idle cost).
     fn sync_from_store(&mut self, cx: &mut Context<Self>) {
         let store = self.store.read(cx);
-        self.reset_phrase = store
+        let reset_phrase = store
             .usage_meta
             .scraped
             .as_ref()
             .and_then(|scrape| scrape.reset_phrase.clone());
-        self.pools = store
+        let pools: Vec<PoolView> = store
             .usage
             .iter()
             .map(|pool| {
@@ -170,14 +174,20 @@ impl UsageIsland {
                 }
             })
             .collect();
+        let changed = pools != self.pools || reset_phrase != self.reset_phrase;
+        self.reset_phrase = reset_phrase;
+        self.pools = pools;
         let snapshot: Vec<(String, Option<f64>)> = self
             .pools
             .iter()
             .map(|pool| (pool.name.clone(), pool.used))
             .collect();
+        let state_before = self.machine.state();
         let cmd = self.machine.ingest(&snapshot);
         self.apply_cmd(cmd, cx);
-        cx.notify();
+        if changed || self.machine.state() != state_before {
+            cx.notify();
+        }
     }
 
     /// Arm/clear the machine's timers. Stale pump fires are harmless (the

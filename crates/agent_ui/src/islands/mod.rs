@@ -44,8 +44,11 @@
 
 pub mod corner_cluster;
 pub mod island_faces;
+pub mod notif_logic;
+pub mod notif_stack;
 pub mod state;
 pub mod usage_island;
 
 pub use corner_cluster::CornerCluster;
+pub use notif_stack::NotifStack;
 pub use usage_island::UsageIsland;

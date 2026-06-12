@@ -636,8 +636,9 @@ pub fn init(
         // mounted ONCE at workspace level so it stays alive across every
         // mode (PARITY_SPEC §4.8 cross-route persistence).
         let weak_workspace = cx.weak_entity();
-        let island = cx.new(|cx| islands::UsageIsland::new(weak_workspace, cx));
-        let cluster = cx.new(|cx| islands::CornerCluster::new(island, cx));
+        let island = cx.new(|cx| islands::UsageIsland::new(weak_workspace.clone(), cx));
+        let stack = cx.new(|cx| islands::NotifStack::new(weak_workspace, cx));
+        let cluster = cx.new(|cx| islands::CornerCluster::new(island, stack, cx));
         workspace.set_corner_cluster_item(Some(cluster.into()), window, cx);
 
         // M2 — `Ctrl+Alt+1..9` (keymap asset, loaded only when the flag is
