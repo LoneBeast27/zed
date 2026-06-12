@@ -87,8 +87,11 @@ pub fn inbox_list(
         },
     )
     .size_full()
+    // `.inbox { padding: 8px 16px 24px }` (board.css:34) — uniform_list
+    // folds the padding into content sizing/scroll offset.
     .px(px(16.))
     .pt(px(8.))
+    .pb(px(24.))
     .into_any_element()
 }
 
