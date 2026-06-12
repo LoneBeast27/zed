@@ -87,6 +87,9 @@ pub struct RunDrawer {
     /// leaving and the arriving tab (web `.drawer-tabs button` transition).
     prev_tab: DrawerTab,
     tab_fade: StateFade,
+    /// Close-button tracked hover (web `#drawer-close` 150ms transition).
+    close_hovered: bool,
+    close_fade: StateFade,
     /// Markdown entities for the summary task + result body, rebuilt when
     /// the underlying text changes.
     task_md: Option<Entity<Markdown>>,
@@ -152,6 +155,8 @@ impl RunDrawer {
             tab: DrawerTab::Summary,
             prev_tab: DrawerTab::Summary,
             tab_fade: StateFade::default(),
+            close_hovered: false,
+            close_fade: StateFade::default(),
             task_md: None,
             result_md: None,
             focus_handle: cx.focus_handle(),
@@ -256,11 +261,64 @@ impl RunDrawer {
                     ),
             )
             .child(status_pill("drawer-pill", &detail.status, None, cx))
-            .child(
-                IconButton::new("drawer-close", IconName::Close)
-                    .icon_color(Color::Muted)
-                    .on_click(cx.listener(|this, _, _, cx| this.dismiss(cx))),
+            .child(self.render_close(cx))
+    }
+
+    /// `#drawer-close`: 30×30 grid-centered button, 20px glyph, 8px radius;
+    /// hover swaps text-3 → text over a hover bg, both eased 150ms effects
+    /// (board.css:181-184).
+    fn render_close(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors();
+        let (off_text, on_text) = (colors.text_placeholder, colors.text);
+        let (off_bg, on_bg) = (gpui::transparent_black(), colors.element_hover);
+        let hovered = self.close_hovered;
+        let icon = move |color: gpui::Hsla| {
+            Icon::new(IconName::Close)
+                .size(IconSize::Custom(rems_from_px(20.)))
+                .color(Color::Custom(color))
+        };
+        let base = div()
+            .id("drawer-close")
+            .flex_none()
+            .size(px(30.))
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if this.close_hovered != *hovered {
+                    this.close_hovered = *hovered;
+                    this.close_fade.bump();
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(|this, _, _, cx| this.dismiss(cx)));
+        if self.close_fade.fresh() {
+            let (from_text, to_text) = if hovered {
+                (off_text, on_text)
+            } else {
+                (on_text, off_text)
+            };
+            let (from_bg, to_bg) = if hovered { (off_bg, on_bg) } else { (on_bg, off_bg) };
+            base.with_animation(
+                ElementId::NamedInteger(
+                    "drawer-close-fade".into(),
+                    self.close_fade.generation() as u64,
+                ),
+                Animation::new(STATE_FADE).with_easing(EFFECTS.easing()),
+                move |button, t| {
+                    button
+                        .bg(mix(from_bg, to_bg, t))
+                        .child(icon(mix(from_text, to_text, t)))
+                },
             )
+            .into_any_element()
+        } else if hovered {
+            base.bg(on_bg).child(icon(on_text)).into_any_element()
+        } else {
+            base.child(icon(off_text)).into_any_element()
+        }
     }
 
     fn render_worked(&self, cx: &Context<Self>) -> Option<Div> {
