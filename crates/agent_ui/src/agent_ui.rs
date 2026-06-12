@@ -36,6 +36,7 @@ mod resource_banner;
 pub mod task_board;
 mod terminal_codegen;
 pub mod usage_panel;
+mod usage_panel_meter;
 mod terminal_inline_assistant;
 pub mod terminal_thread_metadata_store;
 #[cfg(any(test, feature = "test-support"))]

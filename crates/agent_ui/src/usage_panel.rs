@@ -1,9 +1,10 @@
 //! The Usage panel (PARITY_SPEC §4.4) — the `#/usage` full page, ported from
 //! the approved web reference render (`bridge/ui/usage.js` + `panels.css`):
-//! pool meter rows (name · thin tone-colored fill · used-% in tabular nums ·
-//! window label · reset/staleness line) under a scrape-staleness banner when
-//! `_scraped.stale`. Data is the push-fed `Entity<BridgeStore>` (usage rows
-//! arrive via SSE with a 12s polling fallback — no panel-owned timers).
+//! a responsive `.pool-grid` of pool CARDS (name above a full-width 4px
+//! meter, used-% + window row beneath, mono staleness line) under a
+//! scrape-staleness banner when `_scraped.stale`. Data is the push-fed
+//! `Entity<BridgeStore>` (usage rows arrive via SSE with a 12s polling
+//! fallback — no panel-owned timers).
 //!
 //! Meters NEVER silently vanish — a `None` used-% degrades to the unknown
 //! tone at full width (the Antigravity quota-opacity lesson). Fill widths
@@ -15,15 +16,18 @@ use std::collections::HashMap;
 
 use gpui::{
     Action, Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, SharedString, Subscription, Window, actions, relative,
+    FocusHandle, Focusable, FontWeight, SharedString, Subscription, Window, actions,
 };
+use settings::Settings as _;
+use theme_settings::ThemeSettings;
 use ui::prelude::*;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
-use crate::agent_accents::{STATUS_BLOCKED, Tone, tone_for_used, used_pct};
+use crate::agent_accents::{STATUS_BLOCKED, tone_for_used, used_pct};
 use crate::bridge::{self, BridgeStore, PoolRow, UsageMeta};
-use crate::task_board::motion::{AnimatedColor, AnimatedValue, EFFECTS, SPATIAL, StateFade};
-use crate::task_board::style::tabular_nums;
+use crate::task_board::motion::{EFFECTS, StateFade};
+use crate::task_board::style::{SURFACE_1, tabular_nums};
+use crate::usage_panel_meter::{MeterState, render_meter};
 
 actions!(
     usage_panel,
@@ -32,14 +36,6 @@ actions!(
         ToggleFocus
     ]
 );
-
-/// Meter-fill morph duration — width changes ride the spatial curve
-/// (PARITY_SPEC §4.9 geometry class).
-const FILL_MORPH: std::time::Duration = std::time::Duration::from_millis(500);
-/// Meter tone crossfade (effects class) — band flips only; width-only
-/// changes hold the color steady (web: `background .3s` transitions only
-/// when the band class actually swaps).
-const TONE_FADE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// `POOL_LABELS` from usage.js — display names for the known pools;
 /// unknown pools fall back to their raw key.
@@ -50,40 +46,6 @@ fn pool_label(name: &str) -> &str {
         "antigravity_weekly" => "Antigravity weekly",
         "gemini_free_rpd" => "Gemini free RPD",
         other => other,
-    }
-}
-
-/// Per-pool meter animation state: the retargetable width fill plus the
-/// retargetable tone-color crossfade. Both are Instant-clocked, so a
-/// width-only retarget restarting the shared animation wrapper can never
-/// replay the previous band color (§8.7a — the tone holds steady unless
-/// the band actually flips, and a flip crossfades from the color rendered
-/// right now).
-struct MeterState {
-    width: AnimatedValue,
-    tone: Tone,
-    color: AnimatedColor,
-}
-
-impl MeterState {
-    /// New pools fill from 0 to their value on first sight (the web's
-    /// `width:0%` skeleton + first `updatePool`).
-    fn new(tone: Tone) -> Self {
-        Self {
-            width: AnimatedValue::settled(0.0, SPATIAL, FILL_MORPH),
-            tone,
-            color: AnimatedColor::settled(tone.color(), EFFECTS, TONE_FADE),
-        }
-    }
-
-    fn update(&mut self, used: Option<f64>) {
-        // Unknown degrades to a full-width dim fill, never an empty bar.
-        let target = used.unwrap_or(100.0) as f32;
-        self.width.retarget(target);
-        self.tone = tone_for_used(used);
-        // Same-target retargets are no-ops: only a real band flip opens a
-        // crossfade, and it re-bases from the interpolated current color.
-        self.color.retarget(self.tone.color());
     }
 }
 
@@ -131,8 +93,9 @@ impl UsagePanel {
         }
         h_flex()
             .flex_none()
-            .items_center()
-            .gap(px(14.))
+            // `.panel-head`: baseline-aligned, gap 12 (panels.css:12-15).
+            .items_baseline()
+            .gap(px(12.))
             .px(px(28.))
             .pt(px(18.))
             .pb(px(14.))
@@ -177,70 +140,89 @@ impl UsagePanel {
         )
     }
 
-    /// One pool row: name · meter · used-% (tabular nums) · window label,
-    /// with the reset/staleness line beneath.
-    fn render_pool_row(&mut self, pool: &PoolRow, meta: &UsageMeta, cx: &App) -> AnyElement {
+    /// One `.pool-card` (panels.css:49-68): name above a full-width meter,
+    /// the used-% + window `.pool-row` beneath, and the mono
+    /// reset/staleness `.pool-stale` line.
+    fn render_pool_card(&mut self, pool: &PoolRow, meta: &UsageMeta, cx: &App) -> AnyElement {
         let colors = cx.theme().colors();
+        let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
         let used = used_pct(pool.headroom_pct);
-        let meter = self.render_meter(pool, used);
-
-        let pct_label = match used {
-            None => "unknown / stale".to_string(),
-            Some(used) => format!("{}% used", fmt_pct(used)),
-        };
+        let state = self
+            .meters
+            .entry(pool.name.clone())
+            .or_insert_with(|| MeterState::new(tone_for_used(used)));
+        state.update(used);
+        let meter = render_meter(state, &pool.name);
         let window_label = pool.window.clone().unwrap_or_default();
 
-        let scraped = meta.scraped.as_ref();
-        let (status_line, status_color) = match scraped {
-            Some(scrape) if scrape.stale => (
-                format!(
-                    "scraped {}h ago (stale)",
-                    scrape.age_h.map(fmt_pct).unwrap_or_else(|| "?".into())
-                ),
-                STATUS_BLOCKED.into(),
+        // `.pool-pct` 500 13px --text tabular; the unknown case takes the
+        // `.meter-unknown` treatment instead (12px mono italic --text-3).
+        let pct_cell = match used {
+            Some(used) => div()
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .font_features(tabular_nums())
+                .text_color(colors.text)
+                .child(SharedString::from(format!("{}% used", fmt_pct(used)))),
+            None => div()
+                .text_size(px(12.))
+                .font_family(mono.clone())
+                .italic()
+                .text_color(colors.text_placeholder)
+                .child("unknown / stale"),
+        };
+
+        // `.pool-stale` — always mono 11px --text-3 (the web keeps text-3
+        // even while stale; the stale BANNER carries the warning tint).
+        let status_line = match meta.scraped.as_ref() {
+            Some(scrape) if scrape.stale => format!(
+                "scraped {}h ago (stale)",
+                scrape.age_h.map(fmt_pct).unwrap_or_else(|| "?".into())
             ),
             Some(scrape) => match &scrape.reset_phrase {
-                Some(phrase) => (format!("resets {phrase}"), colors.text_placeholder),
-                None => ("self-metered".to_string(), colors.text_placeholder),
+                Some(phrase) => format!("resets {phrase}"),
+                None => "self-metered".to_string(),
             },
-            None => ("self-metered".to_string(), colors.text_placeholder),
+            None => "self-metered".to_string(),
         };
 
         v_flex()
-            .py(px(14.))
-            .gap(px(6.))
-            .border_b_1()
+            // The `.pool-grid` cell: auto-fill minmax(240px, 1fr) emulated
+            // as wrap + grow from a 240px basis.
+            .flex_grow()
+            .flex_basis(px(240.))
+            .rounded(px(12.))
+            .bg(SURFACE_1)
+            .border_1()
             .border_color(colors.border)
+            .px(px(16.))
+            .py(px(15.))
             .child(
+                // `.pool-name` 500 14px --text, 12px below.
+                div()
+                    .mb(px(12.))
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(colors.text)
+                    .truncate()
+                    .child(SharedString::from(pool_label(&pool.name).to_string())),
+            )
+            .child(meter)
+            .child(
+                // `.pool-row`: baseline-aligned pct vs cap, 10px below the
+                // meter.
                 h_flex()
-                    .items_center()
-                    .gap(px(12.))
+                    .mt(px(10.))
+                    .items_baseline()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(pct_cell)
                     .child(
+                        // `.pool-cap` 400 12px mono --text-3 tabular.
                         div()
-                            .w(px(180.))
-                            .flex_none()
-                            .text_size(px(14.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(colors.text)
-                            .truncate()
-                            .child(SharedString::from(pool_label(&pool.name).to_string())),
-                    )
-                    .child(meter)
-                    .child(
-                        div()
-                            .w(px(110.))
-                            .flex_none()
-                            .text_size(px(13.))
-                            .font_features(tabular_nums())
-                            .text_color(colors.text_muted)
-                            .text_right()
-                            .child(SharedString::from(pct_label)),
-                    )
-                    .child(
-                        div()
-                            .w(px(56.))
-                            .flex_none()
                             .text_size(px(12.))
+                            .font_family(mono.clone())
+                            .font_features(tabular_nums())
                             .text_color(colors.text_placeholder)
                             .truncate()
                             .child(SharedString::from(window_label)),
@@ -248,71 +230,15 @@ impl UsagePanel {
             )
             .child(
                 div()
-                    .text_size(px(12.))
-                    .text_color(status_color)
+                    .mt(px(8.))
+                    .text_size(px(11.))
+                    .font_family(mono)
+                    .text_color(colors.text_placeholder)
                     .child(SharedString::from(status_line)),
             )
             .into_any_element()
     }
 
-    /// The thin meter: tone-colored fill whose width morphs on the spatial
-    /// curve (500ms) while its color crossfades on effects (200ms, band
-    /// flips only) — ONE animation wrapper carrying both property classes
-    /// so they are concurrent from the first frame (§8.7b). The wrapper is
-    /// a frame pump over Instant-clocked values: a width-only retarget
-    /// restarting it can never replay the previous band color.
-    fn render_meter(&mut self, pool: &PoolRow, used: Option<f64>) -> AnyElement {
-        let state = self
-            .meters
-            .entry(pool.name.clone())
-            .or_insert_with(|| MeterState::new(tone_for_used(used)));
-        state.update(used);
-
-        let dim = state.tone == Tone::Unknown;
-
-        let fill = div()
-            .h_full()
-            .rounded_full()
-            .bg(state.color.target())
-            .when(dim, |fill| fill.opacity(0.35));
-
-        let track = div()
-            .flex_1()
-            .h(px(6.))
-            .rounded_full()
-            .bg(gpui::white().opacity(0.10))
-            .overflow_hidden();
-
-        if state.width.animating() || state.color.animating() {
-            let value = state.width.clone();
-            let color = state.color.clone();
-            // Animation identity covers both the width retarget and the
-            // tone flip — either bumps the key, extending the pump window.
-            let generation = (state.width.generation() as u64) << 16
-                | (state.color.generation() as u64 & 0xffff);
-            track
-                .child(fill.with_animation(
-                    ElementId::NamedInteger(
-                        format!("meter-fill-{}", pool.name).into(),
-                        generation,
-                    ),
-                    // Frame pump: SPATIAL is mapped inside `current()` (the
-                    // animator-closure rule for overshooting curves —
-                    // motion GUARD). Overshoot past the track clips on
-                    // overflow_hidden: the visible spring settle.
-                    Animation::new(FILL_MORPH),
-                    move |fill, _| {
-                        fill.w(relative(value.current().max(0.0) / 100.0))
-                            .bg(color.current())
-                    },
-                ))
-                .into_any_element()
-        } else {
-            track
-                .child(fill.w(relative(state.width.target().max(0.0) / 100.0)))
-                .into_any_element()
-        }
-    }
 }
 
 /// JS-style number formatting: integers print bare ("82"), fractions keep
@@ -350,17 +276,21 @@ impl Render for UsagePanel {
             )
             .into_any_element()
         } else {
-            let rows: Vec<AnyElement> = pools
+            let cards: Vec<AnyElement> = pools
                 .iter()
-                .map(|pool| self.render_pool_row(pool, &meta, cx))
+                .map(|pool| self.render_pool_card(pool, &meta, cx))
                 .collect();
+            // `.usage-scroll` padding 20/28/32 wrapping the `.pool-grid`
+            // (wrap + 14px gaps ≈ auto-fill minmax(240px, 1fr)).
             div()
                 .id("usage-pools")
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
                 .px(px(28.))
-                .child(v_flex().children(rows))
+                .pt(px(20.))
+                .pb(px(32.))
+                .child(h_flex().flex_wrap().gap(px(14.)).children(cards))
                 .into_any_element()
         };
 
@@ -471,56 +401,4 @@ mod tests {
         assert_eq!(fmt_pct(100.0), "100");
     }
 
-    #[test]
-    fn meter_state_animates_value_changes_and_tone_flips() {
-        let mut state = MeterState::new(tone_for_used(Some(40.0)));
-        state.update(Some(40.0));
-        // First sight: fills 0 → 40 (the web's width:0% skeleton).
-        assert!(state.width.animating());
-        assert_eq!(state.width.target(), 40.0);
-        assert_eq!(state.tone, Tone::Ok);
-        assert_eq!(state.color.generation(), 0, "same tone — no crossfade");
-
-        // Crossing into warn: width retargets AND the tone crossfades.
-        state.update(Some(80.0));
-        assert_eq!(state.width.target(), 80.0);
-        assert_eq!(state.tone, Tone::Warn);
-        assert_eq!(state.color.generation(), 1);
-        assert_eq!(state.color.target(), Tone::Warn.color());
-
-        // Unknown degrades to a full-width fill, never an empty bar.
-        state.update(None);
-        assert_eq!(state.width.target(), 100.0);
-        assert_eq!(state.tone, Tone::Unknown);
-    }
-
-    #[test]
-    fn width_only_changes_hold_the_band_color() {
-        // The previous-band flash: after Ok→Warn, every later width-only
-        // retarget restarted the color animation from the OLD band color.
-        // The tone must hold steady unless the band actually flips (web:
-        // `background .3s` transitions only on a class swap).
-        let mut state = MeterState::new(tone_for_used(Some(40.0)));
-        state.update(Some(40.0));
-        state.update(Some(80.0)); // Ok → Warn flip
-        let flip_generation = state.color.generation();
-        assert_eq!(flip_generation, 1);
-
-        // Width-only changes inside the warn band: the color crossfade is
-        // NEVER restarted (same-target retargets are no-ops).
-        for used in [81.0, 79.5, 85.0, 89.9] {
-            state.update(Some(used));
-            assert_eq!(
-                state.color.generation(),
-                flip_generation,
-                "width-only change at {used}% must not restart the tone fade"
-            );
-            assert_eq!(state.color.target(), Tone::Warn.color());
-        }
-
-        // The next REAL flip crossfades again.
-        state.update(Some(95.0));
-        assert_eq!(state.color.generation(), flip_generation + 1);
-        assert_eq!(state.color.target(), Tone::Crit.color());
-    }
 }
