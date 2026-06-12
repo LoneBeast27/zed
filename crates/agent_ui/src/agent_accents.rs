@@ -51,6 +51,54 @@ pub fn accent_for_agent(name: &str) -> Hsla {
     rgba.into()
 }
 
+/// `--accent: #8ab4f8` — the single chrome accent; usage meters in the OK
+/// band fill with it (PARITY_SPEC §4.4 "accent → --blocked ≥75 → --error
+/// ≥90").
+pub const ACCENT: Rgba = rgba_hex(0x8ab4f8ff);
+/// `--text-3: rgba(255,255,255,0.38)` — the unknown/stale meter tone.
+pub const TEXT_3: Rgba = rgba_hex(0xffffff61);
+
+/// Usage-meter tone (PARITY_SPEC §4.4 / §4.8): the status color band a
+/// pool's used-% falls in. `toneFor()` from usage-island.js.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Ok,
+    Warn,
+    Crit,
+    Unknown,
+}
+
+impl Tone {
+    /// Meter-fill / dot / tinted-text color for this tone.
+    pub fn color(self) -> Hsla {
+        let rgba = match self {
+            Tone::Ok => ACCENT,
+            Tone::Warn => STATUS_BLOCKED,
+            Tone::Crit => STATUS_ERROR,
+            Tone::Unknown => TEXT_3,
+        };
+        rgba.into()
+    }
+}
+
+/// Tone for a used-% (`None` = unmetered/unscraped pool → unknown, which
+/// degrades visibly instead of vanishing — the Antigravity quota-opacity
+/// lesson).
+pub fn tone_for_used(used_pct: Option<f64>) -> Tone {
+    match used_pct {
+        None => Tone::Unknown,
+        Some(used) if used >= 90.0 => Tone::Crit,
+        Some(used) if used >= 75.0 => Tone::Warn,
+        Some(_) => Tone::Ok,
+    }
+}
+
+/// Used-% for a pool's headroom (`used = 100 − headroom`), the shared
+/// ingest math of the usage panel and island.
+pub fn used_pct(headroom_pct: Option<f64>) -> Option<f64> {
+    headroom_pct.map(|headroom| 100.0 - headroom)
+}
+
 /// Status color for a bridge run status string (case-insensitive).
 /// Unrecognized statuses render as idle/neutral.
 pub fn color_for_status(status: &str) -> Hsla {
@@ -87,6 +135,32 @@ mod tests {
         assert_eq!(color_for_status("done"), STATUS_DONE.into());
         assert_eq!(color_for_status("idle"), STATUS_IDLE.into());
         assert_eq!(color_for_status("???"), STATUS_IDLE.into());
+    }
+
+    #[test]
+    fn meter_tone_bands_match_the_web_thresholds() {
+        // toneFor(): ok < 75 ≤ warn < 90 ≤ crit; null → unknown.
+        assert_eq!(tone_for_used(None), Tone::Unknown);
+        assert_eq!(tone_for_used(Some(0.0)), Tone::Ok);
+        assert_eq!(tone_for_used(Some(74.9)), Tone::Ok);
+        assert_eq!(tone_for_used(Some(75.0)), Tone::Warn);
+        assert_eq!(tone_for_used(Some(89.9)), Tone::Warn);
+        assert_eq!(tone_for_used(Some(90.0)), Tone::Crit);
+        assert_eq!(tone_for_used(Some(120.0)), Tone::Crit);
+    }
+
+    #[test]
+    fn tone_colors_resolve_to_status_tokens() {
+        assert_eq!(Tone::Ok.color(), ACCENT.into());
+        assert_eq!(Tone::Warn.color(), STATUS_BLOCKED.into());
+        assert_eq!(Tone::Crit.color(), STATUS_ERROR.into());
+        assert_eq!(Tone::Unknown.color(), TEXT_3.into());
+    }
+
+    #[test]
+    fn used_pct_inverts_headroom() {
+        assert_eq!(used_pct(Some(18.0)), Some(82.0));
+        assert_eq!(used_pct(None), None);
     }
 
     #[test]

@@ -34,6 +34,7 @@ mod profile_selector;
 mod resource_banner;
 pub mod task_board;
 mod terminal_codegen;
+pub mod usage_panel;
 mod terminal_inline_assistant;
 pub mod terminal_thread_metadata_store;
 #[cfg(any(test, feature = "test-support"))]
@@ -614,6 +615,19 @@ pub fn init(
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 workspace.toggle_panel_focus::<task_board::TaskBoardPanel>(window, cx);
+            },
+        );
+
+        // Z2 — the usage panel, mounted the same way so the `usage` mode's
+        // layout can open it.
+        let usage = cx.new(|cx| usage_panel::UsagePanel::new(cx));
+        workspace.add_panel(usage, window, cx);
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &usage_panel::ToggleFocus,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                workspace.toggle_panel_focus::<usage_panel::UsagePanel>(window, cx);
             },
         );
 

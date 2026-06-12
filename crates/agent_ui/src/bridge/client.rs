@@ -20,7 +20,9 @@ use futures::{AsyncReadExt as _, StreamExt as _, channel::mpsc};
 use gpui::{AppContext as _, AsyncApp, WeakEntity};
 use http_client::{AsyncBody, HttpClient, Response};
 
-use super::protocol::{BridgeEvent, PoolRow, RunRow, pools_from_object};
+use super::protocol::{
+    BridgeEvent, PoolRow, RunRow, UsageMeta, pools_from_object, usage_meta_from_object,
+};
 use super::sse::SseParser;
 use super::store::BridgeStore;
 
@@ -191,11 +193,19 @@ async fn poll_window(
         this.update(cx, |store, cx| match fetched {
             Ok((board, usage)) => {
                 store.apply_event(BridgeEvent::Board { board }, cx);
-                if let Some(usage) = usage
-                    && store.usage != usage
-                {
-                    store.usage = usage;
-                    cx.notify();
+                if let Some((usage, meta)) = usage {
+                    let mut changed = false;
+                    if store.usage != usage {
+                        store.usage = usage;
+                        changed = true;
+                    }
+                    if store.usage_meta != meta {
+                        store.usage_meta = meta;
+                        changed = true;
+                    }
+                    if changed {
+                        cx.notify();
+                    }
                 }
             }
             // Bridge offline: keep the last snapshot, flip the flag.
@@ -242,12 +252,12 @@ fn parse_board(raw: &str) -> Result<Vec<RunRow>> {
     Ok(response.board)
 }
 
-fn parse_usage(raw: &str) -> Result<Vec<PoolRow>> {
+fn parse_usage(raw: &str) -> Result<(Vec<PoolRow>, UsageMeta)> {
     let value: serde_json::Value = serde_json::from_str(raw)?;
     let object = value
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("usage: expected a JSON object"))?;
-    Ok(pools_from_object(object))
+    Ok((pools_from_object(object), usage_meta_from_object(object)))
 }
 
 #[cfg(test)]
@@ -276,9 +286,10 @@ mod tests {
 
     #[test]
     fn usage_endpoint_fixture_parses() {
-        let usage = parse_usage(
+        let (usage, meta) = parse_usage(
             r#"{
                 "_meta": { "updated_at": "2026-06-12T03:14:00Z" },
+                "_source": "self-metering",
                 "claude": { "headroom_pct": 62.5, "window": "5h" },
                 "codex": { "headroom_pct": null }
             }"#,
@@ -288,6 +299,7 @@ mod tests {
         assert_eq!(usage[0].name, "claude");
         assert_eq!(usage[0].headroom_pct, Some(62.5));
         assert_eq!(usage[1].headroom_pct, None);
+        assert_eq!(meta.source.as_deref(), Some("self-metering"));
         assert!(parse_usage("[1, 2, 3]").is_err());
     }
 }

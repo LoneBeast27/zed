@@ -57,6 +57,85 @@ pub enum BridgeEvent {
     Unknown,
 }
 
+/// Scrape metadata off the usage object's `_scraped` key.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScrapeMeta {
+    /// The scrape outlived its freshness window — meters degrade to
+    /// "unknown/stale", never silently vanish (PARITY_SPEC §4.4).
+    pub stale: bool,
+    pub age_h: Option<f64>,
+    pub age_min: Option<f64>,
+    /// First vendor reset phrase ("resets 14:32"). `None` when stale or
+    /// absent — mirrors the web's `resetPhrase()` (usage-island.js), which
+    /// refuses a reset time it can no longer trust.
+    pub reset_phrase: Option<String>,
+}
+
+/// The `_`-prefixed metadata keys that ride next to the pools in every
+/// usage payload.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UsageMeta {
+    /// `_source` — "self-metering + vendor-page scrape".
+    pub source: Option<String>,
+    /// `_scraped` — present only when a vendor-page scrape feeds the pools.
+    pub scraped: Option<ScrapeMeta>,
+}
+
+impl UsageMeta {
+    /// Whether the scrape (if any) has gone stale.
+    pub fn stale(&self) -> bool {
+        self.scraped.as_ref().is_some_and(|scrape| scrape.stale)
+    }
+}
+
+/// Extract [`UsageMeta`] from a usage JSON object. Liberal like the rest of
+/// the protocol: missing/odd-shaped metadata degrades to defaults.
+pub fn usage_meta_from_object(object: &serde_json::Map<String, serde_json::Value>) -> UsageMeta {
+    let source = object
+        .get("_source")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let scraped = object
+        .get("_scraped")
+        .and_then(|value| value.as_object())
+        .map(|scraped| {
+            let stale = scraped
+                .get("stale")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            ScrapeMeta {
+                stale,
+                age_h: scraped.get("age_h").and_then(|value| value.as_f64()),
+                age_min: scraped.get("age_min").and_then(|value| value.as_f64()),
+                reset_phrase: if stale {
+                    None
+                } else {
+                    first_reset_phrase(scraped)
+                },
+            }
+        });
+    UsageMeta { source, scraped }
+}
+
+/// `resetPhrase()` from usage-island.js — the first non-empty
+/// `reset_phrases[0]` across `_scraped.vendors`. (serde_json maps iterate
+/// alphabetically rather than in JS insertion order; with one phrase-bearing
+/// vendor — the live shape — the result is identical.)
+fn first_reset_phrase(scraped: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let vendors = scraped.get("vendors")?.as_object()?;
+    for vendor in vendors.values() {
+        if let Some(phrase) = vendor
+            .get("reset_phrases")
+            .and_then(|phrases| phrases.as_array())
+            .and_then(|phrases| phrases.first())
+            .and_then(|phrase| phrase.as_str())
+        {
+            return Some(phrase.to_string());
+        }
+    }
+    None
+}
+
 /// Shape a usage JSON object (from `GET /usage` or a flattened `usage` event)
 /// into sorted pool rows, skipping `_`-prefixed metadata keys.
 pub fn pools_from_object(object: &serde_json::Map<String, serde_json::Value>) -> Vec<PoolRow> {
@@ -152,5 +231,66 @@ mod tests {
         let event: BridgeEvent =
             serde_json::from_str(r#"{"type": "transcript", "lines": []}"#).unwrap();
         assert!(matches!(event, BridgeEvent::Unknown));
+    }
+
+    fn usage_object(json: &str) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(json)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn usage_meta_extracts_source_and_fresh_scrape() {
+        let meta = usage_meta_from_object(&usage_object(
+            r#"{
+                "_source": "self-metering + vendor-page scrape",
+                "_scraped": {
+                    "stale": false, "age_min": 12.0,
+                    "vendors": {
+                        "claude": {"reset_phrases": ["14:32"]},
+                        "codex": {"reset_phrases": []}
+                    }
+                },
+                "claude_sdk_credit": {"headroom_pct": 18}
+            }"#,
+        ));
+        assert_eq!(
+            meta.source.as_deref(),
+            Some("self-metering + vendor-page scrape")
+        );
+        assert!(!meta.stale());
+        let scraped = meta.scraped.unwrap();
+        assert_eq!(scraped.age_min, Some(12.0));
+        assert_eq!(scraped.reset_phrase.as_deref(), Some("14:32"));
+    }
+
+    #[test]
+    fn usage_meta_stale_scrape_withholds_reset_phrase() {
+        // resetPhrase() returns null when stale — a reset time it can no
+        // longer trust is worse than none.
+        let meta = usage_meta_from_object(&usage_object(
+            r#"{"_scraped": {"stale": true, "age_h": 36.2,
+                "vendors": {"claude": {"reset_phrases": ["14:32"]}}}}"#,
+        ));
+        assert!(meta.stale());
+        let scraped = meta.scraped.unwrap();
+        assert_eq!(scraped.age_h, Some(36.2));
+        assert_eq!(scraped.reset_phrase, None);
+    }
+
+    #[test]
+    fn usage_meta_degrades_on_missing_or_odd_metadata() {
+        let meta = usage_meta_from_object(&usage_object(
+            r#"{"claude_sdk_credit": {"headroom_pct": 50}}"#,
+        ));
+        assert_eq!(meta, UsageMeta::default());
+        assert!(!meta.stale());
+        // Wrong-typed metadata degrades instead of erroring.
+        let meta = usage_meta_from_object(&usage_object(
+            r#"{"_source": 7, "_scraped": "yes"}"#,
+        ));
+        assert_eq!(meta, UsageMeta::default());
     }
 }

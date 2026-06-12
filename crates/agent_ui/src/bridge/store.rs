@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use gpui::{App, AppContext as _, Entity, Task};
 
 use super::client::connection_loop;
-use super::protocol::{BridgeEvent, PoolRow, RunRow, pools_from_object};
+use super::protocol::{
+    BridgeEvent, PoolRow, RunRow, UsageMeta, pools_from_object, usage_meta_from_object,
+};
 
 /// Local elapsed-tick cadence while any run is `running`.
 const ELAPSED_TICK: Duration = Duration::from_secs(1);
@@ -19,6 +21,9 @@ const ELAPSED_TICK: Duration = Duration::from_secs(1);
 pub struct BridgeStore {
     pub board: Vec<RunRow>,
     pub usage: Vec<PoolRow>,
+    /// `_source` / `_scraped` metadata riding the usage payload (Z2: the
+    /// usage panel's staleness banner + the island's reset phrase).
+    pub usage_meta: UsageMeta,
     pub connected: bool,
     /// When the current board snapshot arrived. The server value re-bases the
     /// local tick offset on every board frame; running runs render
@@ -34,6 +39,7 @@ impl Default for BridgeStore {
         Self {
             board: Vec::new(),
             usage: Vec::new(),
+            usage_meta: UsageMeta::default(),
             connected: false,
             board_received_at: Instant::now(),
             ticker: None,
@@ -79,6 +85,11 @@ impl BridgeStore {
                 let usage = pools_from_object(&fields);
                 if self.usage != usage {
                     self.usage = usage;
+                    changed = true;
+                }
+                let meta = usage_meta_from_object(&fields);
+                if self.usage_meta != meta {
+                    self.usage_meta = meta;
                     changed = true;
                 }
             }

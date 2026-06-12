@@ -81,6 +81,37 @@ pub fn handle_switch_mode_action(
     switch_to_mode(&mode, workspace, window, cx);
 }
 
+/// Switch the workspace to the mode with the given id, if the activity bar
+/// carries one (Z2: the usage island's expanded-card rows route to the
+/// `usage` mode — the native `location.hash = "#/usage"`). Returns `false`
+/// when no activity bar is installed or no such mode exists, so callers can
+/// fall back to focusing a panel directly.
+pub fn switch_to_mode_id(
+    id: &str,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut gpui::Context<Workspace>,
+) -> bool {
+    let Some(bar) = workspace
+        .activity_bar_item()
+        .and_then(|view| view.downcast::<ActivityBar>().ok())
+    else {
+        return false;
+    };
+    let Some(mode) = bar
+        .read(cx)
+        .modes()
+        .iter()
+        .find(|mode| mode.id == id)
+        .cloned()
+    else {
+        return false;
+    };
+    bar.update(cx, |bar, cx| bar.set_active(mode.id.clone(), cx));
+    switch_to_mode(&mode, workspace, window, cx);
+    true
+}
+
 /// Switch the workspace into `mode`: apply its dock layout, then honor any
 /// `open_url` side effect (system default browser).
 pub fn switch_to_mode(
@@ -218,6 +249,7 @@ fn resolve_panel_persistent_name(raw: &str) -> Option<&'static str> {
         "collabpanel" => Some("CollabPanel"),
         "debugpanel" | "debuggerpanel" => Some("DebugPanel"),
         "taskboard" | "taskboardpanel" | "board" => Some("TaskBoardPanel"),
+        "usage" | "usagepanel" => Some("UsagePanel"),
         _ => None,
     }
 }
@@ -277,6 +309,16 @@ mod tests {
         assert_eq!(
             resolve_panel_persistent_name("Board"),
             Some("TaskBoardPanel")
+        );
+    }
+
+    #[test]
+    fn resolve_panel_names_maps_usage() {
+        // Z2 — the `usage` mode mounts the native usage panel.
+        assert_eq!(resolve_panel_persistent_name("usage"), Some("UsagePanel"));
+        assert_eq!(
+            resolve_panel_persistent_name("Usage Panel"),
+            Some("UsagePanel")
         );
     }
 
