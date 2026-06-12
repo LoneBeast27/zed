@@ -20,5 +20,12 @@
     "bindings": {
       "enter": "orchestrator_panel::Send"
     }
+  },
+  {
+    "context": "AdversaryComposer > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "adversary_panel::Broadcast"
+    }
   }
 ]

@@ -1,4 +1,5 @@
 mod activity_bar;
+pub mod adversary_panel;
 pub mod agent_accents;
 mod agent_configuration;
 pub mod agent_connection_store;
@@ -633,6 +634,19 @@ pub fn init(
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 workspace.toggle_panel_focus::<orchestrator_panel::OrchestratorPanel>(window, cx);
+            },
+        );
+
+        // Z4 — the adversary panel, mounted so the `adversary` mode's
+        // layout can open it (same registration shape as the board).
+        let adversary = cx.new(|cx| adversary_panel::AdversaryPanel::new(window, cx));
+        workspace.add_panel(adversary, window, cx);
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &adversary_panel::ToggleFocus,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                workspace.toggle_panel_focus::<adversary_panel::AdversaryPanel>(window, cx);
             },
         );
 

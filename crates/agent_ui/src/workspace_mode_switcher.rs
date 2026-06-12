@@ -250,6 +250,11 @@ fn resolve_panel_persistent_name(raw: &str) -> Option<&'static str> {
         "debugpanel" | "debuggerpanel" => Some("DebugPanel"),
         "taskboard" | "taskboardpanel" | "board" => Some("TaskBoardPanel"),
         "usage" | "usagepanel" => Some("UsagePanel"),
+        // Z3's panel registration shipped without this entry — the
+        // `orchestrator` mode's layout lookup was logging "unknown panel"
+        // and closing the dock instead (fixed alongside Z4's entries).
+        "orchestrator" | "orchestratorpanel" | "chat" => Some("OrchestratorPanel"),
+        "adversary" | "adversarypanel" => Some("AdversaryPanel"),
         _ => None,
     }
 }
@@ -323,11 +328,32 @@ mod tests {
     }
 
     #[test]
+    fn resolve_panel_names_maps_orchestrator_and_adversary() {
+        // Z4 (orchestrator entry was the Z3 gap): both the mode seeds'
+        // names and reasonable aliases resolve.
+        assert_eq!(
+            resolve_panel_persistent_name("orchestratorpanel"),
+            Some("OrchestratorPanel")
+        );
+        assert_eq!(
+            resolve_panel_persistent_name("Orchestrator"),
+            Some("OrchestratorPanel")
+        );
+        assert_eq!(
+            resolve_panel_persistent_name("adversary"),
+            Some("AdversaryPanel")
+        );
+        assert_eq!(
+            resolve_panel_persistent_name("Adversary Panel"),
+            Some("AdversaryPanel")
+        );
+    }
+
+    #[test]
     fn resolve_panel_names_rejects_unknown_panels() {
-        // Symphony-era and not-yet-native panels must skip gracefully.
+        // Stale-era names and not-yet-native panels must skip gracefully.
         assert_eq!(resolve_panel_persistent_name("SymphonyRunCanvas"), None);
         assert_eq!(resolve_panel_persistent_name("ConversationView"), None);
-        assert_eq!(resolve_panel_persistent_name("SettingsPanel"), None);
         assert_eq!(resolve_panel_persistent_name(""), None);
     }
 
