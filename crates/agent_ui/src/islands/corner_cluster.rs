@@ -5,10 +5,11 @@
 //! the cross-route persistence that makes the cluster read built-in.
 //!
 //! The cluster's root is a full-area absolute layer with no listeners of
-//! its own, so it is hit-test transparent everywhere except its children;
-//! while the island is expanded it interposes an occluding backdrop that
-//! routes any outside click to the island's contract (the web's
-//! document-level click-away listener).
+//! its own, so it is hit-test transparent everywhere except its children.
+//! Click-away for the expanded island is PASSIVE and lives on the island
+//! itself (`on_mouse_down_out` — the web's document-level capture listener
+//! with no stopPropagation): outside clicks contract the card AND still
+//! land on their target; hover/scroll beneath are never occluded.
 
 use gpui::{Context, Entity};
 use ui::prelude::*;
@@ -32,34 +33,19 @@ impl CornerCluster {
     pub fn new(
         island: Entity<UsageIsland>,
         stack: Entity<NotifStack>,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> Self {
-        // The backdrop renders off the island's state — repaint with it.
-        cx.observe(&island, |_, _, cx| cx.notify()).detach();
         Self { island, stack }
     }
 }
 
 impl Render for CornerCluster {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let expanded = self.island.read(cx).is_expanded();
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         // Web `#notif-stack { max-width: calc(100vw - 28px) }`.
         let stack_w = clamped_width(f32::from(window.viewport_size().width));
         div()
             .absolute()
             .inset_0()
-            .when(expanded, |this| {
-                this.child(
-                    div()
-                        .id("island-click-away")
-                        .absolute()
-                        .inset_0()
-                        .occlude()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.island.update(cx, |island, cx| island.click_away(cx));
-                        })),
-                )
-            })
             // Toasts stack beneath the head positionally but paint ABOVE
             // it (web: `#notif-stack` z-index 60 over the island's 40) —
             // while the card is expanded past the stack's top, live toasts

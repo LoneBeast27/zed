@@ -411,6 +411,14 @@ impl Render for UsageIsland {
             .border_1()
             .when(!expanded, |this| this.cursor_pointer())
             .on_click(cx.listener(|this, _, _, cx| this.clicked(cx)))
+            // PASSIVE click-away (the web's document-level capture listener,
+            // usage-island.js onDocClick): a mouse-down anywhere outside the
+            // island contracts it WITHOUT consuming the event — the click
+            // still lands, and hover/scroll beneath stay live (no occluding
+            // backdrop).
+            .when(expanded, |this| {
+                this.on_mouse_down_out(cx.listener(|this, _, _, cx| this.click_away(cx)))
+            })
             .children(outgoing)
             .child(incoming);
 
