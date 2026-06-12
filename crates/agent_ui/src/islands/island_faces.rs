@@ -36,10 +36,19 @@ const CARD_ROW_H: f32 = 30.;
 const CARD_ROW_GAP: f32 = 2.;
 /// Card foot: 4px margin + 1px rule + 8px pad + 14px text + 2px pad.
 const CARD_FOOT_H: f32 = 29.;
-/// Pill radius = height/2 (the EFFECTIVE radius of the web's 9999px after
-/// clamping — animating the raw 9999 would hold the morph capsule-shaped
-/// until the very end); card radius — web `.expanded { border-radius: 16px }`.
-pub const PILL_R: f32 = PILL_H / 2.;
+/// The container's 1px border, both sides. GPUI paints borders INSIDE
+/// bounds (gpui/src/style.rs) while the web FLIP animates border-box
+/// offsetWidth/offsetHeight — so every morph target is border-box:
+/// content extent + this pair. Without it the rendered pill is 2px under
+/// the web on every axis and full-constant faces get clipped 1px per edge
+/// by the border-inset overflow mask.
+pub const BORDER_PAIR: f32 = 2.;
+/// Pill radius = OUTER height/2 (the EFFECTIVE radius of the web's 9999px
+/// after clamping — animating the raw 9999 would hold the morph
+/// capsule-shaped until the very end). Web pill border-box = 28 + 2 = 30,
+/// so the capsule radius is 15. Card radius — web `.expanded {
+/// border-radius: 16px }`.
+pub const PILL_R: f32 = (PILL_H + BORDER_PAIR) / 2.;
 pub const CARD_R: f32 = 16.;
 
 /// Geometry the container morphs between (§4.9 spatial class).
@@ -127,7 +136,10 @@ pub fn card_height(rows: usize) -> f32 {
     CARD_PAD_TOP + CARD_HEAD_H + rows_h + CARD_FOOT_H + CARD_PAD_BOTTOM
 }
 
-/// The geometry this face morphs the container to.
+/// The BORDER-BOX geometry this face morphs the container to (content
+/// extent + [`BORDER_PAIR`] — the web FLIP pins offsetWidth/offsetHeight,
+/// and GPUI's border paints inside bounds), keeping faces at their web
+/// content sizes unclipped: rest/notify pill 30px outer, card 250×(rows+2).
 pub fn measure(face: &Face, window: &Window, cx: &App) -> FaceMetrics {
     match face {
         Face::Rest { dots, pct } => {
@@ -142,19 +154,19 @@ pub fn measure(face: &Face, window: &Window, cx: &App) -> FaceMetrics {
                 .map(|pct| TEXT_GAP + text_width(pct, window, cx))
                 .unwrap_or(0.);
             FaceMetrics {
-                w: PAD_X * 2. + dots_w + text_w,
-                h: PILL_H,
+                w: PAD_X * 2. + dots_w + text_w + BORDER_PAIR,
+                h: PILL_H + BORDER_PAIR,
                 r: PILL_R,
             }
         }
         Face::Notify { text, .. } => FaceMetrics {
-            w: PAD_X * 2. + DOT + TEXT_GAP + text_width(text, window, cx),
-            h: PILL_H,
+            w: PAD_X * 2. + DOT + TEXT_GAP + text_width(text, window, cx) + BORDER_PAIR,
+            h: PILL_H + BORDER_PAIR,
             r: PILL_R,
         },
         Face::Card { rows } => FaceMetrics {
-            w: CARD_W,
-            h: card_height(rows.len()),
+            w: CARD_W + BORDER_PAIR,
+            h: card_height(rows.len()) + BORDER_PAIR,
             r: CARD_R,
         },
     }
@@ -345,6 +357,17 @@ mod tests {
         assert_eq!(card_height(0), 68.);
         assert_eq!(card_height(1), 68. + 30.);
         assert_eq!(card_height(4), 68. + 4. * 30. + 3. * 2.);
+    }
+
+    #[test]
+    fn morph_targets_are_border_box() {
+        // GPUI paints the 1px border INSIDE bounds; the web FLIP animates
+        // border-box offsetWidth/offsetHeight. Pill: 28 content + 2 border
+        // = 30 outer, capsule radius 15; card: 248 + 2 = the web's 250
+        // offsetWidth (the §8.7 trace target).
+        assert_eq!(PILL_H + BORDER_PAIR, 30.);
+        assert_eq!(PILL_R, 15.);
+        assert_eq!(CARD_W + BORDER_PAIR, 250.);
     }
 
     #[test]

@@ -19,8 +19,8 @@ use super::usage_island::UsageIsland;
 /// Corner inset for the cluster head (web `#usage-island { top: 14px;
 /// right: 14px }`).
 const CORNER_INSET: f32 = 14.;
-/// Where the toast stack starts: below the island head (14px inset + 28px
-/// rest pill + 14px gap — web `#notif-stack { top: 56px }`).
+/// Where the toast stack starts: below the island head (14px inset + 30px
+/// border-box rest pill + 12px gap — web `#notif-stack { top: 56px }`).
 const STACK_TOP: f32 = 56.;
 
 pub struct CornerCluster {
