@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, KeyDownEvent, SharedString, Task, Window, relative,
+    Focusable, FontWeight, KeyDownEvent, Pixels, SharedString, Task, Window, canvas, relative,
 };
 use http_client::HttpClient;
 use markdown::Markdown;
@@ -35,6 +35,18 @@ const LOG_POLL_ERROR_CAP: Duration = Duration::from_secs(5);
 const SLIDE: Duration = Duration::from_millis(400);
 /// Scrim crossfade (web: opacity .22s effects).
 const SCRIM_FADE: Duration = Duration::from_millis(220);
+/// Sheet width (web: `width: min(560px, 92vw)` — board.css:164).
+const SHEET_FRACTION: f32 = 0.92;
+const SHEET_MAX_WIDTH: f32 = 560.;
+
+/// Drawer slide travel in SHEET-width terms: CSS `translateX(102%)` resolves
+/// against the element's OWN width (board.css:167), so the offscreen offset
+/// is −(resolved sheet width) × 1.02 — never a fraction of the panel, which
+/// over-travels on wide panels (entrance dead-zone + ~2× apparent velocity,
+/// the §8.7(b) gate failure).
+fn slide_offset(panel_width: f32, out: f32) -> f32 {
+    -(panel_width * SHEET_FRACTION).min(SHEET_MAX_WIDTH) * 1.02 * out
+}
 
 /// `GET /run/<id>` payload. Liberal: everything defaults.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -90,6 +102,10 @@ pub struct RunDrawer {
     /// Close-button tracked hover (web `#drawer-close` 150ms transition).
     close_hovered: bool,
     close_fade: StateFade,
+    /// Containing-panel width, measured each frame by a layout canvas — the
+    /// slide animator converts it to the resolved sheet width so travel
+    /// matches the web's `translateX(102%)` at every panel width.
+    container_width: Option<Pixels>,
     /// Markdown entities for the summary task + result body, rebuilt when
     /// the underlying text changes.
     task_md: Option<Entity<Markdown>>,
@@ -157,6 +173,7 @@ impl RunDrawer {
             tab_fade: StateFade::default(),
             close_hovered: false,
             close_fade: StateFade::default(),
+            container_width: None,
             task_md: None,
             result_md: None,
             focus_handle: cx.focus_handle(),
@@ -459,6 +476,23 @@ impl Render for RunDrawer {
         let colors = cx.theme().colors();
         let closing = self.closing;
 
+        // Measure the containing panel each frame (prepaint, no notify) —
+        // the slide animator reads last frame's width; first frame falls
+        // back to the panel-relative offset.
+        let measure = {
+            let drawer = cx.weak_entity();
+            canvas(
+                move |bounds, _, cx| {
+                    drawer
+                        .update(cx, |this, _| this.container_width = Some(bounds.size.width))
+                        .ok();
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
+
         // Scrim: solid rgba fallback per the web's non-backdrop-filter path;
         // fades on the effects curve, concurrent with the slide (§4.9).
         let scrim = div()
@@ -476,14 +510,15 @@ impl Render for RunDrawer {
                 move |scrim, t| scrim.opacity(if closing { 1.0 - t } else { t }),
             );
 
+        let panel_width = self.container_width;
         let sheet = v_flex()
             .id("drawer-sheet")
             .absolute()
             .top_0()
             .bottom_0()
             .right_0()
-            .w(relative(0.92))
-            .max_w(px(560.))
+            .w(relative(SHEET_FRACTION))
+            .max_w(px(SHEET_MAX_WIDTH))
             .bg(colors.panel_background)
             .border_l_1()
             .border_color(HAIRLINE_HI)
@@ -498,9 +533,15 @@ impl Render for RunDrawer {
                 ),
                 Animation::new(SLIDE).with_easing(DECEL.easing()),
                 move |sheet, t| {
-                    // Slide across the full drawer width: offscreen at 1.
+                    // Slide across the SHEET width (+2% clearing the 1px
+                    // border), the web's translateX(102%): offscreen at 1.
                     let out = if closing { t } else { 1.0 - t };
-                    sheet.right(relative(-0.92 * out))
+                    let offset: gpui::Length = match panel_width {
+                        Some(width) => px(slide_offset(width.as_f32(), out)).into(),
+                        // Unmeasured first frame: panel-relative fallback.
+                        None => relative(-SHEET_FRACTION * out).into(),
+                    };
+                    sheet.right(offset)
                 },
             );
 
@@ -514,6 +555,7 @@ impl Render for RunDrawer {
             }))
             .absolute()
             .inset_0()
+            .child(measure)
             .child(scrim)
             .child(sheet)
     }
@@ -530,6 +572,23 @@ impl EventEmitter<DismissDrawer> for RunDrawer {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slide_travel_is_sheet_width_terms_at_every_panel_width() {
+        // Narrow panel (Z1 default 420px): sheet resolves to 92% = 386.4px,
+        // travel = 1.02 × that — the geometry where the old panel-relative
+        // math coincidentally agreed (within the 2% border clearance).
+        assert!((slide_offset(420., 1.0) - (-394.128)).abs() < 1e-3);
+        // Wide panel (1200px): sheet caps at 560px, travel = 571.2px —
+        // NOT the old 0.92 × panel = 1104px over-travel (§8.7(b) dead zone).
+        assert!((slide_offset(1200., 1.0) - (-571.2)).abs() < 1e-3);
+        // Crossover panel width (560/0.92 ≈ 608.7): both formulas agree.
+        assert!((slide_offset(608.7, 1.0) - (-571.2)).abs() < 0.1);
+        // Settled (out = 0) is exactly in place.
+        assert_eq!(slide_offset(1200., 0.0), 0.0);
+        // Travel scales linearly with the animator's `out`.
+        assert!((slide_offset(1200., 0.5) - (-285.6)).abs() < 1e-3);
+    }
 
     #[test]
     fn run_detail_deserializes_liberally() {
