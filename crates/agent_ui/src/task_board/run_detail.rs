@@ -22,7 +22,7 @@ use ui::prelude::*;
 use crate::agent_accents::accent_for_agent;
 use crate::bridge::{BRIDGE_BASE_URL, fetch_json};
 
-use super::motion::{DECEL, EFFECTS};
+use super::motion::{DECEL, EFFECTS, STATE_FADE, StateFade, mix};
 use super::style::{HAIRLINE_HI, chip_reason, rel, status_pill};
 
 /// Logs tail-poll cadence while the run is live (web: 1s).
@@ -83,6 +83,10 @@ pub struct DismissDrawer;
 pub struct RunDrawer {
     detail: Option<RunDetail>,
     tab: DrawerTab,
+    /// The previously active tab — the 150ms tab crossfade eases both the
+    /// leaving and the arriving tab (web `.drawer-tabs button` transition).
+    prev_tab: DrawerTab,
+    tab_fade: StateFade,
     /// Markdown entities for the summary task + result body, rebuilt when
     /// the underlying text changes.
     task_md: Option<Entity<Markdown>>,
@@ -146,6 +150,8 @@ impl RunDrawer {
         Self {
             detail: None,
             tab: DrawerTab::Summary,
+            prev_tab: DrawerTab::Summary,
+            tab_fade: StateFade::default(),
             task_md: None,
             result_md: None,
             focus_handle: cx.focus_handle(),
@@ -190,7 +196,9 @@ impl RunDrawer {
 
     fn set_tab(&mut self, tab: DrawerTab, cx: &mut Context<Self>) {
         if self.tab != tab {
+            self.prev_tab = self.tab;
             self.tab = tab;
+            self.tab_fade.bump();
             cx.notify();
         }
     }
@@ -289,26 +297,66 @@ impl RunDrawer {
     }
 
     /// Flat text tabs (13px/500, active = full text + 2px accent underline,
-    /// no boxes — board.css `.drawer-tabs`).
+    /// no boxes — board.css `.drawer-tabs`). Each tab pulls down 1px so the
+    /// active underline OVERLAPS the container hairline (one merged line),
+    /// and tab switches crossfade color/underline over 150ms effects.
     fn render_tabs(&self, cx: &mut Context<Self>) -> Div {
         let colors = cx.theme().colors();
-        let tab = |label: &'static str, value: DrawerTab, this: &Self| {
-            let on = this.tab == value;
-            div()
+        let border = colors.border;
+        let on_text = colors.text;
+        let off_text = colors.text_placeholder;
+        let on_border = colors.text_accent;
+        let off_border = gpui::transparent_black();
+        let fresh = self.tab_fade.fresh();
+        let generation = self.tab_fade.generation() as u64;
+        let (current, previous) = (self.tab, self.prev_tab);
+
+        let tab = |label: &'static str, value: DrawerTab, cx: &Context<Self>| -> AnyElement {
+            let on = current == value;
+            let was_on = previous == value;
+            let base = div()
                 .id(ElementId::Name(format!("drawer-tab-{label}").into()))
                 .px(px(13.))
                 .pt(px(8.))
                 .pb(px(10.))
+                // board.css `.drawer-tabs button { margin-bottom: -1px }` —
+                // the 2px accent underline merges with the strip hairline.
+                .mb(px(-1.))
                 .text_size(px(13.))
                 .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
                 .border_b_2()
-                .when(on, |t| t.text_color(colors.text).border_color(colors.text_accent))
-                .when(!on, |t| {
-                    t.text_color(colors.text_placeholder)
-                        .border_color(gpui::transparent_black())
-                })
-                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_tab(value, cx)))
+                .child(label);
+            if fresh && on != was_on {
+                let (from_text, to_text) = if on {
+                    (off_text, on_text)
+                } else {
+                    (on_text, off_text)
+                };
+                let (from_border, to_border) = if on {
+                    (off_border, on_border)
+                } else {
+                    (on_border, off_border)
+                };
+                base.with_animation(
+                    ElementId::NamedInteger(format!("drawer-tab-fade-{label}").into(), generation),
+                    Animation::new(STATE_FADE).with_easing(EFFECTS.easing()),
+                    move |tab, t| {
+                        tab.text_color(mix(from_text, to_text, t))
+                            .border_color(mix(from_border, to_border, t))
+                    },
+                )
+                .into_any_element()
+            } else if on {
+                base.text_color(on_text)
+                    .border_color(on_border)
+                    .into_any_element()
+            } else {
+                base.text_color(off_text)
+                    .border_color(off_border)
+                    .into_any_element()
+            }
         };
         h_flex()
             .flex_none()
@@ -316,16 +364,10 @@ impl RunDrawer {
             .px(px(22.))
             .pt(px(14.))
             .border_b_1()
-            .border_color(colors.border)
-            .child(tab("Summary", DrawerTab::Summary, self).on_click(
-                cx.listener(|this, _, _, cx| this.set_tab(DrawerTab::Summary, cx)),
-            ))
-            .child(tab("Result", DrawerTab::Result, self).on_click(
-                cx.listener(|this, _, _, cx| this.set_tab(DrawerTab::Result, cx)),
-            ))
-            .child(tab("Logs", DrawerTab::Logs, self).on_click(
-                cx.listener(|this, _, _, cx| this.set_tab(DrawerTab::Logs, cx)),
-            ))
+            .border_color(border)
+            .child(tab("Summary", DrawerTab::Summary, cx))
+            .child(tab("Result", DrawerTab::Result, cx))
+            .child(tab("Logs", DrawerTab::Logs, cx))
     }
 
     fn render_body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {

@@ -6,8 +6,8 @@
 //! elapsed ticker while a run is live (the §5 worked-for ticker).
 
 use gpui::{
-    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, SharedString,
-    Subscription, Window, actions,
+    Action, Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, FontWeight, Hsla, SharedString, Subscription, Window, actions,
 };
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
@@ -17,6 +17,7 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 use crate::agent_accents::STATUS_RUNNING;
 use crate::bridge::{self, BridgeStore};
 
+use super::motion::{EFFECTS, STATE_FADE, StateFade, mix};
 use super::style::SURFACE_1;
 use super::{inbox, run_detail};
 
@@ -54,6 +55,8 @@ pub struct TaskBoardPanel {
     graph_seen: std::collections::HashMap<SharedString, std::time::Instant>,
     /// The open run drawer, if any (right slide-over).
     drawer: Option<Entity<run_detail::RunDrawer>>,
+    /// Seg-toggle 150ms state crossfade (web `.seg-toggle button` transition).
+    view_fade: StateFade,
     _store_subscription: Subscription,
 }
 
@@ -68,6 +71,7 @@ impl TaskBoardPanel {
             position: DockPosition::Left,
             graph_seen: std::collections::HashMap::new(),
             drawer: None,
+            view_fade: StateFade::default(),
             _store_subscription,
         }
     }
@@ -94,6 +98,7 @@ impl TaskBoardPanel {
     fn set_view(&mut self, view: BoardView, cx: &mut Context<Self>) {
         if self.view != view {
             self.view = view;
+            self.view_fade.bump();
             cx.notify();
         }
     }
@@ -147,35 +152,59 @@ impl TaskBoardPanel {
 
     fn render_seg_toggle(&self, cx: &mut Context<Self>) -> Div {
         let colors = cx.theme().colors();
-        let segment = |label: &'static str, view: BoardView, this: &Self| {
-            let on = this.view == view;
-            div()
+        let border = colors.border;
+        let on_text = colors.text;
+        let off_text = colors.text_placeholder;
+        let on_bg: Hsla = SURFACE_1.into();
+        let off_bg = gpui::transparent_black();
+        let fresh = self.view_fade.fresh();
+        let generation = self.view_fade.generation() as u64;
+        let current = self.view;
+
+        let segment = |label: &'static str, view: BoardView, cx: &Context<Self>| -> AnyElement {
+            let on = current == view;
+            let base = div()
                 .id(ElementId::Name(format!("seg-{label}").into()))
                 .px(px(12.))
                 .py(px(6.))
                 .text_size(px(12.))
                 .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
-                .when(on, |seg| seg.bg(SURFACE_1).text_color(colors.text))
-                .when(!on, |seg| seg.text_color(colors.text_placeholder))
-                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_view(view, cx)))
+                .child(label);
+            // 150ms effects-curve bg/color crossfade on the state flip
+            // (board.css `.seg-toggle button { transition: … .15s }`);
+            // settled segments render bare — no idle animation wrappers.
+            if fresh {
+                let (from_bg, to_bg) = if on { (off_bg, on_bg) } else { (on_bg, off_bg) };
+                let (from_text, to_text) = if on {
+                    (off_text, on_text)
+                } else {
+                    (on_text, off_text)
+                };
+                base.with_animation(
+                    ElementId::NamedInteger(format!("seg-fade-{label}").into(), generation),
+                    Animation::new(STATE_FADE).with_easing(EFFECTS.easing()),
+                    move |seg, t| {
+                        seg.bg(mix(from_bg, to_bg, t))
+                            .text_color(mix(from_text, to_text, t))
+                    },
+                )
+                .into_any_element()
+            } else if on {
+                base.bg(on_bg).text_color(on_text).into_any_element()
+            } else {
+                base.text_color(off_text).into_any_element()
+            }
         };
         h_flex()
             .flex_none()
             .border_1()
-            .border_color(colors.border)
+            .border_color(border)
             .rounded(px(8.))
             .overflow_hidden()
-            .child(
-                segment("Graph", BoardView::Graph, self).on_click(cx.listener(
-                    |this, _, _, cx| this.set_view(BoardView::Graph, cx),
-                )),
-            )
-            .child(
-                segment("Grid", BoardView::Grid, self).on_click(cx.listener(
-                    |this, _, _, cx| this.set_view(BoardView::Grid, cx),
-                )),
-            )
+            .child(segment("Graph", BoardView::Graph, cx))
+            .child(segment("Grid", BoardView::Grid, cx))
     }
 }
 

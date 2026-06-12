@@ -11,6 +11,71 @@
 //! the animator). [`DECEL`] and [`EFFECTS`] stay within [0,1] and may be used
 //! directly via `Animation::with_easing(DECEL.easing())`.
 
+use std::time::{Duration, Instant};
+
+use gpui::{Hsla, Rgba};
+
+/// Interactive-state crossfade duration — the web's
+/// `transition: … .15s var(--effects-curve)` on seg-toggle buttons, inbox
+/// rows, drawer tabs, and the drawer close button (board.css:23,38,183,198;
+/// PARITY_SPEC §0 "state changes 150–250ms").
+pub const STATE_FADE: Duration = Duration::from_millis(150);
+/// How long after a state flip the animated wrapper stays attached: the fade
+/// plus margin. Outside this window elements render bare, so settled states
+/// cost nothing per frame and an element-state drop (scroll culling, panel
+/// re-show) can never replay a finished fade.
+pub const STATE_FADE_WINDOW: Duration = Duration::from_millis(300);
+
+/// Tracks one piece of flip-state for a one-shot effects-curve crossfade:
+/// [`bump`](Self::bump) on every state change; [`fresh`](Self::fresh) says
+/// whether the crossfade window is still open (attach the animated wrapper
+/// only then); [`generation`](Self::generation) keys the animation identity
+/// so each flip animates exactly once.
+#[derive(Debug, Clone, Default)]
+pub struct StateFade {
+    generation: usize,
+    changed_at: Option<Instant>,
+}
+
+impl StateFade {
+    /// A tracker whose state changed right now (already mid-fade).
+    pub fn begun() -> Self {
+        let mut fade = Self::default();
+        fade.bump();
+        fade
+    }
+
+    /// Record a state flip: opens the crossfade window, new generation.
+    pub fn bump(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.changed_at = Some(Instant::now());
+    }
+
+    /// Whether the crossfade window from the last flip is still open.
+    pub fn fresh(&self) -> bool {
+        self.changed_at
+            .is_some_and(|at| at.elapsed() < STATE_FADE_WINDOW)
+    }
+
+    /// Animation-identity key for the latest flip.
+    pub fn generation(&self) -> usize {
+        self.generation
+    }
+}
+
+/// Componentwise sRGB mix between two colors — the interpolation a CSS color
+/// `transition` performs, used by the 150ms state crossfades.
+pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
+    let (a, b) = (Rgba::from(a), Rgba::from(b));
+    Rgba {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
+    .into()
+}
+
 /// A CSS `cubic-bezier(x1, y1, x2, y2)` timing function. Control-point xs
 /// are clamped to [0,1] by CSS, making x(t) monotonic — y-for-x is solvable
 /// by bisection.
@@ -124,5 +189,52 @@ mod tests {
     #[test]
     fn effects_matches_css_reference() {
         assert_curve(EFFECTS, [0.239867, 0.58713, 0.905337, 0.985964, 0.998237]);
+    }
+
+    #[test]
+    fn state_fade_opens_window_and_advances_generation() {
+        let mut fade = StateFade::default();
+        assert!(!fade.fresh(), "untouched state is settled");
+        assert_eq!(fade.generation(), 0);
+        fade.bump();
+        assert!(fade.fresh(), "a flip opens the crossfade window");
+        assert_eq!(fade.generation(), 1);
+        fade.bump();
+        assert_eq!(fade.generation(), 2, "each flip is a new animation key");
+        assert!(StateFade::begun().fresh());
+    }
+
+    #[test]
+    fn mix_interpolates_srgb_endpoints_exactly() {
+        let a = gpui::Rgba {
+            r: 1.0,
+            g: 0.0,
+            b: 0.5,
+            a: 1.0,
+        };
+        let b = gpui::Rgba {
+            r: 0.0,
+            g: 1.0,
+            b: 0.5,
+            a: 0.0,
+        };
+        // Hsla round-trips cost a little float precision — compare with tolerance.
+        let assert_rgba = |got: gpui::Rgba, want: gpui::Rgba| {
+            assert!((got.r - want.r).abs() < 1e-4, "r: {got:?} vs {want:?}");
+            assert!((got.g - want.g).abs() < 1e-4, "g: {got:?} vs {want:?}");
+            assert!((got.b - want.b).abs() < 1e-4, "b: {got:?} vs {want:?}");
+            assert!((got.a - want.a).abs() < 1e-4, "a: {got:?} vs {want:?}");
+        };
+        assert_rgba(gpui::Rgba::from(mix(a.into(), b.into(), 0.0)), a);
+        assert_rgba(gpui::Rgba::from(mix(a.into(), b.into(), 1.0)), b);
+        assert_rgba(
+            gpui::Rgba::from(mix(a.into(), b.into(), 0.5)),
+            gpui::Rgba {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 0.5,
+            },
+        );
     }
 }
