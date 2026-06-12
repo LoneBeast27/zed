@@ -223,6 +223,11 @@ impl UsageIsland {
             TimerCmd::Clear => {
                 self.hold_task = None;
             }
+            // No transition — the armed 6s hold (or pump) survives. Store
+            // ingests at 1Hz/per-SSE-frame route here, so ticking data can
+            // never cancel the notify auto-revert (web: ingest never touches
+            // the hold timer).
+            TimerCmd::None => {}
         }
     }
 

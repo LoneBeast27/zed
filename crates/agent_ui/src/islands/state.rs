@@ -23,6 +23,13 @@ pub enum IslandState {
 
 /// What the owning entity must do after a machine call (timer effects only —
 /// repaint/morph decisions are derived from the state + data in render).
+///
+/// Only [`go()`](IslandMachine::go) — a real state transition — ever returns
+/// a timer-touching command. Every no-transition path returns [`None`],
+/// mirroring the web: `createStateMachine` clears its hold timer only inside
+/// `go()` (island.js), and `ingest()` never touches it (usage-island.js) —
+/// so a 1Hz elapsed tick or an SSE frame landing mid-hold can never cancel
+/// the 6s notify auto-revert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerCmd {
     /// Entering notify: arm the 6s auto-revert (clearing any pending timer).
@@ -30,9 +37,11 @@ pub enum TimerCmd {
     /// Entering rest with crossings queued: arm the pump after the morph
     /// settles (the web's `setTimeout(pump, MORPH_MS)`).
     ArmPump,
-    /// Any other transition: clear pending timers (createStateMachine
+    /// Any other TRANSITION: clear pending timers (createStateMachine
     /// clears the hold timer on every transition).
     Clear,
+    /// No transition happened: leave armed timers untouched.
+    None,
 }
 
 #[derive(Debug, Default)]
@@ -94,7 +103,9 @@ impl IslandMachine {
         let mut cmd = if !self.queue.is_empty() && self.state == IslandState::Rest {
             self.pump()
         } else {
-            TimerCmd::Clear
+            // No transition: hold-preserving (the web's ingest never touches
+            // the hold timer).
+            TimerCmd::None
         };
 
         // A pool at/above 90% pins HELD until it drops or is acknowledged.
@@ -130,7 +141,7 @@ impl IslandMachine {
     /// rest/notify → expand; expanded → no-op (rows handle their own).
     pub fn click(&mut self) -> TimerCmd {
         match self.state {
-            IslandState::Expanded => TimerCmd::Clear,
+            IslandState::Expanded => TimerCmd::None,
             IslandState::Held => self.acknowledge(),
             _ => self.go(IslandState::Expanded),
         }
@@ -142,7 +153,7 @@ impl IslandMachine {
             self.held_crit = false;
             self.go(IslandState::Rest)
         } else {
-            TimerCmd::Clear
+            TimerCmd::None
         }
     }
 
@@ -158,7 +169,8 @@ impl IslandMachine {
         if self.state == IslandState::Notify {
             self.go(IslandState::Rest)
         } else {
-            TimerCmd::Clear
+            // Stale fire (web: `if (state === "notify")` guard) — no-op.
+            TimerCmd::None
         }
     }
 
@@ -171,7 +183,7 @@ impl IslandMachine {
             self.active_pool = Some(pool);
             return self.go(IslandState::Notify);
         }
-        TimerCmd::Clear
+        TimerCmd::None
     }
 
     fn acknowledge(&mut self) -> TimerCmd {
@@ -218,6 +230,37 @@ mod tests {
         // No re-notify without a fresh crossing.
         machine.ingest(&pools(&[("claude", Some(80.0)), ("codex", Some(10.0))]));
         assert_eq!(machine.state(), IslandState::Rest);
+    }
+
+    #[test]
+    fn ingest_during_notify_hold_is_timer_neutral() {
+        let mut machine = IslandMachine::default();
+        machine.ingest(&pools(&[("claude", Some(70.0)), ("codex", Some(10.0))]));
+        let cmd = machine.ingest(&pools(&[("claude", Some(80.0)), ("codex", Some(10.0))]));
+        assert_eq!(cmd, TimerCmd::ArmHold);
+        assert_eq!(machine.state(), IslandState::Notify);
+
+        // Ticking ingests during the 6s hold — elapsed ticks, board frames,
+        // small % drift — must be hold-PRESERVING: the web clears the hold
+        // timer only inside go() (island.js), never in ingest
+        // (usage-island.js). A Clear here is the wedged-pill blocker.
+        for used in [80.1, 80.2, 79.0, 80.5] {
+            let cmd = machine.ingest(&pools(&[("claude", Some(used)), ("codex", Some(10.0))]));
+            assert_eq!(
+                cmd,
+                TimerCmd::None,
+                "ingest-while-notify must not touch the armed hold"
+            );
+            assert_eq!(machine.state(), IslandState::Notify);
+        }
+
+        // The surviving hold fires at 6s → the island reverts to rest.
+        let cmd = machine.hold_expired();
+        assert_eq!(machine.state(), IslandState::Rest);
+        assert_eq!(cmd, TimerCmd::Clear);
+
+        // A stale hold fire after the revert is a guarded no-op.
+        assert_eq!(machine.hold_expired(), TimerCmd::None);
     }
 
     #[test]
