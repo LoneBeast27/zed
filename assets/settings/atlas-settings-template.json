@@ -1,0 +1,16 @@
+// Atlas fork — recommended user-settings block (TEMPLATE, not a default).
+//
+// PRD hard rule: stock Zed stays pixel-identical with the agent flags off, so
+// the fork does NOT touch assets/settings/default.json. The M0–M2 workspace-
+// mode templates (.agents/modes/*.json) carry layout specs only — they have no
+// settings-overlay field, and M2 explicitly rejected settings.json writes on
+// mode switch as too invasive. Fonts (and the Atlas OLED theme) therefore ship
+// as this copy-paste template instead of a default.
+//
+// Nothing in the binary loads this file; it is documentation. Merge the block
+// below into your user settings (`zed: open settings file`):
+{
+  "theme": "Atlas OLED",
+  "ui_font_family": "Inter",
+  "buffer_font_family": "JetBrains Mono"
+}
