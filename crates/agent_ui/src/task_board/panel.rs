@@ -1,8 +1,9 @@
 //! The Task Board workspace panel (PARITY_SPEC §4.2 board anatomy):
 //! header ("Task board" · run count · "N live" · Graph/Grid seg-toggle) over
 //! the inbox list or the spawn-tree graph. Holds the shared
-//! `Entity<BridgeStore>` and re-renders on its notifies — push-driven, no
-//! panel-side timers (RUST_PORT_NOTES general principle 1).
+//! `Entity<BridgeStore>` and re-renders on its notifies — push-driven
+//! (RUST_PORT_NOTES general principle 1); the only timer is the store's 1s
+//! elapsed ticker while a run is live (the §5 worked-for ticker).
 
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, SharedString,
@@ -182,7 +183,9 @@ impl Render for TaskBoardPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
         let connected = store.connected;
-        let board = store.board.clone();
+        // Locally-ticked elapsed (the store's 1s ticker drives re-renders
+        // while any run is live; the server frame re-bases the offset).
+        let board = store.ticked_board();
         let total = board.len();
         let running = board.iter().filter(|r| r.status == "running").count();
 
