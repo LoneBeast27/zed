@@ -177,6 +177,12 @@ impl IslandMachine {
     fn acknowledge(&mut self) -> TimerCmd {
         self.held_crit = false;
         self.acked_pool = self.active_pool.clone();
+        // The ack silences that pool's queued crossings too — otherwise a
+        // leftover queue entry (e.g. the 75 crossing behind the 90 pin)
+        // would re-extend the pill moments after the user dismissed it.
+        if let Some(acked) = &self.acked_pool {
+            self.queue.retain(|pool| pool != acked);
+        }
         self.go(IslandState::Rest)
     }
 }
