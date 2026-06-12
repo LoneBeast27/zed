@@ -22,9 +22,7 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::agent_accents::{STATUS_BLOCKED, Tone, tone_for_used, used_pct};
 use crate::bridge::{self, BridgeStore, PoolRow, UsageMeta};
-use crate::task_board::motion::{
-    AnimatedValue, EFFECTS, SPATIAL, STATE_FADE, StateFade, mix,
-};
+use crate::task_board::motion::{AnimatedColor, AnimatedValue, EFFECTS, SPATIAL, StateFade};
 use crate::task_board::style::tabular_nums;
 
 actions!(
@@ -38,6 +36,10 @@ actions!(
 /// Meter-fill morph duration — width changes ride the spatial curve
 /// (PARITY_SPEC §4.9 geometry class).
 const FILL_MORPH: std::time::Duration = std::time::Duration::from_millis(500);
+/// Meter tone crossfade (effects class) — band flips only; width-only
+/// changes hold the color steady (web: `background .3s` transitions only
+/// when the band class actually swaps).
+const TONE_FADE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// `POOL_LABELS` from usage.js — display names for the known pools;
 /// unknown pools fall back to their raw key.
@@ -52,12 +54,15 @@ fn pool_label(name: &str) -> &str {
 }
 
 /// Per-pool meter animation state: the retargetable width fill plus the
-/// 200ms tone-color crossfade on band changes.
+/// retargetable tone-color crossfade. Both are Instant-clocked, so a
+/// width-only retarget restarting the shared animation wrapper can never
+/// replay the previous band color (§8.7a — the tone holds steady unless
+/// the band actually flips, and a flip crossfades from the color rendered
+/// right now).
 struct MeterState {
     width: AnimatedValue,
     tone: Tone,
-    prev_tone: Tone,
-    tone_fade: StateFade,
+    color: AnimatedColor,
 }
 
 impl MeterState {
@@ -67,8 +72,7 @@ impl MeterState {
         Self {
             width: AnimatedValue::settled(0.0, SPATIAL, FILL_MORPH),
             tone,
-            prev_tone: tone,
-            tone_fade: StateFade::default(),
+            color: AnimatedColor::settled(tone.color(), EFFECTS, TONE_FADE),
         }
     }
 
@@ -76,12 +80,10 @@ impl MeterState {
         // Unknown degrades to a full-width dim fill, never an empty bar.
         let target = used.unwrap_or(100.0) as f32;
         self.width.retarget(target);
-        let tone = tone_for_used(used);
-        if tone != self.tone {
-            self.prev_tone = self.tone;
-            self.tone = tone;
-            self.tone_fade.bump();
-        }
+        self.tone = tone_for_used(used);
+        // Same-target retargets are no-ops: only a real band flip opens a
+        // crossfade, and it re-bases from the interpolated current color.
+        self.color.retarget(self.tone.color());
     }
 }
 
@@ -253,10 +255,12 @@ impl UsagePanel {
             .into_any_element()
     }
 
-    /// The thin meter: 6px track, tone-colored fill whose width morphs on
-    /// the spatial curve (500ms) while its color crossfades on effects
-    /// (150ms) — ONE animation wrapper carrying both property classes so
-    /// they are concurrent from the first frame (§8.7b).
+    /// The thin meter: tone-colored fill whose width morphs on the spatial
+    /// curve (500ms) while its color crossfades on effects (200ms, band
+    /// flips only) — ONE animation wrapper carrying both property classes
+    /// so they are concurrent from the first frame (§8.7b). The wrapper is
+    /// a frame pump over Instant-clocked values: a width-only retarget
+    /// restarting it can never replay the previous band color.
     fn render_meter(&mut self, pool: &PoolRow, used: Option<f64>) -> AnyElement {
         let state = self
             .meters
@@ -264,14 +268,12 @@ impl UsagePanel {
             .or_insert_with(|| MeterState::new(tone_for_used(used)));
         state.update(used);
 
-        let to_color = state.tone.color();
-        let from_color = state.prev_tone.color();
         let dim = state.tone == Tone::Unknown;
 
         let fill = div()
             .h_full()
             .rounded_full()
-            .bg(to_color)
+            .bg(state.color.target())
             .when(dim, |fill| fill.opacity(0.35));
 
         let track = div()
@@ -281,29 +283,27 @@ impl UsagePanel {
             .bg(gpui::white().opacity(0.10))
             .overflow_hidden();
 
-        if state.width.animating() || state.tone_fade.fresh() {
+        if state.width.animating() || state.color.animating() {
             let value = state.width.clone();
+            let color = state.color.clone();
             // Animation identity covers both the width retarget and the
-            // tone flip — either bumps the key, restarting the pair.
+            // tone flip — either bumps the key, extending the pump window.
             let generation = (state.width.generation() as u64) << 16
-                | (state.tone_fade.generation() as u64 & 0xffff);
-            let color_rescale =
-                FILL_MORPH.as_secs_f32() / STATE_FADE.as_secs_f32();
+                | (state.color.generation() as u64 & 0xffff);
             track
                 .child(fill.with_animation(
                     ElementId::NamedInteger(
                         format!("meter-fill-{}", pool.name).into(),
                         generation,
                     ),
-                    // Linear delta in; SPATIAL mapped inside `value_at` (the
+                    // Frame pump: SPATIAL is mapped inside `current()` (the
                     // animator-closure rule for overshooting curves —
-                    // motion.rs GUARD). Overshoot past the track clips on
+                    // motion GUARD). Overshoot past the track clips on
                     // overflow_hidden: the visible spring settle.
                     Animation::new(FILL_MORPH),
-                    move |fill, t| {
-                        let color_t = EFFECTS.eval((t * color_rescale).min(1.0));
-                        fill.w(relative(value.value_at(t).max(0.0) / 100.0))
-                            .bg(mix(from_color, to_color, color_t))
+                    move |fill, _| {
+                        fill.w(relative(value.current().max(0.0) / 100.0))
+                            .bg(color.current())
                     },
                 ))
                 .into_any_element()
@@ -479,18 +479,48 @@ mod tests {
         assert!(state.width.animating());
         assert_eq!(state.width.target(), 40.0);
         assert_eq!(state.tone, Tone::Ok);
-        assert!(!state.tone_fade.fresh(), "same tone — no color crossfade");
+        assert_eq!(state.color.generation(), 0, "same tone — no crossfade");
 
         // Crossing into warn: width retargets AND the tone crossfades.
         state.update(Some(80.0));
         assert_eq!(state.width.target(), 80.0);
         assert_eq!(state.tone, Tone::Warn);
-        assert_eq!(state.prev_tone, Tone::Ok);
-        assert!(state.tone_fade.fresh());
+        assert_eq!(state.color.generation(), 1);
+        assert_eq!(state.color.target(), Tone::Warn.color());
 
         // Unknown degrades to a full-width fill, never an empty bar.
         state.update(None);
         assert_eq!(state.width.target(), 100.0);
         assert_eq!(state.tone, Tone::Unknown);
+    }
+
+    #[test]
+    fn width_only_changes_hold_the_band_color() {
+        // The previous-band flash: after Ok→Warn, every later width-only
+        // retarget restarted the color animation from the OLD band color.
+        // The tone must hold steady unless the band actually flips (web:
+        // `background .3s` transitions only on a class swap).
+        let mut state = MeterState::new(tone_for_used(Some(40.0)));
+        state.update(Some(40.0));
+        state.update(Some(80.0)); // Ok → Warn flip
+        let flip_generation = state.color.generation();
+        assert_eq!(flip_generation, 1);
+
+        // Width-only changes inside the warn band: the color crossfade is
+        // NEVER restarted (same-target retargets are no-ops).
+        for used in [81.0, 79.5, 85.0, 89.9] {
+            state.update(Some(used));
+            assert_eq!(
+                state.color.generation(),
+                flip_generation,
+                "width-only change at {used}% must not restart the tone fade"
+            );
+            assert_eq!(state.color.target(), Tone::Warn.color());
+        }
+
+        // The next REAL flip crossfades again.
+        state.update(Some(95.0));
+        assert_eq!(state.color.generation(), flip_generation + 1);
+        assert_eq!(state.color.target(), Tone::Crit.color());
     }
 }
