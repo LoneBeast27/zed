@@ -27,8 +27,10 @@ pub const BRIDGE_BASE_URL: &str = "http://localhost:4530";
 
 /// `/board` cadence while in polling fallback (matches the web bridge poll).
 const BOARD_POLL_INTERVAL: Duration = Duration::from_millis(1500);
-/// `/usage` rides every Nth fallback board tick: 8 × 1500ms = 12s.
-const USAGE_POLL_TICKS: u64 = 8;
+/// `/usage` cadence (PARITY_SPEC §4.8: the usage island polls at 12s). The
+/// schedule is elapsed-based and lives in `connection_loop`, so it rides
+/// across backoff windows instead of resetting with each one.
+const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(12);
 /// When the bridge is fully offline, back off to slow poll retries.
 const OFFLINE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// SSE reconnect backoff: start here…
@@ -187,6 +189,9 @@ async fn connection_loop(
     cx: &mut AsyncApp,
 ) {
     let mut backoff = SSE_BACKOFF_START;
+    // The 12s usage schedule (None = due immediately) — owned here so it
+    // spans backoff windows instead of resetting with each one.
+    let mut last_usage_fetch: Option<Instant> = None;
     loop {
         let client = http_client.clone();
         let attached = cx
@@ -209,13 +214,22 @@ async fn connection_loop(
             Err(_) => {
                 // `/sse` unreachable (bridge down, or an older bridge without
                 // the endpoint) — poll `/board` for one backoff window.
-                if poll_window(&http_client, &this, cx, backoff).await.is_err() {
+                if poll_window(&http_client, &this, cx, backoff, &mut last_usage_fetch)
+                    .await
+                    .is_err()
+                {
                     return; // store dropped
                 }
                 backoff = (backoff + SSE_BACKOFF_STEP).min(SSE_BACKOFF_CAP);
             }
         }
     }
+}
+
+/// Whether the 12s usage schedule is due (`None` = fetch immediately — a
+/// fresh fallback session, or the previous fetch failed).
+fn usage_due(last_fetch: Option<Instant>, now: Instant) -> bool {
+    last_fetch.is_none_or(|at| now.duration_since(at) >= USAGE_POLL_INTERVAL)
 }
 
 /// Streaming GET to `/sse`; resolves once headers arrive. Errors on connect
@@ -278,19 +292,26 @@ async fn consume_sse(
     Ok(())
 }
 
-/// The polling fallback: fetch `/board` (and `/usage` every Nth tick) at the
-/// poll cadence until `window` elapses, then return so the caller retries
-/// `/sse`. Returns `Err` only when the store entity is gone.
+/// The polling fallback: fetch `/board` (and `/usage` when the cross-window
+/// 12s schedule is due) at the poll cadence until `window` elapses, then
+/// return so the caller retries `/sse`. The window check runs BEFORE each
+/// fetch, and the final sleep is never truncated to the window edge, so
+/// window boundaries can't issue back-to-back `/board` fetches (the window
+/// overshoots by at most one poll interval instead). Returns `Err` only when
+/// the store entity is gone.
 async fn poll_window(
     http_client: &Arc<dyn HttpClient>,
     this: &WeakEntity<BridgeStore>,
     cx: &mut AsyncApp,
     window: Duration,
+    last_usage_fetch: &mut Option<Instant>,
 ) -> Result<(), ()> {
     let mut elapsed = Duration::ZERO;
-    let mut tick: u64 = 0;
     loop {
-        let fetch_usage = tick % USAGE_POLL_TICKS == 0;
+        if elapsed >= window {
+            return Ok(());
+        }
+        let fetch_usage = usage_due(*last_usage_fetch, Instant::now());
         let client = http_client.clone();
         let fetched = cx
             .background_spawn(async move {
@@ -324,17 +345,18 @@ async fn poll_window(
         })
         .map_err(|_| ())?;
 
-        // Reset the usage schedule on failure so reconnect refetches at once.
-        tick = if ok { tick.wrapping_add(1) } else { 0 };
+        // Bank the 12s schedule on success; reset it on failure so a
+        // reconnect refetches usage at once.
+        if !ok {
+            *last_usage_fetch = None;
+        } else if fetch_usage {
+            *last_usage_fetch = Some(Instant::now());
+        }
         let delay = if ok {
             BOARD_POLL_INTERVAL
         } else {
             OFFLINE_RETRY_INTERVAL
         };
-        if elapsed >= window {
-            return Ok(());
-        }
-        let delay = delay.min(window - elapsed);
         cx.background_executor().timer(delay).await;
         elapsed += delay;
     }
@@ -381,6 +403,18 @@ mod tests {
             elapsed_s,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn usage_schedule_is_12s_and_resets_on_none() {
+        let now = Instant::now();
+        assert!(usage_due(None, now), "no prior fetch (or a failure) = due");
+        assert!(!usage_due(Some(now), now));
+        assert!(
+            !usage_due(Some(now), now + Duration::from_secs(11)),
+            "11s in: not due — the old per-window tick reset fired here"
+        );
+        assert!(usage_due(Some(now), now + Duration::from_secs(12)));
     }
 
     #[test]
