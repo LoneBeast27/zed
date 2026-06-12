@@ -13,18 +13,17 @@ use gpui::{
     Focusable, FontWeight, KeyDownEvent, SharedString, Task, Window, relative,
 };
 use http_client::HttpClient;
-use markdown::{Markdown, MarkdownElement};
+use markdown::Markdown;
 use serde::Deserialize;
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
 use crate::agent_accents::accent_for_agent;
-use crate::agent_configuration::configure_context_server_modal::default_markdown_style;
 use crate::bridge::{BRIDGE_BASE_URL, fetch_json};
 
 use super::motion::{DECEL, EFFECTS};
-use super::style::{HAIRLINE_HI, SURFACE_2B, chip_reason, rel, status_pill};
+use super::style::{HAIRLINE_HI, chip_reason, rel, status_pill};
 
 /// Logs tail-poll cadence while the run is live (web: 1s).
 const LOG_POLL: Duration = Duration::from_secs(1);
@@ -67,7 +66,7 @@ pub struct RunEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DrawerTab {
+pub(super) enum DrawerTab {
     Summary,
     Result,
     Logs,
@@ -78,7 +77,6 @@ enum DrawerTab {
 pub struct DismissDrawer;
 
 pub struct RunDrawer {
-    run_id: SharedString,
     detail: Option<RunDetail>,
     tab: DrawerTab,
     /// Markdown entities for the summary task + result body, rebuilt when
@@ -94,11 +92,10 @@ pub struct RunDrawer {
 impl RunDrawer {
     pub fn new(run_id: SharedString, cx: &mut Context<Self>) -> Self {
         let http_client: Arc<dyn HttpClient> = cx.http_client();
-        let poll_run_id = run_id.clone();
         let poll = cx.spawn(async move |this, cx| {
             loop {
                 let client = http_client.clone();
-                let url = format!("{BRIDGE_BASE_URL}/run/{poll_run_id}");
+                let url = format!("{BRIDGE_BASE_URL}/run/{run_id}");
                 let fetched = cx
                     .background_spawn(async move {
                         let raw = fetch_json(client.as_ref(), &url).await?;
@@ -126,7 +123,6 @@ impl RunDrawer {
             }
         });
         Self {
-            run_id,
             detail: None,
             tab: DrawerTab::Summary,
             task_md: None,
@@ -312,11 +308,6 @@ impl RunDrawer {
     }
 
     fn render_body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let body = match self.tab {
-            DrawerTab::Summary => self.render_summary(window, cx),
-            DrawerTab::Result => self.render_result(window, cx),
-            DrawerTab::Logs => self.render_logs(cx),
-        };
         div()
             .id("drawer-body")
             .flex_1()
@@ -325,187 +316,18 @@ impl RunDrawer {
             .px(px(22.))
             .pt(px(18.))
             .pb(px(28.))
-            .child(body)
-            .into_any_element()
-    }
-
-    fn field(&self, key: &'static str, value: AnyElement, cx: &App) -> Div {
-        let colors = cx.theme().colors();
-        v_flex()
-            .mb(px(16.))
-            .child(
-                div()
-                    .mb(px(5.))
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors.text_placeholder)
-                    .child(SharedString::from(key.to_uppercase())),
-            )
-            .child(value)
-    }
-
-    fn mono_value(&self, text: String, cx: &App) -> AnyElement {
-        let colors = cx.theme().colors();
-        let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
-        div()
-            .font_family(mono)
-            .text_size(px(12.))
-            .text_color(colors.text_muted)
-            .child(SharedString::from(text))
-            .into_any_element()
-    }
-
-    fn pre_block(&self, text: String, cx: &App) -> AnyElement {
-        let colors = cx.theme().colors();
-        let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
-        div()
-            .rounded(px(12.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(SURFACE_2B)
-            .px(px(16.))
-            .py(px(14.))
-            .font_family(mono)
-            .text_size(px(12.5))
-            .text_color(colors.text)
-            .child(SharedString::from(text))
-            .into_any_element()
-    }
-
-    fn render_summary(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors();
-        let Some(detail) = self.detail.clone() else {
-            return self.mono_value("Loading…".into(), cx);
-        };
-        let text_value = |s: String| {
-            div()
-                .text_size(px(13.))
-                .text_color(colors.text_muted)
-                .child(SharedString::from(s))
-                .into_any_element()
-        };
-        let usage_line = detail.usage.as_ref().map(|usage| {
-            usage
-                .iter()
-                .filter(|(_, v)| !v.is_null())
-                .map(|(k, v)| format!("{k}: {v}"))
-                .collect::<Vec<_>>()
-                .join("  ·  ")
-        });
-        let task_body: AnyElement = match &self.task_md {
-            Some(md) => MarkdownElement::new(md.clone(), default_markdown_style(window, cx))
-                .into_any_element(),
-            None => text_value(String::new()),
-        };
-        v_flex()
-            .child(self.field(
-                "Routing",
-                text_value(detail.chip.clone().unwrap_or_default()),
-                cx,
-            ))
-            .child(self.field("Task", task_body, cx))
-            .children(
-                detail
-                    .error
-                    .clone()
-                    .map(|error| self.field("Error", self.pre_block(error, cx), cx)),
-            )
-            .children(
-                usage_line
-                    .filter(|line| !line.is_empty())
-                    .map(|line| self.field("Usage", self.mono_value(line, cx), cx)),
-            )
-            .child(self.field(
-                "Run",
-                self.mono_value(
-                    format!("{} · {}", detail.run_id, rel(detail.elapsed_s)),
-                    cx,
-                ),
+            .child(super::run_detail_body::render_body(
+                self.tab,
+                self.detail.as_ref(),
+                self.task_md.as_ref(),
+                self.result_md.as_ref(),
+                window,
                 cx,
             ))
             .into_any_element()
-    }
-
-    fn render_result(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors();
-        match (&self.result_md, &self.detail) {
-            (Some(md), _) => div()
-                .rounded(px(12.))
-                .border_1()
-                .border_color(colors.border)
-                .bg(SURFACE_2B)
-                .px(px(16.))
-                .py(px(14.))
-                .child(MarkdownElement::new(
-                    md.clone(),
-                    default_markdown_style(window, cx),
-                ))
-                .into_any_element(),
-            (None, Some(detail)) => {
-                let hint = if detail.status == "running" {
-                    "No result text yet — still running."
-                } else {
-                    "No result text."
-                };
-                div()
-                    .text_size(px(13.))
-                    .text_color(colors.text_muted)
-                    .child(hint)
-                    .into_any_element()
-            }
-            (None, None) => self.mono_value("Loading…".into(), cx),
-        }
-    }
-
-    fn render_logs(&self, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors();
-        let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
-        let events = self
-            .detail
-            .as_ref()
-            .map(|d| d.events.clone())
-            .unwrap_or_default();
-        if events.is_empty() {
-            return div()
-                .text_size(px(13.))
-                .text_color(colors.text_muted)
-                .child("No events recorded.")
-                .into_any_element();
-        }
-        let rows = events.into_iter().enumerate().map(|(ix, event)| {
-            let payload: String = event
-                .payload
-                .to_string()
-                .chars()
-                .take(400)
-                .collect();
-            h_flex()
-                .id(ElementId::NamedInteger("log-row".into(), ix as u64))
-                .items_start()
-                .gap(px(10.))
-                .py(px(7.))
-                .border_b_1()
-                .border_color(colors.border)
-                .font_family(mono.clone())
-                .text_size(px(12.))
-                .child(
-                    div()
-                        .flex_none()
-                        .min_w(px(52.))
-                        .text_color(colors.text_placeholder)
-                        .child(SharedString::from(event.kind)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_color(colors.text_muted)
-                        .child(SharedString::from(payload)),
-                )
-        });
-        v_flex().children(rows).into_any_element()
     }
 }
+
 
 impl Render for RunDrawer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

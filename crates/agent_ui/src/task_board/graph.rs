@@ -15,23 +15,22 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, BoxShadow, ElementId, FontWeight, Hsla, Path,
-    PathBuilder, Pixels, Point, Rgba, SharedString, WeakEntity, canvas, point, px,
+    Animation, AnimationExt as _, AnyElement, App, ElementId, Hsla, Path, PathBuilder, Pixels,
+    Point, Rgba, SharedString, WeakEntity, canvas, point, px,
 };
-use settings::Settings as _;
-use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
-use crate::agent_accents::{ACCENT_AGY, ACCENT_GEMINI, STATUS_RUNNING, color_for_status};
+use crate::agent_accents::STATUS_RUNNING;
 use crate::bridge::RunRow;
 
 use super::motion::{DECEL, SPATIAL};
+use super::node::{node_label, root_node, status_dot};
 use super::panel::TaskBoardPanel;
-use super::style::{HAIRLINE_HI, SURFACE_2, empty_state, status_phrase};
+use super::style::{HAIRLINE_HI, empty_state, status_phrase};
 
 // ── Layout constants — graph.js `convTree`, EXACT ──
-const ROOTY: f32 = 24.;
-const X0: f32 = 30.;
+pub(super) const ROOTY: f32 = 24.;
+pub(super) const X0: f32 = 30.;
 const XC: f32 = 64.;
 const Y0: f32 = 70.;
 const STEP: f32 = 56.;
@@ -270,7 +269,7 @@ fn graph_node(
                 .ok();
         })
         .child(status_dot(&run.run_id, &run.status))
-        .child(node_label(name.into(), phrase.into(), false, cx));
+        .child(node_label(name.into(), phrase.into(), cx));
 
     if !fresh {
         return node.into_any_element();
@@ -296,213 +295,6 @@ fn graph_node(
         },
     )
     .into_any_element()
-}
-
-/// The `.gdot`: 16px circle, surface fill, high hairline border, status glow
-/// as a real BoxShadow; completed/failed/killed = filled center dot, running
-/// = open-circle spinner arc rotating on the rim.
-fn status_dot(run_id: &str, status: &str) -> AnyElement {
-    let color = color_for_status(status);
-    let glowing = matches!(status, "running" | "completed" | "failed" | "killed");
-    let dot = div()
-        .relative()
-        .flex_none()
-        .size(px(16.))
-        .rounded_full()
-        .bg(SURFACE_2)
-        .border_1()
-        .border_color(HAIRLINE_HI)
-        .when(glowing, |dot| {
-            // Web: blurred pseudo-element, inset -6px, blur 20, opacity .25.
-            dot.shadow(vec![BoxShadow {
-                color: color.opacity(0.25),
-                offset: point(px(0.), px(0.)),
-                blur_radius: px(20.),
-                spread_radius: px(6.),
-            }])
-        });
-    match status {
-        "completed" | "failed" | "killed" => dot
-            .child(
-                div()
-                    .absolute()
-                    .inset(px(4.))
-                    .rounded_full()
-                    .bg(color),
-            )
-            .into_any_element(),
-        "running" => dot.child(spinner_arc(run_id, color)).into_any_element(),
-        _ => dot.into_any_element(),
-    }
-}
-
-/// The open-circle spinner: a quarter-ring arc orbiting the dot rim at
-/// 0.9s/rev (web `gspin` border-top trick, painted as a real arc).
-fn spinner_arc(run_id: &str, color: Hsla) -> AnyElement {
-    div()
-        .absolute()
-        .inset(px(-1.))
-        .with_animation(
-            ElementId::Name(format!("gspin-{run_id}").into()),
-            Animation::new(Duration::from_millis(900)).repeat(),
-            move |wrapper, t| {
-                let start_angle = t * std::f32::consts::TAU;
-                wrapper.child(
-                    canvas(
-                        |_, _, _| (),
-                        move |bounds, _, window, _| {
-                            let center = bounds.center();
-                            let radius = (bounds.size.width.as_f32() / 2.0) - 0.75;
-                            let mut builder = PathBuilder::stroke(px(1.5));
-                            const SEGMENTS: usize = 14;
-                            for k in 0..=SEGMENTS {
-                                let a = start_angle
-                                    + (k as f32 / SEGMENTS as f32)
-                                        * (std::f32::consts::TAU / 4.0);
-                                let p = point(
-                                    center.x + px(radius * a.cos()),
-                                    center.y + px(radius * a.sin()),
-                                );
-                                if k == 0 {
-                                    builder.move_to(p);
-                                } else {
-                                    builder.line_to(p);
-                                }
-                            }
-                            if let Ok(path) = builder.build() {
-                                window.paint_path(path, color);
-                            }
-                        },
-                    )
-                    .size_full(),
-                )
-            },
-        )
-        .into_any_element()
-}
-
-/// The `.groot`: 22px duotone conic ring (accent blue → violet → back, NO
-/// full rainbows) with a ✦ core, + "conversation / orchestrator" label.
-fn root_node(conv_id: String, panel: WeakEntity<TaskBoardPanel>, cx: &App) -> AnyElement {
-    let title: SharedString = if conv_id.is_empty() {
-        "conversation".into()
-    } else {
-        conv_id.clone().into()
-    };
-    let text = cx.theme().colors().text;
-
-    let ring = canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            // Two-color conic approximation: stroked arc segments lerping
-            // ACCENT_AGY → ACCENT_GEMINI → ACCENT_AGY around the ring.
-            let center = bounds.center();
-            let radius = (bounds.size.width.as_f32() / 2.0) - 1.5; // 3px-stroke ring
-            const SEGMENTS: usize = 24;
-            for k in 0..SEGMENTS {
-                let f = k as f32 / SEGMENTS as f32;
-                let mix = if f < 0.5 { f * 2.0 } else { 2.0 - f * 2.0 };
-                let color = lerp_rgba(ACCENT_AGY, ACCENT_GEMINI, mix);
-                let mut builder = PathBuilder::stroke(px(3.));
-                // Overlap each segment slightly to avoid hairline joints.
-                for (step, sub) in [0.0_f32, 0.55, 1.1].into_iter().enumerate() {
-                    let a = (f + sub / SEGMENTS as f32) * std::f32::consts::TAU;
-                    let p = point(
-                        center.x + px(radius * a.cos()),
-                        center.y + px(radius * a.sin()),
-                    );
-                    if step == 0 {
-                        builder.move_to(p);
-                    } else {
-                        builder.line_to(p);
-                    }
-                }
-                if let Ok(path) = builder.build() {
-                    window.paint_path(path, color);
-                }
-            }
-        },
-    )
-    .absolute()
-    .inset_0();
-
-    let click_panel = panel;
-    let click_conv = SharedString::from(conv_id.clone());
-    h_flex()
-        .id(ElementId::Name(format!("groot-{conv_id}").into()))
-        .absolute()
-        .left(px(X0 - 11.))
-        .top(px(ROOTY - 12.))
-        .items_center()
-        .gap(px(9.))
-        .cursor_pointer()
-        .on_click(move |_, _, cx| {
-            click_panel
-                .update(cx, |panel, cx| {
-                    panel.select_conversation(click_conv.clone(), cx)
-                })
-                .ok();
-        })
-        .child(
-            div()
-                .relative()
-                .flex_none()
-                .size(px(22.))
-                .child(ring)
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(9.))
-                        .text_color(text)
-                        .child("✦"),
-                ),
-        )
-        .child(node_label(title, "orchestrator".into(), true, cx))
-        .into_any_element()
-}
-
-/// The `.glabel`: name line (13px/500, ≤160px ellipsis) over the mono
-/// progress-note line (12px, text-3, tabular nums).
-fn node_label(name: SharedString, note: SharedString, root: bool, cx: &App) -> AnyElement {
-    let colors = cx.theme().colors();
-    let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
-    let _ = root;
-    v_flex()
-        .min_w_0()
-        .child(
-            div()
-                .max_w(px(160.))
-                .text_size(px(13.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(colors.text)
-                .truncate()
-                .child(name),
-        )
-        .child(
-            div()
-                .max_w(px(160.))
-                .font_family(mono)
-                .text_size(px(12.))
-                .text_color(colors.text_placeholder)
-                .truncate()
-                .child(note),
-        )
-        .into_any_element()
-}
-
-/// Componentwise sRGB lerp between two accent stops.
-fn lerp_rgba(a: Rgba, b: Rgba, t: f32) -> Hsla {
-    Rgba {
-        r: a.r + (b.r - a.r) * t,
-        g: a.g + (b.g - a.g) * t,
-        b: a.b + (b.b - a.b) * t,
-        a: 1.0,
-    }
-    .into()
 }
 
 #[cfg(test)]

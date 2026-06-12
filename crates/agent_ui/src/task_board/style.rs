@@ -102,7 +102,7 @@ pub fn status_pill(
         )
         .into_any_element()
     });
-    let _ = cx;
+    let _ = cx; // kept for parity with sibling builders (theme-driven later)
     h_flex()
         .id(id)
         .flex_none()
