@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ElementId, Hsla, Path, PathBuilder, Pixels,
-    Point, Rgba, SharedString, WeakEntity, canvas, point, px,
+    Point, Rgba, ScrollHandle, SharedString, WeakEntity, canvas, point, px,
 };
 use ui::prelude::*;
 
@@ -43,13 +43,32 @@ const NODE_SPAWN: Duration = Duration::from_millis(500);
 /// longest stagger + spawn + edge draw with margin, so mid-animation renders
 /// keep their animated wrappers (the web's `seenRuns` keeps the DOM node).
 const FRESH_WINDOW: Duration = Duration::from_secs(3);
+/// Vertical slack around the scroll viewport before a conv tree is culled —
+/// trees partially entering the view are always fully built.
+const CULL_MARGIN: f32 = 200.;
+/// Graph content top padding (kept in a const because tree culling computes
+/// each tree's offset from it).
+const CONTENT_PT: f32 = 12.;
+/// Conv-tree bottom margin (`.gconv { margin-bottom: 28px }`).
+const TREE_MB: f32 = 28.;
+
+/// Whether a conv tree's vertical span `[tree_top, tree_top + height]` (in
+/// content coordinates) intersects the scroll viewport plus margin.
+fn tree_in_viewport(tree_top: f32, height: f32, scroll_top: f32, viewport_height: f32) -> bool {
+    tree_top + height >= scroll_top - CULL_MARGIN
+        && tree_top <= scroll_top + viewport_height + CULL_MARGIN
+}
 
 /// Builds the graph view. `seen` is the panel-owned `seenRuns` equivalent
-/// (run id → first time it rendered on the graph); it is pruned to live runs
-/// and only ever updated when the graph actually renders, like the web.
+/// (run id → first sight); it is pruned to live runs. Render cost is bounded
+/// by what's visible (RUST_PORT_NOTES §8): conv trees fully outside the
+/// scroll viewport (tracked via `scroll`) build a same-height placeholder —
+/// no nodes, no edges, no paths — and every canvas paint closure early-outs
+/// when its bounds don't intersect the window's content mask.
 pub fn graph_view(
     board: Vec<RunRow>,
     seen: &mut HashMap<SharedString, Instant>,
+    scroll: &ScrollHandle,
     panel: WeakEntity<TaskBoardPanel>,
     cx: &mut App,
 ) -> AnyElement {
@@ -77,11 +96,38 @@ pub fn graph_view(
         by_conv.entry(run.conv.clone()).or_default().push(run);
     }
 
+    // Viewport in content coordinates (offset.y goes negative as the user
+    // scrolls down). Height 0 = unmeasured first frame → build everything.
+    let viewport_height = scroll.bounds().size.height.as_f32();
+    let scroll_top = -scroll.offset().y.as_f32();
+
+    let mut tree_top = CONTENT_PT;
     let trees: Vec<AnyElement> = conv_order
         .into_iter()
         .map(|conv_id| {
             let runs = by_conv.remove(&conv_id).unwrap_or_default();
-            conv_tree(conv_id, runs, seen, now, panel.clone(), cx)
+            let height = Y0 + runs.len() as f32 * STEP + 6.;
+            // Stamp first sight at board arrival even when culled, so a
+            // tree scrolled into view later doesn't replay settled spawns
+            // (the web's seenRuns adds during every render pass).
+            let fresh: Vec<bool> = runs
+                .iter()
+                .map(|run| {
+                    let first_seen = *seen
+                        .entry(SharedString::from(run.run_id.clone()))
+                        .or_insert(now);
+                    now.duration_since(first_seen) < FRESH_WINDOW
+                })
+                .collect();
+            let visible = viewport_height <= 0.
+                || tree_in_viewport(tree_top, height, scroll_top, viewport_height);
+            tree_top += height + TREE_MB;
+            if visible {
+                conv_tree(conv_id, runs, fresh, panel.clone(), cx)
+            } else {
+                // Same-height placeholder preserves scroll geometry.
+                div().w_full().h(px(height)).mb(px(TREE_MB)).into_any_element()
+            }
         })
         .collect();
 
@@ -89,8 +135,9 @@ pub fn graph_view(
         .id("task-board-graph")
         .size_full()
         .overflow_y_scroll()
+        .track_scroll(scroll)
         .px(px(16.))
-        .pt(px(12.))
+        .pt(px(CONTENT_PT))
         .pb(px(28.))
         .children(trees)
         .into_any_element()
@@ -100,22 +147,11 @@ pub fn graph_view(
 fn conv_tree(
     conv_id: String,
     runs: Vec<RunRow>,
-    seen: &mut HashMap<SharedString, Instant>,
-    now: Instant,
+    fresh: Vec<bool>,
     panel: WeakEntity<TaskBoardPanel>,
     cx: &App,
 ) -> AnyElement {
     let height = Y0 + runs.len() as f32 * STEP + 6.;
-
-    let fresh: Vec<bool> = runs
-        .iter()
-        .map(|run| {
-            let first_seen = *seen
-                .entry(SharedString::from(run.run_id.clone()))
-                .or_insert(now);
-            now.duration_since(first_seen) < FRESH_WINDOW
-        })
-        .collect();
 
     // Settled edges paint together in one static canvas; fresh edges get
     // their own draw-in animation element each.
@@ -133,6 +169,11 @@ fn conv_tree(
     let settled_canvas = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
+            // Offscreen culling: skip path building + paint entirely when
+            // the tree is outside the clip (RUST_PORT_NOTES §8).
+            if !bounds.intersects(&window.content_mask().bounds) {
+                return;
+            }
             for (y, color) in &settled_edges {
                 if let Some(path) = edge_path(bounds.origin, *y, 1.0) {
                     window.paint_path(path, *color);
@@ -153,7 +194,7 @@ fn conv_tree(
         .relative()
         .w_full()
         .h(px(height))
-        .mb(px(28.))
+        .mb(px(TREE_MB))
         .child(settled_canvas)
         .children(drawing_edges)
         .child(root_node(conv_id, panel.clone(), cx))
@@ -207,6 +248,9 @@ fn drawing_edge(run_id: &str, y: f32, color: Hsla) -> AnyElement {
                     canvas(
                         |_, _, _| (),
                         move |bounds, _, window, _| {
+                            if !bounds.intersects(&window.content_mask().bounds) {
+                                return;
+                            }
                             if let Some(path) = edge_path(bounds.origin, y, t) {
                                 window.paint_path(path, color);
                             }
@@ -322,6 +366,20 @@ mod tests {
         assert!(edge_path(origin, Y0 + 3. * STEP, 0.5).is_some());
         // Zero prefix paints nothing (guards the dash split_range edge case).
         assert!(edge_path(origin, Y0, 0.0).is_none());
+    }
+
+    #[test]
+    fn tree_culling_keeps_visible_and_margin_trees() {
+        // Viewport: scroll_top 1000, height 600 → visible [1000, 1600],
+        // with the 200px margin: [800, 1800].
+        let (top, height) = (1000., 600.);
+        assert!(tree_in_viewport(1200., 300., top, height), "fully inside");
+        assert!(tree_in_viewport(700., 200., top, height), "straddles top edge + margin");
+        assert!(tree_in_viewport(1750., 400., top, height), "enters bottom margin");
+        assert!(!tree_in_viewport(0., 500., top, height), "far above → culled");
+        assert!(!tree_in_viewport(2000., 300., top, height), "far below → culled");
+        // Unscrolled viewport keeps the first trees.
+        assert!(tree_in_viewport(12., 126., 0., 600.));
     }
 
     #[test]

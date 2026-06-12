@@ -58,6 +58,8 @@ pub struct TaskBoardPanel {
     /// back into the uniform_list viewport never replays its entrance
     /// (element state drops on cull; this map persists outside it).
     inbox_seen: std::collections::HashMap<SharedString, std::time::Instant>,
+    /// Graph scroll position — drives conv-tree viewport culling.
+    graph_scroll: gpui::ScrollHandle,
     /// The open run drawer, if any (right slide-over).
     drawer: Option<Entity<run_detail::RunDrawer>>,
     /// Seg-toggle 150ms state crossfade (web `.seg-toggle button` transition).
@@ -81,6 +83,7 @@ impl TaskBoardPanel {
             position: DockPosition::Left,
             graph_seen: std::collections::HashMap::new(),
             inbox_seen: std::collections::HashMap::new(),
+            graph_scroll: gpui::ScrollHandle::new(),
             drawer: None,
             view_fade: StateFade::default(),
             hovered_row: None,
@@ -288,7 +291,8 @@ impl Render for TaskBoardPanel {
             }
             BoardView::Graph => {
                 let weak = cx.weak_entity();
-                super::graph::graph_view(board, &mut self.graph_seen, weak, cx)
+                let scroll = self.graph_scroll.clone();
+                super::graph::graph_view(board, &mut self.graph_seen, &scroll, weak, cx)
             }
         };
 

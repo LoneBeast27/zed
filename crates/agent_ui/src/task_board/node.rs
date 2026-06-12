@@ -74,6 +74,10 @@ fn spinner_arc(run_id: &str, color: Hsla) -> AnyElement {
                     canvas(
                         |_, _, _| (),
                         move |bounds, _, window, _| {
+                            // Offscreen culling (RUST_PORT_NOTES §8).
+                            if !bounds.intersects(&window.content_mask().bounds) {
+                                return;
+                            }
                             let center = bounds.center();
                             let radius = (bounds.size.width.as_f32() / 2.0) - 0.75;
                             let mut builder = PathBuilder::stroke(px(1.5));
@@ -117,6 +121,10 @@ pub(super) fn root_node(conv_id: String, panel: WeakEntity<TaskBoardPanel>, cx: 
     let ring = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
+            // Offscreen culling (RUST_PORT_NOTES §8).
+            if !bounds.intersects(&window.content_mask().bounds) {
+                return;
+            }
             // Two-color conic approximation: stroked arc segments lerping
             // ACCENT_AGY → ACCENT_GEMINI → ACCENT_AGY around the ring.
             let center = bounds.center();
