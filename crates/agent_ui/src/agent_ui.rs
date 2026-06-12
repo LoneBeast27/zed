@@ -1,4 +1,5 @@
 mod activity_bar;
+pub mod agent_accents;
 mod agent_configuration;
 pub mod agent_connection_store;
 mod agent_diff;
