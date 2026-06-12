@@ -222,8 +222,16 @@ pub fn build_face(
             .gap(px(TEXT_GAP))
             .child(dot(*tone))
             // Pool-status tint: the whole extended label takes the pool's
-            // status color (§4.8).
-            .child(island_text(text.clone(), tone.color()))
+            // status color (§4.8) — except Unknown, where the web's
+            // `data-tone="unknown"` matches no tint override and the label
+            // stays full --text (only the dot dims to text-3).
+            .child(island_text(
+                text.clone(),
+                match tone {
+                    Tone::Unknown => colors.text,
+                    tone => tone.color(),
+                },
+            ))
             .into_any_element(),
         Face::Card { rows } => v_flex()
             .w(px(CARD_W))
