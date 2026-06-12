@@ -58,13 +58,26 @@ pub struct UsagePanel {
     /// Bridge-offline grey-out (same native addition as the task board).
     was_connected: bool,
     connected_fade: StateFade,
+    /// Snapshot gate for the store observer (§8 idle cost): the store
+    /// notifies at 1Hz while a run ticks for elapsed counters this panel
+    /// doesn't render — repaint only when the panel's actual inputs
+    /// (usage rows, scrape meta, connectivity) change, the same discipline
+    /// as the islands.
+    last_seen: Option<(Vec<PoolRow>, UsageMeta, bool)>,
     _store_subscription: Subscription,
 }
 
 impl UsagePanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let store = bridge::global_store(cx);
-        let _store_subscription = cx.observe(&store, |_, _, cx| cx.notify());
+        let _store_subscription = cx.observe(&store, |this: &mut Self, store, cx| {
+            let store = store.read(cx);
+            let snapshot = (store.usage.clone(), store.usage_meta.clone(), store.connected);
+            if this.last_seen.as_ref() != Some(&snapshot) {
+                this.last_seen = Some(snapshot);
+                cx.notify();
+            }
+        });
         Self {
             focus_handle: cx.focus_handle(),
             store,
@@ -72,6 +85,7 @@ impl UsagePanel {
             meters: HashMap::new(),
             was_connected: false,
             connected_fade: StateFade::default(),
+            last_seen: None,
             _store_subscription,
         }
     }
