@@ -73,13 +73,16 @@ pub struct RunDetail {
     pub events: Vec<RunEvent>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct RunEvent {
     #[serde(default)]
     pub kind: String,
     #[serde(default)]
     pub payload: serde_json::Value,
 }
+
+/// Web log row truncation (`JSON.stringify(ev.payload).slice(0, 400)`).
+const LOG_PAYLOAD_CAP: usize = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DrawerTab {
@@ -110,6 +113,10 @@ pub struct RunDrawer {
     /// the underlying text changes.
     task_md: Option<Entity<Markdown>>,
     result_md: Option<Entity<Markdown>>,
+    /// Pre-stringified Logs rows (kind, payload≤400 chars) — serialized once
+    /// per poll tick in [`Self::set_detail`], never in render (the drawer
+    /// redraws every frame while the pill pulse runs).
+    log_rows: Vec<(SharedString, SharedString)>,
     focus_handle: FocusHandle,
     needs_focus: bool,
     closing: bool,
@@ -176,6 +183,7 @@ impl RunDrawer {
             container_width: None,
             task_md: None,
             result_md: None,
+            log_rows: Vec::new(),
             focus_handle: cx.focus_handle(),
             needs_focus: true,
             closing: false,
@@ -188,6 +196,21 @@ impl RunDrawer {
             self.detail.as_ref().map(|d| d.task.clone()) != Some(detail.task.clone());
         let text_changed =
             self.detail.as_ref().map(|d| d.text.clone()) != Some(detail.text.clone());
+        let events_changed = self.detail.as_ref().map(|d| &d.events) != Some(&detail.events);
+        if events_changed {
+            self.log_rows = detail
+                .events
+                .iter()
+                .map(|event| {
+                    let payload: String =
+                        event.payload.to_string().chars().take(LOG_PAYLOAD_CAP).collect();
+                    (
+                        SharedString::from(event.kind.clone()),
+                        SharedString::from(payload),
+                    )
+                })
+                .collect();
+        }
         if task_changed || self.task_md.is_none() {
             self.task_md = detail.task.clone().map(|task| {
                 cx.new(|cx| Markdown::new(SharedString::from(task), None, None, cx))
@@ -464,6 +487,7 @@ impl RunDrawer {
                 self.detail.as_ref(),
                 self.task_md.as_ref(),
                 self.result_md.as_ref(),
+                &self.log_rows,
                 window,
                 cx,
             ))

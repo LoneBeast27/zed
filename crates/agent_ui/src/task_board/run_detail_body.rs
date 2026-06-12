@@ -65,19 +65,21 @@ fn body_markdown_style(kind: BodyMarkdown, window: &Window, cx: &App) -> Markdow
     }
 }
 
-/// Renders the active tab's body content.
+/// Renders the active tab's body content. `log_rows` arrive pre-stringified
+/// from `RunDrawer::set_detail` (once per poll tick, never per frame).
 pub(super) fn render_body(
     tab: DrawerTab,
     detail: Option<&RunDetail>,
     task_md: Option<&Entity<Markdown>>,
     result_md: Option<&Entity<Markdown>>,
+    log_rows: &[(SharedString, SharedString)],
     window: &Window,
     cx: &App,
 ) -> AnyElement {
     match tab {
         DrawerTab::Summary => render_summary(detail, task_md, window, cx),
         DrawerTab::Result => render_result(detail, result_md, window, cx),
-        DrawerTab::Logs => render_logs(detail, cx),
+        DrawerTab::Logs => render_logs(log_rows, cx),
     }
 }
 
@@ -218,19 +220,18 @@ fn render_result(
     }
 }
 
-fn render_logs(detail: Option<&RunDetail>, cx: &App) -> AnyElement {
+fn render_logs(log_rows: &[(SharedString, SharedString)], cx: &App) -> AnyElement {
     let colors = cx.theme().colors();
     let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
-    let events = detail.map(|d| d.events.clone()).unwrap_or_default();
-    if events.is_empty() {
+    if log_rows.is_empty() {
         return div()
             .text_size(px(13.))
             .text_color(colors.text_muted)
             .child("No events recorded.")
             .into_any_element();
     }
-    let rows = events.into_iter().enumerate().map(|(ix, event)| {
-        let payload: String = event.payload.to_string().chars().take(400).collect();
+    // Rows are pre-stringified; per-render cost is SharedString clones only.
+    let rows = log_rows.iter().enumerate().map(|(ix, (kind, payload))| {
         h_flex()
             .id(ElementId::NamedInteger("log-row".into(), ix as u64))
             .items_start()
@@ -245,14 +246,14 @@ fn render_logs(detail: Option<&RunDetail>, cx: &App) -> AnyElement {
                     .flex_none()
                     .min_w(px(52.))
                     .text_color(colors.text_placeholder)
-                    .child(SharedString::from(event.kind)),
+                    .child(kind.clone()),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .text_color(colors.text_muted)
-                    .child(SharedString::from(payload)),
+                    .child(payload.clone()),
             )
     });
     v_flex().children(rows).into_any_element()
