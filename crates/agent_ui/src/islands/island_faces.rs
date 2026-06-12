@@ -244,7 +244,8 @@ pub fn build_face(
                     .pb(px(2.))
                     .px(px(10.))
                     .border_t_1()
-                    .border_color(gpui::white().opacity(0.08))
+                    // `--hairline` → colors.border (RUST_PORT_NOTES §1).
+                    .border_color(colors.border)
                     .font_family(ThemeSettings::get_global(cx).buffer_font.family.clone())
                     .text_size(px(11.))
                     .text_color(colors.text_placeholder)
@@ -273,9 +274,14 @@ fn card_row(
         .items_center()
         .gap(px(10.))
         .rounded(px(8.))
-        // Inset-grouped-list feel (§0): a whisper of tonal fill.
+        // Inset-grouped-list feel (§0): a whisper of tonal fill. The 0.04
+        // fill mirrors a raw rgba() in the web CSS (correctly literal);
+        // `:hover` is the `--hover` THEME token (RUST_PORT_NOTES §1).
         .bg(gpui::white().opacity(0.04))
-        .hover(|row| row.bg(gpui::white().opacity(0.06)))
+        .hover({
+            let hover = colors.element_hover;
+            move |row| row.bg(hover)
+        })
         .cursor_pointer()
         .on_click(move |_, window, cx| {
             cx.stop_propagation();

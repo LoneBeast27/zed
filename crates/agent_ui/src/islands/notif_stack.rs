@@ -363,7 +363,8 @@ impl NotifStack {
                 .rounded_full()
                 .bg(SURFACE_1)
                 .border_1()
-                .border_color(gpui::white().opacity(0.08))
+                // `--hairline` → colors.border (RUST_PORT_NOTES §1).
+                .border_color(colors.border)
                 .text_size(px(10.))
                 // `.ct-chip` font 500 10px/1.6.
                 .line_height(relative(1.6))
