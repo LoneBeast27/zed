@@ -58,8 +58,17 @@ impl Render for CornerCluster {
                         })),
                 )
             })
-            // Toasts stack beneath the head; the island paints last so the
-            // expanded card grows DOWN over them (one corner system).
+            // Toasts stack beneath the head positionally but paint ABOVE
+            // it (web: `#notif-stack` z-index 60 over the island's 40) —
+            // while the card is expanded past the stack's top, live toasts
+            // overlay it and stay clickable.
+            .child(
+                div()
+                    .absolute()
+                    .top(px(CORNER_INSET))
+                    .right(px(CORNER_INSET))
+                    .child(self.island.clone()),
+            )
             .child(
                 div()
                     .absolute()
@@ -67,13 +76,6 @@ impl Render for CornerCluster {
                     .right(px(CORNER_INSET))
                     .w(px(STACK_W))
                     .child(self.stack.clone()),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(px(CORNER_INSET))
-                    .right(px(CORNER_INSET))
-                    .child(self.island.clone()),
             )
     }
 }
