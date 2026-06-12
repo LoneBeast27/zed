@@ -55,6 +55,11 @@ const RETRACT_SLIDE: Duration = Duration::from_millis(400);
 const RETRACT_COLLAPSE_MS: f32 = 320.;
 /// Slide overscan past the anchor edge (§4.9 emergence primitive).
 const OVERSCAN: f32 = 5.;
+/// How far the retracting slot's clip viewport extends past its right edge
+/// so the slide-out is masked at the WORKSPACE edge, not the stack's own
+/// 14px inset (web: the viewport is the clip plane for both directions):
+/// the 14px corner inset + the 5px overscan.
+const EDGE_OVERHANG: f32 = 19.;
 /// Dismiss-× hover reveal (web `.ct-x { transition: opacity .14s }`).
 const X_REVEAL: Duration = Duration::from_millis(140);
 /// Pre-measure fallback slot height (one-line toast); the canvas capture
@@ -320,13 +325,25 @@ impl NotifStack {
             Some(_) => {
                 // Beats 1+2+3, one clock: slide-out on the exit spline,
                 // fade on effects, slot height + gap collapse on spatial —
-                // siblings below rise as the slot shrinks.
+                // siblings below rise as the slot shrinks. The height/gap
+                // animate on a NON-clipping outer wrapper; the clip lives
+                // on an inner viewport that extends EDGE_OVERHANG past the
+                // slot's right edge (GPUI's overflow mask clips both axes,
+                // so the viewport must be the union plane: collapsing
+                // height vertically, the workspace edge horizontally — the
+                // sliding card escapes the stack inset like the web's
+                // viewport-clipped transform).
                 let from_h = toast.retract_from_h;
                 div()
                     .relative()
                     .w(px(STACK_W))
-                    .overflow_hidden()
-                    .child(card)
+                    .child(
+                        div()
+                            .w(px(STACK_W + EDGE_OVERHANG))
+                            .h_full()
+                            .overflow_hidden()
+                            .child(card),
+                    )
                     .with_animation(
                         ElementId::Name(format!("toast-retract-{id}").into()),
                         Animation::new(RETRACT),
