@@ -4,12 +4,13 @@
 //! cluster, so notify extensions grow LEFT and the expanded card grows DOWN
 //! out of the corner anchor (§4.9 anchored emergence).
 //!
-//! The §8.7 fluidity gate, natively: geometry (width/height/radius) morphs
-//! on the spatial curve (500ms, overshoot mapped inside the animator) while
-//! the container tint and the dual-layer content crossfade ride the effects
-//! curve — ALL keyed by the same state flip, starting the same frame; no
-//! sequential phases, no property snaps (morph targets are measured through
-//! the same text shaper that paints, so explicit pixel geometry is exact).
+//! The §8.7 fluidity gate, natively: geometry morphs on the spatial curve
+//! (width/height 280ms, radius 260ms — the approved build's island-scaled
+//! durations; overshoot mapped inside the animator) while the container
+//! tint and the dual-layer content crossfade ride the effects curve — ALL
+//! keyed by the same state flip, starting the same frame; no sequential
+//! phases, no property snaps (morph targets are measured through the same
+//! text shaper that paints, so explicit pixel geometry is exact).
 //! This ports the web's FIXED concurrent dual-layer FLIP (usage-island.js,
 //! 2026-06-12) — the outgoing face overlays and fades while the incoming
 //! face fades in and the container FLIPs width AND height.
@@ -34,8 +35,14 @@ use crate::usage_panel::{UsagePanel, fmt_pct};
 use super::island_faces::{Face, build_face, measure, short_pool};
 use super::state::{IslandMachine, IslandState, TimerCmd};
 
-/// Island morph duration — the §4.9 spatial class (500ms).
-const MORPH: std::time::Duration = std::time::Duration::from_millis(500);
+/// Island morph duration — the approved web build deliberately scales the
+/// island's spatial class down to 280ms (`MORPH_MS = 280` /
+/// `width/height .28s` in usage-island.{js,css}; per-island duration
+/// scaling explicitly blessed by app.css "islands may scale durations").
+/// Also the post-contract pump delay.
+const MORPH: std::time::Duration = std::time::Duration::from_millis(280);
+/// Radius rides a slightly shorter clock — web `border-radius .26s`.
+const MORPH_R: std::time::Duration = std::time::Duration::from_millis(260);
 /// Notify auto-revert hold (web `NOTIFY_HOLD_MS`).
 const NOTIFY_HOLD: std::time::Duration = std::time::Duration::from_secs(6);
 /// Incoming face fade-in (effects class).
@@ -108,7 +115,7 @@ impl UsageIsland {
             face_fade: StateFade::default(),
             geom_w: AnimatedValue::settled(0., SPATIAL, MORPH),
             geom_h: AnimatedValue::settled(0., SPATIAL, MORPH),
-            geom_r: AnimatedValue::settled(0., SPATIAL, MORPH),
+            geom_r: AnimatedValue::settled(0., SPATIAL, MORPH_R),
             geom_init: false,
             tint_bg: AnimatedColor::settled(rest_bg, EFFECTS, TINT_FADE),
             tint_border: AnimatedColor::settled(rest_border, EFFECTS, TINT_FADE),
