@@ -16,8 +16,9 @@
 //!   prose, worked-for collapsibles, the hover meta trio.
 //! - [`composer`] — the two-layer composer deck (Task 3).
 
+mod composer;
 mod message;
 mod panel;
 mod transcript;
 
-pub use panel::{OrchestratorPanel, ToggleFocus};
+pub use panel::{OrchestratorPanel, Send, ToggleFocus};

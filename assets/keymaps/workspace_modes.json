@@ -13,5 +13,12 @@
       "ctrl-alt-8": ["agent::SwitchWorkspaceMode", { "mode_index": 7 }],
       "ctrl-alt-9": ["agent::SwitchWorkspaceMode", { "mode_index": 8 }]
     }
+  },
+  {
+    "context": "OrchestratorComposer > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "orchestrator_panel::Send"
+    }
   }
 ]

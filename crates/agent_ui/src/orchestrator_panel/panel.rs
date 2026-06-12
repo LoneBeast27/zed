@@ -18,6 +18,7 @@ use crate::bridge::{self, BridgeStore, TranscriptSnapshot, TranscriptWatch};
 use crate::task_board::TaskBoardPanel;
 use crate::task_board::motion::StateFade;
 
+use super::composer::Composer;
 use super::message::render_message;
 use super::transcript::{TranscriptView, render_greeting, render_shimmer};
 
@@ -25,7 +26,10 @@ actions!(
     orchestrator_panel,
     [
         /// Toggles focus on the orchestrator chat panel.
-        ToggleFocus
+        ToggleFocus,
+        /// Sends the composer's message (Enter via the
+        /// `OrchestratorComposer > Editor` keymap binding).
+        Send
     ]
 );
 
@@ -35,12 +39,13 @@ const BUSY_TICK: Duration = Duration::from_secs(1);
 
 pub struct OrchestratorPanel {
     focus_handle: FocusHandle,
-    store: Entity<BridgeStore>,
+    pub(super) store: Entity<BridgeStore>,
     workspace: WeakEntity<Workspace>,
     position: DockPosition,
     pub(super) transcript: TranscriptView,
+    pub(super) composer: Composer,
     /// Orchestrator busy flag from the latest snapshot.
-    busy: bool,
+    pub(super) busy: bool,
     /// The 1s rolling-tick task — `Some` only while busy (store ticker
     /// pattern; no idle timers). Repaints so a live trailing reply's
     /// worked-for label (`worked_s + seen_at.elapsed()`) rolls.
@@ -57,7 +62,11 @@ pub struct OrchestratorPanel {
 }
 
 impl OrchestratorPanel {
-    pub fn new(workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let store = bridge::global_store(cx);
         let watch = store.update(cx, |store, cx| store.watch_transcript(cx));
         let _store_subscription =
@@ -68,6 +77,7 @@ impl OrchestratorPanel {
             workspace,
             position: DockPosition::Left,
             transcript: TranscriptView::new(),
+            composer: Composer::new(window, cx),
             busy: false,
             busy_ticker: None,
             last_snapshot: None,
@@ -265,7 +275,7 @@ impl OrchestratorPanel {
 }
 
 impl Render for OrchestratorPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         v_flex()
             .key_context("OrchestratorPanel")
@@ -281,12 +291,15 @@ impl Render for OrchestratorPanel {
                     .pb(px(8.))
                     .child(self.render_body(cx)),
             )
+            .child(self.render_composer(window, cx))
     }
 }
 
 impl Focusable for OrchestratorPanel {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        // Focusing the panel focuses the composer (the agent-panel idiom) —
+        // ToggleFocus drops the caret straight into the input.
+        self.composer.editor.read(cx).focus_handle(cx)
     }
 }
 

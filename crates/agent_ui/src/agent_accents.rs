@@ -24,6 +24,10 @@ pub const ACCENT_CODEX: Rgba = rgba_hex(0x10a37fff);
 pub const ACCENT_AGY: Rgba = rgba_hex(0x8ab4f8ff);
 pub const ACCENT_GEMINI: Rgba = rgba_hex(0xa78bfaff);
 
+/// `--accent-fill: #1a73e8` — the filled-action blue (the composer's send
+/// circle; deeper than the `--accent` chrome tint).
+pub const ACCENT_FILL: Rgba = rgba_hex(0x1a73e8ff);
+
 // ── Run-status colors (Google dark palette, per the web token block) ──
 pub const STATUS_RUNNING: Rgba = rgba_hex(0x81c995ff);
 pub const STATUS_BLOCKED: Rgba = rgba_hex(0xfdd663ff);

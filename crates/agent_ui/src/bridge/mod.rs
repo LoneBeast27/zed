@@ -22,7 +22,7 @@ pub mod protocol;
 pub mod sse;
 pub mod store;
 
-pub use client::{BRIDGE_BASE_URL, fetch_json};
+pub use client::{BRIDGE_BASE_URL, fetch_json, post_json};
 pub use protocol::{
     BridgeEvent, PoolRow, RunRow, ScrapeMeta, TranscriptMessage, TranscriptRun,
     TranscriptSnapshot, UsageMeta,

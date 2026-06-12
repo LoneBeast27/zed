@@ -328,6 +328,21 @@ pub(super) async fn fetch_and_apply_transcript(
     Ok(Some(busy))
 }
 
+/// POST a JSON body to a bridge endpoint, returning the raw response body
+/// (the web's `post()` helper from app.js). Background-executor only, like
+/// [`fetch_json`].
+pub async fn post_json(client: &dyn HttpClient, url: &str, body: String) -> Result<String> {
+    let mut response = client.post_json(url, AsyncBody::from(body)).await?;
+    let mut raw = String::new();
+    response.body_mut().read_to_string(&mut raw).await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "bridge returned {} for {url}",
+        response.status().as_u16()
+    );
+    Ok(raw)
+}
+
 pub async fn fetch_json(client: &dyn HttpClient, url: &str) -> Result<String> {
     let mut response = client.get(url, AsyncBody::default(), true).await?;
     let mut body = String::new();

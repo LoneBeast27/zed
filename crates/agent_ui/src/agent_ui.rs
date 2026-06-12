@@ -625,7 +625,7 @@ pub fn init(
         // mode's layout can open it (same registration shape as the board).
         let panel_workspace = cx.weak_entity();
         let orchestrator =
-            cx.new(|cx| orchestrator_panel::OrchestratorPanel::new(panel_workspace, cx));
+            cx.new(|cx| orchestrator_panel::OrchestratorPanel::new(panel_workspace, window, cx));
         workspace.add_panel(orchestrator, window, cx);
         workspace.register_action(
             |workspace: &mut Workspace,
