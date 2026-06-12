@@ -365,6 +365,8 @@ impl NotifStack {
                 .border_1()
                 .border_color(gpui::white().opacity(0.08))
                 .text_size(px(10.))
+                // `.ct-chip` font 500 10px/1.6.
+                .line_height(relative(1.6))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(colors.text_muted)
                 .child(
@@ -449,8 +451,14 @@ impl NotifStack {
                     .min_w_0()
                     .gap(px(6.))
                     .child(
+                        // `.ct-title` font 500 13px/1.35 — explicit
+                        // line-height so the 2-line clamp height matches
+                        // the web (gpui's default phi ≈ 1.618 would add
+                        // ~7px per wrapped toast and shift the measured
+                        // slot height the retract collapse uses).
                         div()
                             .text_size(px(13.))
+                            .line_height(relative(1.35))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.text)
                             .line_clamp(2)
