@@ -15,6 +15,7 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::bridge::{self, BridgeStore, TranscriptSnapshot, TranscriptWatch};
+use crate::islands::TasksIsland;
 use crate::task_board::TaskBoardPanel;
 use crate::task_board::motion::StateFade;
 
@@ -44,6 +45,9 @@ pub struct OrchestratorPanel {
     position: DockPosition,
     pub(super) transcript: TranscriptView,
     pub(super) composer: Composer,
+    /// The composer-anchored running-tasks island (§4.9) — `pub(crate)` so
+    /// `islands::tasks_island`'s retract clock and listeners can reach it.
+    pub(crate) tasks_island: TasksIsland,
     /// Orchestrator busy flag from the latest snapshot.
     pub(super) busy: bool,
     /// The 1s rolling-tick task — `Some` only while busy (store ticker
@@ -78,6 +82,7 @@ impl OrchestratorPanel {
             position: DockPosition::Left,
             transcript: TranscriptView::new(),
             composer: Composer::new(window, cx),
+            tasks_island: TasksIsland::new(cx),
             busy: false,
             busy_ticker: None,
             last_snapshot: None,
@@ -88,27 +93,33 @@ impl OrchestratorPanel {
         }
     }
 
-    /// A store notify landed: re-sync only when the transcript actually
-    /// changed (board/usage notifies ride the same entity).
+    /// A store notify landed: feed the tasks island from the board and
+    /// re-sync the transcript — each side change-gated, so usage notifies
+    /// and idle ticks stay free (board/usage/transcript all ride the same
+    /// entity).
     fn sync_from_store(&mut self, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.store.read(cx).transcript.clone() else {
-            return;
-        };
-        if self.last_snapshot.as_ref() == Some(&snapshot) {
-            return;
-        }
-        self.transcript.sync(&snapshot, cx);
-        if snapshot.busy != self.busy {
-            self.busy = snapshot.busy;
-            if self.busy {
-                self.arm_busy_ticker(cx);
-            } else {
-                // Reply landed — server worked_s rules again.
-                self.busy_ticker = None;
+        let board = self.store.read(cx).board.clone();
+        let mut changed = self.tasks_island.sync(&board, cx);
+
+        if let Some(snapshot) = self.store.read(cx).transcript.clone()
+            && self.last_snapshot.as_ref() != Some(&snapshot)
+        {
+            self.transcript.sync(&snapshot, cx);
+            if snapshot.busy != self.busy {
+                self.busy = snapshot.busy;
+                if self.busy {
+                    self.arm_busy_ticker(cx);
+                } else {
+                    // Reply landed — server worked_s rules again.
+                    self.busy_ticker = None;
+                }
             }
+            self.last_snapshot = Some(snapshot);
+            changed = true;
         }
-        self.last_snapshot = Some(snapshot);
-        cx.notify();
+        if changed {
+            cx.notify();
+        }
     }
 
     /// 1s repaint driver for the rolling worked-for tick, alive only while
@@ -141,9 +152,10 @@ impl OrchestratorPanel {
         cx.notify();
     }
 
-    /// Step-row click → route to the task board and open that run's drawer
-    /// (the Z2 toast's pattern — emits `TaskBoardEvent::OpenRun` inside).
-    pub(super) fn open_run(
+    /// Step-row / island-row click → route to the task board and open that
+    /// run's drawer (the Z2 toast's pattern — emits `TaskBoardEvent::OpenRun`
+    /// inside). `pub(crate)`: the tasks island's rows route here too.
+    pub(crate) fn open_run(
         &mut self,
         run_id: SharedString,
         window: &mut Window,

@@ -44,6 +44,10 @@
 //!   emerge/retract motion.
 //! - [`corner_cluster`] — the workspace-mounted positioner that composes
 //!   the island + stack into the one corner system.
+//! - [`tasks_island`] — the §4.9 composer-anchored running-tasks island
+//!   (NOT part of the corner system: it lives in normal flow above the
+//!   orchestrator composer, displacing it — the anchor-catalog
+//!   "Composer-anchored" row).
 
 pub mod corner_cluster;
 pub mod island_faces;
@@ -51,8 +55,10 @@ mod notif_card;
 pub mod notif_logic;
 pub mod notif_stack;
 pub mod state;
+pub mod tasks_island;
 pub mod usage_island;
 
 pub use corner_cluster::CornerCluster;
 pub use notif_stack::NotifStack;
+pub use tasks_island::TasksIsland;
 pub use usage_island::UsageIsland;
