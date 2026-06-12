@@ -12,7 +12,8 @@
 
 use editor::{Editor, EditorElement, EditorEvent, EditorStyle};
 use gpui::{
-    AnyElement, Entity, Focusable as _, SharedString, Subscription, Task, TextStyle, Window,
+    AnyElement, App, AsyncApp, Entity, Focusable as _, SharedString, Subscription, Task,
+    TextStyle, Window,
 };
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
@@ -39,7 +40,10 @@ pub(super) struct Composer {
     pub editor: Entity<Editor>,
     /// The send⇄stop morph state.
     send_circle: SendCircle,
-    /// In-flight `POST /message` (the web awaits sends serially).
+    /// The send chain's tail — every send queues behind the previous one
+    /// via [`enqueue_send`], so a rapid second Enter can never cancel an
+    /// in-flight `POST /message` (the web fires every `send()` to
+    /// completion; serialization additionally pins arrival order).
     send_task: Option<Task<()>>,
     _editor_subscription: Subscription,
 }
@@ -102,6 +106,27 @@ struct MessageResponse {
     conv: String,
 }
 
+/// FIFO send serialization: queue `send` behind whatever send is already in
+/// flight in `slot`. gpui tasks CANCEL when dropped, so overwriting the slot
+/// would abort an in-flight `POST /message` after the editor was already
+/// cleared — silent message loss, exactly while the bridge is slow (the one
+/// window the web explicitly tolerates, chat.js "bridge restarting").
+/// Instead the previous task is moved INTO the new one and awaited first:
+/// every send completes, in submission order.
+fn enqueue_send(
+    slot: &mut Option<Task<()>>,
+    cx: &mut App,
+    send: impl AsyncFnOnce(&mut AsyncApp) + 'static,
+) {
+    let previous = slot.take();
+    *slot = Some(cx.spawn(async move |cx| {
+        if let Some(previous) = previous {
+            previous.await;
+        }
+        send(cx).await;
+    }));
+}
+
 impl OrchestratorPanel {
     /// Enter / send-circle click: POST the trimmed text on the background
     /// executor, then canonicalize the conversation + refetch the
@@ -122,7 +147,7 @@ impl OrchestratorPanel {
         let conv = self.store.read(cx).transcript_conv.clone().unwrap_or_default();
         let http_client = cx.http_client();
         let store = self.store.clone();
-        self.composer.send_task = Some(cx.spawn(async move |_, cx| {
+        enqueue_send(&mut self.composer.send_task, cx, async move |cx| {
             let posted = cx
                 .background_spawn(async move {
                     let body = serde_json::json!({ "text": text, "conv": conv }).to_string();
@@ -142,7 +167,7 @@ impl OrchestratorPanel {
                 // taken the message before the response broke.
                 store.refetch_transcript_soon(cx);
             });
-        }));
+        });
         cx.notify();
     }
 
@@ -370,6 +395,46 @@ impl OrchestratorPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[gpui::test]
+    async fn queued_send_never_cancels_the_in_flight_post(cx: &mut gpui::TestAppContext) {
+        // The double-send loss class: gpui tasks cancel on drop, so a second
+        // Enter while POST #1 is still on the wire must queue behind it —
+        // never overwrite (and thereby abort) it. Both sends must complete,
+        // in submission order, even when the bridge is slow.
+        let log: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let (gate_tx, gate_rx) = futures::channel::oneshot::channel::<()>();
+        let mut slot: Option<Task<()>> = None;
+        cx.update(|cx| {
+            let log1 = log.clone();
+            enqueue_send(&mut slot, cx, async move |_| {
+                log1.borrow_mut().push("send-1 started");
+                gate_rx.await.ok(); // a slow bridge holds POST #1 open
+                log1.borrow_mut().push("send-1 completed");
+            });
+            // Enter again while POST #1 is parked on the wire.
+            let log2 = log.clone();
+            enqueue_send(&mut slot, cx, async move |_| {
+                log2.borrow_mut().push("send-2 completed");
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *log.borrow(),
+            ["send-1 started"],
+            "POST #1 must still be in flight (parked on the bridge), NOT cancelled"
+        );
+
+        gate_tx.send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            *log.borrow(),
+            ["send-1 started", "send-1 completed", "send-2 completed"],
+            "both sends complete, in submission order — no silent drops"
+        );
+    }
 
     #[test]
     fn force_prefix_swap_matches_the_web_regex() {
