@@ -75,10 +75,27 @@ pub struct TasksIsland {
     /// in for the web's 180° rotate (`ui::Transformable` is crate-private;
     /// rotating would mean patching stock `ui`).
     chev: AnimatedValue,
+    /// Mid-retract (the N→0 exit is running; the LAST snapshot stays
+    /// rendered until [`Self::commit_hide`]). State twin of `hide_task` —
+    /// kept separate so the lifecycle is testable without a panel entity.
+    retracting: bool,
     /// The pending leave-flow clock while retracting.
     hide_task: Option<Task<()>>,
-    /// (run id, row label) for the running set, in board order.
+    /// (run id, row label) for the running set, in board order. While
+    /// retracting this intentionally holds the LAST non-empty set — the
+    /// web's `paint()` early-returns on zero rows without touching the DOM,
+    /// so the head count + spinner rows stay frozen through the 400ms exit
+    /// (§4.9 retract-the-last-representation; never a "0 running" flash).
     rows: Vec<(SharedString, SharedString)>,
+}
+
+/// What a board ingest decided (the pure half of [`TasksIsland::sync`]).
+struct IngestOutcome {
+    /// Repaint needed.
+    changed: bool,
+    /// The N→0 transition just began — the caller must arm the 400ms
+    /// leave-flow clock.
+    start_retract: bool,
 }
 
 impl TasksIsland {
@@ -95,6 +112,7 @@ impl TasksIsland {
             fade: AnimatedValue::settled(0., EFFECTS, FADE),
             rows_reveal: AnimatedValue::settled(if open { 1. } else { 0. }, SPATIAL, ROWS_MORPH),
             chev: AnimatedValue::settled(if open { 1. } else { 0. }, SPATIAL, CHEV_MORPH),
+            retracting: false,
             hide_task: None,
             rows: Vec::new(),
         }
@@ -104,6 +122,15 @@ impl TasksIsland {
         self.visible
     }
 
+    /// Whether any §4.9 motion value is mid-flight — the panel's frame-pump
+    /// signal.
+    pub fn any_animating(&self) -> bool {
+        self.emerge.animating()
+            || self.fade.animating()
+            || self.rows_reveal.animating()
+            || self.chev.animating()
+    }
+
     /// Ingest the latest board: derive the running rows and drive the
     /// emerge/retract lifecycle. Returns whether a repaint is needed.
     pub fn sync(
@@ -111,16 +138,38 @@ impl TasksIsland {
         board: &[RunRow],
         cx: &mut gpui::Context<OrchestratorPanel>,
     ) -> bool {
-        let rows = running_rows(board);
-        let mut changed = rows != self.rows;
-        if changed {
-            self.rows = rows;
+        let outcome = self.ingest(running_rows(board));
+        if outcome.start_retract {
+            // The leave-flow clock. Dropping the task (a mid-retract
+            // arrival in `ingest`) cancels it before the commit runs.
+            self.hide_task = Some(cx.spawn(async move |panel, cx| {
+                cx.background_executor().timer(RETRACT).await;
+                panel
+                    .update(cx, |panel, cx| {
+                        if panel.tasks_island.commit_hide() {
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            }));
+        } else if !self.retracting && self.hide_task.is_some() {
+            self.hide_task = None; // cancelled by a mid-retract arrival
         }
+        outcome.changed
+    }
 
-        if !self.rows.is_empty() {
+    /// The pure lifecycle step (split from [`Self::sync`] so the retract
+    /// choreography is testable without a panel entity).
+    fn ingest(&mut self, rows: Vec<(SharedString, SharedString)>) -> IngestOutcome {
+        if !rows.is_empty() {
             // N runs → emerge from the anchor. A mid-retract arrival cancels
             // the hide and re-emerges from the current offset.
-            if self.hide_task.take().is_some() {
+            let mut changed = rows != self.rows;
+            if changed {
+                self.rows = rows;
+            }
+            if self.retracting {
+                self.retracting = false;
                 changed = true;
             }
             if !self.visible {
@@ -132,26 +181,33 @@ impl TasksIsland {
             }
             self.emerge.retarget_with(0., DECEL, EMERGE);
             self.fade.retarget(1.);
-        } else if self.visible && self.hide_task.is_none() {
-            // 0 runs → retract into the anchor (sharper exit), then hide.
+            IngestOutcome { changed, start_retract: false }
+        } else if self.visible && !self.retracting {
+            // 0 runs → retract into the anchor (sharper exit), then leave
+            // the flow. `self.rows` is deliberately NOT cleared here — the
+            // last representation stays frozen through the 400ms exit; the
+            // clock's `commit_hide` drops it.
+            self.retracting = true;
             self.emerge.retarget_with(1., MotionCurve::Exit, RETRACT);
             self.fade.retarget(0.);
-            self.hide_task = Some(cx.spawn(async move |panel, cx| {
-                cx.background_executor().timer(RETRACT).await;
-                panel
-                    .update(cx, |panel, cx| {
-                        let island = &mut panel.tasks_island;
-                        if island.rows.is_empty() && island.hide_task.is_some() {
-                            island.visible = false;
-                            island.hide_task = None;
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-            }));
-            changed = true;
+            IngestOutcome { changed: true, start_retract: true }
+        } else {
+            IngestOutcome { changed: false, start_retract: false }
         }
-        changed
+    }
+
+    /// The retract clock landed: leave the flow and drop the frozen
+    /// snapshot (cleared only NOW, never at retract start). Returns false
+    /// when a mid-retract arrival already cancelled the hide.
+    fn commit_hide(&mut self) -> bool {
+        if !self.retracting {
+            return false;
+        }
+        self.retracting = false;
+        self.visible = false;
+        self.hide_task = None;
+        self.rows.clear();
+        true
     }
 
     /// Head click: flip and persist (the web's localStorage write).
@@ -388,6 +444,84 @@ pub fn render_tasks_island(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bare island (no `db::kvp` global needed — the pure lifecycle
+    /// under test never touches persistence).
+    fn island() -> TasksIsland {
+        TasksIsland {
+            open: false,
+            visible: false,
+            emerge: AnimatedValue::settled(1., DECEL, EMERGE),
+            fade: AnimatedValue::settled(0., EFFECTS, FADE),
+            rows_reveal: AnimatedValue::settled(0., SPATIAL, ROWS_MORPH),
+            chev: AnimatedValue::settled(0., SPATIAL, CHEV_MORPH),
+            retracting: false,
+            hide_task: None,
+            rows: Vec::new(),
+        }
+    }
+
+    fn rows(ids: &[&str]) -> Vec<(SharedString, SharedString)> {
+        ids.iter()
+            .map(|id| (SharedString::from(id.to_string()), SharedString::from("t")))
+            .collect()
+    }
+
+    #[test]
+    fn retract_freezes_the_last_snapshot_and_clears_only_at_hide_commit() {
+        let mut island = island();
+        let outcome = island.ingest(rows(&["r-1", "r-2"]));
+        assert!(outcome.changed && !outcome.start_retract);
+        assert!(island.visible);
+        assert_eq!(island.rows.len(), 2);
+
+        // Runs hit 0 → the retract begins; the LAST representation stays
+        // frozen — the head must never read "0 subagent/tasks running"
+        // over empty rows during the 400ms exit.
+        let outcome = island.ingest(Vec::new());
+        assert!(outcome.changed && outcome.start_retract);
+        assert!(island.visible, "still in flow through the 400ms exit");
+        assert!(island.retracting);
+        assert_eq!(
+            island.rows.len(),
+            2,
+            "content keeps the last snapshot through the retract — no '0 running' flash"
+        );
+
+        // Further empty ticks mid-retract neither restart the exit nor
+        // wipe the frozen snapshot.
+        let outcome = island.ingest(Vec::new());
+        assert!(!outcome.changed && !outcome.start_retract);
+        assert_eq!(island.rows.len(), 2);
+
+        // The 400ms clock lands → only NOW the island leaves the flow and
+        // the snapshot clears.
+        assert!(island.commit_hide());
+        assert!(!island.visible);
+        assert!(!island.retracting);
+        assert!(island.rows.is_empty());
+    }
+
+    #[test]
+    fn mid_retract_arrival_cancels_the_hide_and_a_stale_clock_is_a_no_op() {
+        let mut island = island();
+        island.ingest(rows(&["r-1"]));
+        island.ingest(Vec::new());
+        assert!(island.retracting);
+
+        // A run arrives MID-retract: the island re-emerges with the fresh
+        // set; the pending hide is cancelled.
+        let outcome = island.ingest(rows(&["r-2"]));
+        assert!(outcome.changed && !outcome.start_retract);
+        assert!(!island.retracting);
+        assert!(island.visible);
+        assert_eq!(island.rows, rows(&["r-2"]));
+
+        // A stale clock that somehow still fires commits nothing.
+        assert!(!island.commit_hide());
+        assert!(island.visible);
+        assert_eq!(island.rows, rows(&["r-2"]));
+    }
 
     fn run(id: &str, status: &str, task: Option<&str>, agent: &str) -> RunRow {
         RunRow {
