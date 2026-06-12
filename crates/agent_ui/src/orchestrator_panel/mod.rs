@@ -14,11 +14,13 @@
 //!   shimmer item and empty-state greeting.
 //! - [`message`] — per-message anatomy: user tonal cards, bare markdown
 //!   prose, worked-for collapsibles, the hover meta trio.
-//! - [`composer`] — the two-layer composer deck (Task 3).
+//! - [`composer`] — the two-layer composer deck; its send⇄stop island
+//!   morph lives in [`send_circle`].
 
 mod composer;
 mod message;
 mod panel;
+mod send_circle;
 mod transcript;
 
 pub use panel::{OrchestratorPanel, Send, ToggleFocus};

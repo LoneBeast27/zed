@@ -1,11 +1,8 @@
 //! The two-layer composer deck (PARITY_SPEC §4.1, the Antigravity
 //! signature — `chat.css .composer`): auto-height editor over the controls
 //! row ([+ ghost] [brain pill] [spacer] [send circle]) over the darker
-//! `--surface-2b` hint footer. The send circle is the §0 island morph: ONE
-//! element flexes circle⇄rounded-square while fill crossfades accent⇄error
-//! and the two stacked glyphs (arrow / stop square) crossfade — all on the
-//! retargetable Instant-clocked motion values, so a busy flip mid-reveal
-//! continues from wherever the circle is (§8.7a).
+//! `--surface-2b` hint footer. The send⇄stop island morph lives in
+//! [`super::send_circle`].
 //!
 //! Composer idiom (RUST_PORT_NOTES §4.1): auto-height `Editor` entity
 //! (message_editor pattern), Enter sends / Shift+Enter newlines via the
@@ -13,36 +10,19 @@
 //! (`assets/keymaps/workspace_modes.json` — loaded only with the
 //! workspace-modes flag, like the panel itself).
 
-use std::time::Duration;
-
 use editor::{Editor, EditorElement, EditorEvent, EditorStyle};
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Entity, Focusable as _, SharedString, Subscription,
-    Task, TextStyle, Window,
+    AnyElement, Entity, Focusable as _, SharedString, Subscription, Task, TextStyle, Window,
 };
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
-use crate::agent_accents::{ACCENT_FILL, STATUS_ERROR};
 use crate::bridge::{BRIDGE_BASE_URL, post_json};
-use crate::task_board::motion::{AnimatedColor, AnimatedValue, EFFECTS, SPATIAL};
 use crate::task_board::style::{HAIRLINE_HI, SURFACE_2, SURFACE_2B};
 
 use super::panel::{OrchestratorPanel, Send};
-
-/// Send-circle reveal (`.send-circle { transition: opacity .15s
-/// var(--effects-curve) }`; the web's concurrent `scale(.7)` beat is dropped
-/// — gpui has no element scale styling).
-const REVEAL: Duration = Duration::from_millis(150);
-/// Fill crossfade accent⇄error (`background .15s var(--effects-curve)`).
-const FILL_FADE: Duration = Duration::from_millis(150);
-/// The container radius morph circle⇄square (`border-radius .26s
-/// var(--spatial-curve)`).
-const MORPH: Duration = Duration::from_millis(260);
-/// The stacked glyph crossfade (`.ic-send/.ic-stop { transition: opacity
-/// .12s }`).
-const GLYPH_FADE: Duration = Duration::from_millis(120);
+use super::send_circle::SendCircle;
 
 /// The hint strip's force tokens: (label, inserted prefix).
 const HINTS: [(&str, &str); 5] = [
@@ -57,17 +37,8 @@ const HINTS: [(&str, &str); 5] = [
 /// pattern), not a separate entity.
 pub(super) struct Composer {
     pub editor: Entity<Editor>,
-    /// Send-circle reveal opacity: 1 while there's text or the orchestrator
-    /// is busy (the stop affordance), else 0.
-    reveal: AnimatedValue,
-    /// Container fill: `--accent-fill` (send) ⇄ `--error` (stop).
-    fill: AnimatedColor,
-    /// Container radius: 20 (a true circle on the 40px square) ⇄ 12.
-    radius: AnimatedValue,
-    /// Glyph crossfade scalar: 0 = arrow, 1 = stop square.
-    glyph: AnimatedValue,
-    /// The last busy flag the morph values were retargeted for.
-    busy: bool,
+    /// The send⇄stop morph state.
+    send_circle: SendCircle,
     /// In-flight `POST /message` (the web awaits sends serially).
     send_task: Option<Task<()>>,
     _editor_subscription: Subscription,
@@ -96,42 +67,10 @@ impl Composer {
             });
         Self {
             editor,
-            reveal: AnimatedValue::settled(0., EFFECTS, REVEAL),
-            fill: AnimatedColor::settled(ACCENT_FILL.into(), EFFECTS, FILL_FADE),
-            radius: AnimatedValue::settled(20., SPATIAL, MORPH),
-            glyph: AnimatedValue::settled(0., EFFECTS, GLYPH_FADE),
-            busy: false,
+            send_circle: SendCircle::new(),
             send_task: None,
             _editor_subscription,
         }
-    }
-
-    /// Retarget the morph values for this frame's state. Same-target
-    /// retargets are no-ops, so render-loop calls never restart anything.
-    fn update_motion(&mut self, busy: bool, has_text: bool) {
-        self.reveal.retarget(if has_text || busy { 1. } else { 0. });
-        if busy != self.busy {
-            self.busy = busy;
-            self.fill.retarget(
-                if busy { STATUS_ERROR } else { ACCENT_FILL }.into(),
-            );
-            self.radius.retarget(if busy { 12. } else { 20. });
-            self.glyph.retarget(if busy { 1. } else { 0. });
-        }
-    }
-
-    fn motion_animating(&self) -> bool {
-        self.reveal.animating()
-            || self.fill.animating()
-            || self.radius.animating()
-            || self.glyph.animating()
-    }
-
-    fn motion_generation(&self) -> u64 {
-        (self.reveal.generation() as u64) << 24
-            ^ (self.fill.generation() as u64) << 16
-            ^ (self.radius.generation() as u64) << 8
-            ^ self.glyph.generation() as u64
     }
 }
 
@@ -229,7 +168,7 @@ impl OrchestratorPanel {
     ) -> AnyElement {
         let has_text = !self.composer.editor.read(cx).is_empty(cx);
         let busy = self.busy;
-        self.composer.update_motion(busy, has_text);
+        self.composer.send_circle.update_motion(busy, has_text);
 
         let colors = cx.theme().colors();
         let focused = self
@@ -366,102 +305,8 @@ impl OrchestratorPanel {
                     ),
             )
             .child(div().flex_1())
-            .child(self.render_send_circle(has_text, busy, cx))
+            .child(self.composer.send_circle.render(has_text || busy, cx))
             .into_any_element()
-    }
-
-    /// The send⇄stop island morph: one 40px element whose radius/fill/glyph
-    /// ride the composer's retargetable motion values.
-    fn render_send_circle(
-        &self,
-        has_text: bool,
-        busy: bool,
-        cx: &mut gpui::Context<Self>,
-    ) -> AnyElement {
-        let interactive = has_text || busy;
-        let composer = &self.composer;
-
-        let build = |radius: f32, fill: gpui::Hsla, glyph: f32, reveal: f32| {
-            div()
-                .size(px(40.))
-                .rounded(px(radius))
-                .bg(fill)
-                .relative()
-                .flex()
-                .items_center()
-                .justify_center()
-                .opacity(reveal)
-                .child(
-                    // ic-send: the arrow glyph.
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .opacity(1. - glyph)
-                        .child(Icon::new(IconName::ArrowUp).size(IconSize::Small).color(Color::Custom(gpui::white()))),
-                )
-                .child(
-                    // ic-stop: the 13px white rounded square.
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .opacity(glyph)
-                        .child(div().size(px(13.)).rounded(px(3.)).bg(gpui::white())),
-                )
-        };
-
-        let morph: AnyElement = if composer.motion_animating() {
-            let (reveal, fill, radius, glyph) = (
-                composer.reveal.clone(),
-                composer.fill.clone(),
-                composer.radius.clone(),
-                composer.glyph.clone(),
-            );
-            // Frame pump over the Instant-clocked values (notif_card idiom;
-            // SPATIAL evaluates inside, per the motion-module guard).
-            div()
-                .with_animation(
-                    ElementId::NamedInteger(
-                        "composer-send-morph".into(),
-                        composer.motion_generation(),
-                    ),
-                    Animation::new(MORPH),
-                    move |this, _| {
-                        this.child(build(
-                            radius.current(),
-                            fill.current(),
-                            glyph.current().clamp(0., 1.),
-                            reveal.current().clamp(0., 1.),
-                        ))
-                    },
-                )
-                .into_any_element()
-        } else {
-            build(
-                composer.radius.target(),
-                composer.fill.target(),
-                composer.glyph.target(),
-                composer.reveal.target(),
-            )
-            .into_any_element()
-        };
-
-        let circle = div().id("composer-send").size(px(40.)).child(morph);
-        if interactive {
-            // Click sends; while busy it's the (banked no-op) stop.
-            circle
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
-                .into_any_element()
-        } else {
-            // `pointer-events: none` until text is present.
-            circle.into_any_element()
-        }
     }
 
     /// `.composer-foot` — the darker sub-deck env strip with the clickable
@@ -512,9 +357,13 @@ impl OrchestratorPanel {
             .into_any_element()
     }
 
-    /// Task 4's anchor slot — empty until the running-tasks island lands.
-    fn render_tasks_island_slot(&mut self, _cx: &mut gpui::Context<Self>) -> Option<AnyElement> {
-        None
+    /// The §4.9 composer anchor: the running-tasks island occupies normal
+    /// flow here while visible (its height displaces the deck downward —
+    /// the choreography), and is absent from the tree otherwise.
+    fn render_tasks_island_slot(&mut self, cx: &mut gpui::Context<Self>) -> Option<AnyElement> {
+        self.tasks_island
+            .visible()
+            .then(|| crate::islands::tasks_island::render_tasks_island(&self.tasks_island, cx))
     }
 }
 
