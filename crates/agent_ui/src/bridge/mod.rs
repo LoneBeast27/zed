@@ -9,11 +9,14 @@
 //! Concern split (CLAUDE.md modularity):
 //! - [`protocol`] — wire types (`RunRow`, `PoolRow`, tagged [`BridgeEvent`]).
 //! - [`sse`] — incremental SSE line-parser (in-tree Pattern B idiom).
-//! - [`client`] — the store entity + connection/fallback loop.
+//! - [`store`] — the store entity + the 1s elapsed ticker.
+//! - [`client`] — the connection/fallback loop.
 
 pub mod client;
 pub mod protocol;
 pub mod sse;
+pub mod store;
 
-pub use client::{BRIDGE_BASE_URL, BridgeStore, fetch_json, global_store, init};
+pub use client::{BRIDGE_BASE_URL, fetch_json};
 pub use protocol::{BridgeEvent, PoolRow, RunRow};
+pub use store::{BridgeStore, global_store, init};
