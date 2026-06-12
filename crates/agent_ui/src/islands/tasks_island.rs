@@ -136,14 +136,15 @@ impl TasksIsland {
             || self.chev.animating()
     }
 
-    /// Ingest the latest board: derive the running rows and drive the
-    /// emerge/retract lifecycle. Returns whether a repaint is needed.
+    /// Ingest the latest running rows (derived via [`running_rows`] under
+    /// the caller's store read borrow) and drive the emerge/retract
+    /// lifecycle. Returns whether a repaint is needed.
     pub fn sync(
         &mut self,
-        board: &[RunRow],
+        rows: Vec<(SharedString, SharedString)>,
         cx: &mut gpui::Context<OrchestratorPanel>,
     ) -> bool {
-        let outcome = self.ingest(running_rows(board));
+        let outcome = self.ingest(rows);
         if outcome.start_retract {
             // The leave-flow clock. Dropping the task (a mid-retract
             // arrival in `ingest`) cancels it before the commit runs.
@@ -233,7 +234,9 @@ impl TasksIsland {
 
 /// `running.map(r => r.task || r.agent || "task")` keyed by run id — the
 /// island's row set, in board order (tasks-island.js `paint()`).
-fn running_rows(board: &[RunRow]) -> Vec<(SharedString, SharedString)> {
+/// `pub(crate)`: the panel derives rows under its store read borrow and
+/// hands them to [`TasksIsland::sync`] (no board clone per notify).
+pub(crate) fn running_rows(board: &[RunRow]) -> Vec<(SharedString, SharedString)> {
     board
         .iter()
         .filter(|run| run.status == "running")

@@ -119,14 +119,25 @@ impl OrchestratorPanel {
     /// A store notify landed: feed the tasks island from the board and
     /// re-sync the transcript — each side change-gated, so usage notifies
     /// and idle ticks stay free (board/usage/transcript all ride the same
-    /// entity).
+    /// entity). Derivation and change-comparison run under scoped read
+    /// borrows; nothing is cloned on a no-change notify (the store also
+    /// notifies at 1Hz for board elapsed).
     fn sync_from_store(&mut self, cx: &mut Context<Self>) {
-        let board = self.store.read(cx).board.clone();
-        let mut changed = self.tasks_island.sync(&board, cx);
+        let island_rows =
+            crate::islands::tasks_island::running_rows(&self.store.read(cx).board);
+        let mut changed = self.tasks_island.sync(island_rows, cx);
 
-        if let Some(snapshot) = self.store.read(cx).transcript.clone()
-            && self.last_snapshot.as_ref() != Some(&snapshot)
-        {
+        // Compare under the read borrow; clone the snapshot only on change.
+        let snapshot = {
+            let store = self.store.read(cx);
+            match &store.transcript {
+                Some(snapshot) if self.last_snapshot.as_ref() != Some(snapshot) => {
+                    Some(snapshot.clone())
+                }
+                _ => None,
+            }
+        };
+        if let Some(snapshot) = snapshot {
             self.transcript.sync(&snapshot, cx);
             if snapshot.busy != self.busy {
                 self.busy = snapshot.busy;

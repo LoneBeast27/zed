@@ -62,6 +62,15 @@ pub fn accent_for_agent(name: &str) -> Hsla {
 /// band fill with it (PARITY_SPEC §4.4 "accent → --blocked ≥75 → --error
 /// ≥90").
 pub const ACCENT: Rgba = rgba_hex(0x8ab4f8ff);
+/// PARITY_SPEC §1 Atmosphere — `rgba(66,133,244,0.07)`, the one fixed
+/// radial bloom behind the empty/greeting state (a struct literal: 0.07
+/// has no exact u8-alpha byte, so `rgba_hex` can't express it).
+pub const GREET_BLOOM: Rgba = Rgba {
+    r: 66. / 255.,
+    g: 133. / 255.,
+    b: 244. / 255.,
+    a: 0.07,
+};
 /// `--text-3: rgba(255,255,255,0.38)` — the unknown/stale meter tone.
 pub const TEXT_3: Rgba = rgba_hex(0xffffff61);
 

@@ -28,6 +28,9 @@ pub(crate) const SURFACE_1: Rgba = rgba_hex(0xffffff0d);
 pub(crate) const SURFACE_2: Rgba = rgba_hex(0x141414ff);
 /// `--surface-2b: #0c0c0c` — drawer `<pre>` fill.
 pub(crate) const SURFACE_2B: Rgba = rgba_hex(0x0c0c0cff);
+/// `background: #1a1a1a` — the inline-code fill (`.agent-prose code`,
+/// chat.css:39) and the agent-chip fill (`.agent-chip`, app.css) share it.
+pub(crate) const INLINE_CODE_BG: Rgba = rgba_hex(0x1a1a1aff);
 /// `--hairline-hi: rgba(255,255,255,0.12)` — graph node borders, edges.
 pub(crate) const HAIRLINE_HI: Rgba = rgba_hex(0xffffff1f);
 
@@ -289,7 +292,7 @@ pub fn agent_chip(agent: &str, cx: &App) -> Div {
         .px(px(8.))
         .py(px(3.))
         .rounded(px(8.))
-        .bg(rgba_hex(0x1a1a1aff))
+        .bg(INLINE_CODE_BG)
         .font_family(mono)
         .text_size(px(12.))
         .text_color(colors.text_muted)

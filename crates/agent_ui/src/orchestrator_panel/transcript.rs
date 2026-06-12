@@ -19,8 +19,9 @@ use markdown::{Markdown, MarkdownFont, MarkdownStyle};
 use settings::Settings as _;
 use ui::prelude::*;
 
+use crate::agent_accents::GREET_BLOOM;
 use crate::bridge::{TranscriptMessage, TranscriptRun, TranscriptSnapshot};
-use crate::task_board::style::SURFACE_2B;
+use crate::task_board::style::{INLINE_CODE_BG, SURFACE_2B};
 
 /// How long a freshly-appended message keeps its one-shot entrance wrapper
 /// attached (covers the 300ms rise with margin; settled messages render
@@ -157,8 +158,11 @@ fn build_view(message: &TranscriptMessage, cx: &mut App) -> MessageView {
     }
 }
 
-/// The §4.1 prose ramp over the themed agent style: 15px/1.6 body, the
-/// web's `pre`/`code` fills (`--surface-2b` blocks, `#1a1a1a` inline).
+/// The §4.1 prose ramp over the themed agent style: 15px/1.6 body plus the
+/// full `.agent-prose pre`/`code` anatomy from chat.css — fills, hairline,
+/// radius, padding, and the 12.5px/13px code sizes (the themed defaults run
+/// the 12px agent buffer size with the near-invisible `border_variant`
+/// hairline and r8/p8 geometry).
 pub(super) fn prose_style(window: &Window, cx: &App) -> MarkdownStyle {
     let mut style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
     style.base_text_style.refine(&TextStyleRefinement {
@@ -166,9 +170,31 @@ pub(super) fn prose_style(window: &Window, cx: &App) -> MarkdownStyle {
         line_height: Some(relative(1.6).into()),
         ..Default::default()
     });
+    // `pre { background: var(--surface-2b); border: 1px solid
+    // var(--hairline); border-radius: 12px; padding: 13px 15px }` — the
+    // port's hairline convention maps --hairline to `colors.border`.
     style.code_block.background = Some(gpui::Hsla::from(SURFACE_2B).into());
-    style.inline_code.background_color =
-        Some(crate::agent_accents::rgba_hex(0x1a1a1aff).into());
+    style.code_block.border_color = Some(cx.theme().colors().border);
+    let radius = gpui::AbsoluteLength::Pixels(px(12.));
+    style.code_block.corner_radii.top_left = Some(radius);
+    style.code_block.corner_radii.top_right = Some(radius);
+    style.code_block.corner_radii.bottom_right = Some(radius);
+    style.code_block.corner_radii.bottom_left = Some(radius);
+    let pad_y = gpui::DefiniteLength::Absolute(gpui::AbsoluteLength::Pixels(px(13.)));
+    let pad_x = gpui::DefiniteLength::Absolute(gpui::AbsoluteLength::Pixels(px(15.)));
+    style.code_block.padding.top = Some(pad_y);
+    style.code_block.padding.bottom = Some(pad_y);
+    style.code_block.padding.left = Some(pad_x);
+    style.code_block.padding.right = Some(pad_x);
+    // `pre code { font-size: 12.5px; line-height: 1.55 }`.
+    style.code_block.text.font_size = Some(px(12.5).into());
+    style.code_block.text.line_height = Some(relative(1.55).into());
+    // `code { font-size: 13px; background: #1a1a1a }`. The web's inline
+    // hairline pill-box (1px border + r6 + 1×6 padding) is unreachable —
+    // `MarkdownStyle.inline_code` is a TextStyleRefinement with no box
+    // fields (ledgered platform gap, Z3_REPORT).
+    style.inline_code.background_color = Some(INLINE_CODE_BG.into());
+    style.inline_code.font_size = Some(px(13.).into());
     style
 }
 
@@ -243,13 +269,7 @@ pub(super) fn render_greeting(cx: &App) -> AnyElement {
         .child(
             // The radial glow, approximated as an accent bloom shadow.
             div().size(px(1.)).shadow(vec![gpui::BoxShadow {
-                color: gpui::Rgba {
-                    r: 66. / 255.,
-                    g: 133. / 255.,
-                    b: 244. / 255.,
-                    a: 0.07,
-                }
-                .into(),
+                color: GREET_BLOOM.into(),
                 offset: gpui::point(px(0.), px(40.)),
                 blur_radius: px(140.),
                 spread_radius: px(120.),
