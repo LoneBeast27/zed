@@ -4,7 +4,10 @@
 //! the run drawer. Mirrors the web's `app.css` `.pill`/`.agent-chip` blocks +
 //! `app.js` `rel()`/`chipReason()` helpers 1:1.
 
-use gpui::{Animation, AnimationExt as _, ElementId, FontWeight, Rgba, SharedString, Stateful};
+use gpui::{
+    Animation, AnimationExt as _, ElementId, FontFeatures, FontWeight, Rgba, SharedString,
+    Stateful,
+};
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
@@ -27,6 +30,14 @@ pub(crate) const SURFACE_2: Rgba = rgba_hex(0x141414ff);
 pub(crate) const SURFACE_2B: Rgba = rgba_hex(0x0c0c0cff);
 /// `--hairline-hi: rgba(255,255,255,0.12)` — graph node borders, edges.
 pub(crate) const HAIRLINE_HI: Rgba = rgba_hex(0xffffff1f);
+
+/// `font-variant-numeric: tabular-nums` (PARITY_SPEC §0: tabular-nums on
+/// counters everywhere) — fixed-width digits so ticking values never reflow.
+/// Mono surfaces are inherently tabular; this is for UI-font counters (the
+/// pill elapsed, the drawer worked-for value, future Z2/Z4 numeric rolls).
+pub fn tabular_nums() -> FontFeatures {
+    FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
+}
 
 /// `rel()` from app.js — compact relative duration ("34s", "5m", "1.2h").
 pub fn rel(seconds: f64) -> String {
@@ -141,6 +152,8 @@ pub fn status_pill(
         .bg(bg)
         .text_size(px(11.))
         .font_weight(FontWeight::MEDIUM)
+        // The elapsed segment ticks every second (board.css:47 tabular-nums).
+        .font_features(tabular_nums())
         .text_color(color)
         .children(dot)
         .child(SharedString::from(status_label(status)))

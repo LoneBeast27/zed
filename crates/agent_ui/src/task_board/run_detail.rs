@@ -365,6 +365,9 @@ impl RunDrawer {
                     div()
                         .text_color(colors.text)
                         .font_weight(FontWeight::MEDIUM)
+                        // Ticks at 1s while running (board.css:190 `b`
+                        // carries tabular-nums) — no digit-reflow jitter.
+                        .font_features(super::style::tabular_nums())
                         .child(SharedString::from(rel(detail.elapsed_s))),
                 )
                 .child(SharedString::from(still.to_string())),
