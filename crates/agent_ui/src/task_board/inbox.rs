@@ -125,7 +125,8 @@ fn inbox_row(
     let badge: Option<AnyElement> = match status {
         "failed" | "killed" => Some(
             Icon::new(IconName::Bell)
-                .size(IconSize::Small)
+                // 16px (board.css:66 `.badge.bell .ms`) = IconSize::Medium.
+                .size(IconSize::Medium)
                 .color(Color::Custom(STATUS_BLOCKED.into()))
                 .into_any_element(),
         ),

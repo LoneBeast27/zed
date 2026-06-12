@@ -357,9 +357,10 @@ impl RunDrawer {
                 .text_size(px(13.))
                 .text_color(colors.text_muted)
                 .child(
+                    // 16px text-3 (board.css:189 `.drawer-worked .ms`).
                     Icon::new(IconName::Clock)
-                        .size(IconSize::Small)
-                        .color(Color::Muted),
+                        .size(IconSize::Medium)
+                        .color(Color::Placeholder),
                 )
                 .child("Worked for")
                 .child(

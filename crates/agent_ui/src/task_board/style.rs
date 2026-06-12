@@ -229,7 +229,13 @@ pub fn empty_state(
         .text_center()
         .gap(px(10.))
         .p(px(40.))
-        .child(Icon::new(icon).size(IconSize::XLarge).color(Color::Muted))
+        // 34px text-3 at 0.8 opacity (app.css:268 `.empty-state .ms`) — the
+        // glyph recedes behind the headline on #000, never dominates it.
+        .child(
+            Icon::new(icon)
+                .size(IconSize::Custom(rems_from_px(34.)))
+                .color(Color::Custom(colors.text_placeholder.opacity(0.8))),
+        )
         .child(
             div()
                 .text_size(px(20.))
