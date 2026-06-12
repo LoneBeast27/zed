@@ -24,6 +24,7 @@ mod external_source_prompt;
 mod favorite_models;
 mod inline_assistant;
 mod inline_prompt_editor;
+pub mod islands;
 mod language_model_selector;
 mod mention_set;
 mod message_editor;
@@ -630,6 +631,14 @@ pub fn init(
                 workspace.toggle_panel_focus::<usage_panel::UsagePanel>(window, cx);
             },
         );
+
+        // Z2 — the corner cluster (usage island head + notification stack),
+        // mounted ONCE at workspace level so it stays alive across every
+        // mode (PARITY_SPEC §4.8 cross-route persistence).
+        let weak_workspace = cx.weak_entity();
+        let island = cx.new(|cx| islands::UsageIsland::new(weak_workspace, cx));
+        let cluster = cx.new(|cx| islands::CornerCluster::new(island, cx));
+        workspace.set_corner_cluster_item(Some(cluster.into()), window, cx);
 
         // M2 — `Ctrl+Alt+1..9` (keymap asset, loaded only when the flag is
         // on) and the command palette dispatch this action.

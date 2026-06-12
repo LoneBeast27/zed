@@ -317,7 +317,8 @@ impl UsagePanel {
 
 /// JS-style number formatting: integers print bare ("82"), fractions keep
 /// one decimal ("99.5") — matches the web's template-literal output.
-fn fmt_pct(value: f64) -> String {
+/// Shared with the usage island (same `${used}%` rendering).
+pub(crate) fn fmt_pct(value: f64) -> String {
     if (value - value.round()).abs() < 0.05 {
         format!("{}", value.round() as i64)
     } else {

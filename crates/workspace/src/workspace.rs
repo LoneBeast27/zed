@@ -1376,6 +1376,14 @@ pub struct Workspace {
     ///
     /// See `.planning/zed-fork/WORKSPACE_MODES.md` §3 (M1 slice).
     activity_bar_item: Option<AnyView>,
+    /// Optional corner-cluster overlay (usage island + notification stack —
+    /// PARITY_SPEC §4.8/§4.9), rendered as a persistent layer over the
+    /// content area, above docks/center/zoomed, below the toast layer.
+    ///
+    /// Set via `set_corner_cluster_item` from `agent_ui` when the
+    /// `agent.workspace_modes` setting is enabled. When `None`, the
+    /// workspace renders exactly as stock Zed — no layout impact.
+    corner_cluster_item: Option<AnyView>,
     notifications: Notifications,
     suppressed_notifications: HashSet<NotificationId>,
     project: Entity<Project>,
@@ -1817,6 +1825,7 @@ impl Workspace {
             toast_layer,
             titlebar_item: None,
             activity_bar_item: None,
+            corner_cluster_item: None,
             notifications: Notifications::default(),
             suppressed_notifications: HashSet::default(),
             left_dock,
@@ -2965,6 +2974,20 @@ impl Workspace {
 
     pub fn activity_bar_item(&self) -> Option<AnyView> {
         self.activity_bar_item.clone()
+    }
+
+    pub fn set_corner_cluster_item(
+        &mut self,
+        item: Option<AnyView>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.corner_cluster_item = item;
+        cx.notify();
+    }
+
+    pub fn corner_cluster_item(&self) -> Option<AnyView> {
+        self.corner_cluster_item.clone()
     }
 
     pub fn set_prompt_for_new_path(&mut self, prompt: PromptForNewPath) {
@@ -8872,7 +8895,13 @@ impl Render for Workspace {
                                     None => div.top_2().bottom_2().left_2().right_2().border_1(),
                                 })
                             }))
-                            .children(self.render_notifications(window, cx)),
+                            .children(self.render_notifications(window, cx))
+                            // The agent_ui corner cluster (usage island +
+                            // notification stack) paints above docks/center/
+                            // zoomed at the same layering point as the
+                            // notification stack; the toast layer stays on
+                            // top (mounted after the status bar below).
+                            .children(self.corner_cluster_item.clone()),
                             ),
                     )
                     .when(self.status_bar_visible(cx), |parent| {
