@@ -7,7 +7,7 @@ mod agent_model_selector;
 mod agent_panel;
 mod agent_registry_ui;
 mod agent_router;
-pub mod bridge_client;
+pub mod bridge;
 mod buffer_codegen;
 mod canonical;
 mod completion_provider;
