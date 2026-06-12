@@ -16,8 +16,8 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 use crate::agent_accents::STATUS_RUNNING;
 use crate::bridge::{self, BridgeStore};
 
-use super::inbox;
 use super::style::SURFACE_1;
+use super::{inbox, run_detail};
 
 actions!(
     task_board,
@@ -51,6 +51,8 @@ pub struct TaskBoardPanel {
     /// The graph's `seenRuns` (run id → first graph render), driving
     /// fresh-node spawn + edge draw-in exactly once per run.
     graph_seen: std::collections::HashMap<SharedString, std::time::Instant>,
+    /// The open run drawer, if any (right slide-over).
+    drawer: Option<Entity<run_detail::RunDrawer>>,
     _store_subscription: Subscription,
 }
 
@@ -64,13 +66,22 @@ impl TaskBoardPanel {
             view: BoardView::Graph,
             position: DockPosition::Left,
             graph_seen: std::collections::HashMap::new(),
+            drawer: None,
             _store_subscription,
         }
     }
 
-    /// Row/node click → emit `OpenRun` (the run drawer consumes it — Task 4).
+    /// Row/node click → emit `OpenRun` + open the run drawer in place.
     pub fn open_run(&mut self, run_id: SharedString, cx: &mut Context<Self>) {
+        let drawer = cx.new(|cx| run_detail::RunDrawer::new(run_id.clone(), cx));
+        cx.subscribe(&drawer, |this, _, _: &run_detail::DismissDrawer, cx| {
+            this.drawer = None;
+            cx.notify();
+        })
+        .detach();
+        self.drawer = Some(drawer);
         cx.emit(TaskBoardEvent::OpenRun(run_id));
+        cx.notify();
     }
 
     /// Graph root click → emit (the web's `selectConv`; the native
@@ -192,6 +203,7 @@ impl Render for TaskBoardPanel {
         v_flex()
             .key_context("TaskBoardPanel")
             .track_focus(&self.focus_handle)
+            .relative()
             .size_full()
             .bg(colors.panel_background)
             .child(self.render_header(total, running, cx))
@@ -204,6 +216,7 @@ impl Render for TaskBoardPanel {
                     .when(!connected, |this| this.opacity(0.5))
                     .child(body),
             )
+            .children(self.drawer.clone())
     }
 }
 
