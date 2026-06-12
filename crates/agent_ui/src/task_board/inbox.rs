@@ -20,17 +20,28 @@ use ui::prelude::*;
 use crate::agent_accents::{STATUS_BLOCKED, STATUS_DONE};
 use crate::bridge::RunRow;
 
+use super::motion::{EFFECTS, STATE_FADE, mix};
 use super::panel::TaskBoardPanel;
-use super::style::{chip_reason, rel, status_pill};
+use super::style::{ElapsedReveal, chip_reason, rel, status_pill};
 
 /// Fixed inbox row height (web: 14px padding × 2 + title 14px + 5px gap +
 /// sub-line 13px ≈ 72px), required uniform for `uniform_list`.
 const ROW_HEIGHT: f32 = 72.;
 
+/// Snapshot of the panel's tracked row hover, handed to the row builders:
+/// `(run_id, crossfade-window-open)` for the hovered row and for the row
+/// that most recently lost hover (its 150ms fade-out).
+#[derive(Clone, Default)]
+pub struct RowHoverState {
+    pub hovered: Option<(SharedString, bool)>,
+    pub unhovered: Option<(SharedString, bool)>,
+}
+
 /// Builds the virtualized inbox list. `rows` arrive newest-activity-first
 /// (the caller reverses the board, mirroring `board.js`).
 pub fn inbox_list(
     rows: Arc<Vec<RunRow>>,
+    hover: RowHoverState,
     panel: WeakEntity<TaskBoardPanel>,
     cx: &App,
 ) -> AnyElement {
@@ -42,7 +53,7 @@ pub fn inbox_list(
         rows.len(),
         move |range, _window, cx| {
             range
-                .map(|ix| inbox_row(&rows[ix], panel.clone(), cx))
+                .map(|ix| inbox_row(&rows[ix], &hover, panel.clone(), cx))
                 .collect()
         },
     )
@@ -54,10 +65,16 @@ pub fn inbox_list(
 
 /// One `.inbox-row`: status pill (elapsed reveals inside on hover) · title +
 /// agent chip/reason sub-line · badge slot + relative time.
-fn inbox_row(run: &RunRow, panel: WeakEntity<TaskBoardPanel>, cx: &mut App) -> AnyElement {
+fn inbox_row(
+    run: &RunRow,
+    hover: &RowHoverState,
+    panel: WeakEntity<TaskBoardPanel>,
+    cx: &mut App,
+) -> AnyElement {
     let colors = cx.theme().colors();
     let border = colors.border;
     let hover_bg = colors.element_hover;
+    let no_bg = gpui::transparent_black();
     let text = colors.text;
     let text_2 = colors.text_muted;
     let text_3 = colors.text_placeholder;
@@ -92,11 +109,20 @@ fn inbox_row(run: &RunRow, panel: WeakEntity<TaskBoardPanel>, cx: &mut App) -> A
         _ => None,
     };
 
+    // Tracked hover (web `.inbox-row { transition: background .15s }` +
+    // the `.pill-elapsed` reveal): is this row hovered, or mid fade-out?
+    let (is_hovered, hover_fresh) = match &hover.hovered {
+        Some((id, fresh)) if *id == run_id => (true, *fresh),
+        _ => (false, false),
+    };
+    let unhover_fresh = matches!(&hover.unhovered, Some((id, fresh)) if *id == run_id && *fresh);
+
     let on_click_panel = panel.clone();
     let click_run_id = run_id.clone();
+    let hover_panel = panel.clone();
+    let hover_run_id = run_id.clone();
     let row = h_flex()
         .id(ElementId::Name(run_id.clone()))
-        .group("inbox-row")
         .w_full()
         .h(px(ROW_HEIGHT))
         .items_center()
@@ -104,20 +130,32 @@ fn inbox_row(run: &RunRow, panel: WeakEntity<TaskBoardPanel>, cx: &mut App) -> A
         .px(px(12.))
         .border_b_1()
         .border_color(border)
-        .hover(move |style| style.bg(hover_bg))
         .cursor_pointer()
+        .on_hover(move |hovered, _, cx| {
+            hover_panel
+                .update(cx, |panel, cx| {
+                    panel.set_row_hover(hover_run_id.clone(), *hovered, cx)
+                })
+                .ok();
+        })
         .on_click(move |_, _, cx| {
             on_click_panel
                 .update(cx, |panel, cx| panel.open_run(click_run_id.clone(), cx))
                 .ok();
         })
         // Status pill; the elapsed segment inside reveals on row hover (the
-        // web's compact↔extended island morph — see Z1_REPORT divergences).
+        // web's compact↔extended island morph — collapsed at rest, 120ms
+        // effects fade on hover; width-spring lands with Z4).
         .child(
             status_pill(
                 ElementId::Name(format!("pill-{run_id}").into()),
                 status,
-                Some(rel(run.elapsed_s)),
+                Some(ElapsedReveal {
+                    text: rel(run.elapsed_s),
+                    id: run_id.clone(),
+                    hovered: is_hovered,
+                    fresh: hover_fresh,
+                }),
                 cx,
             )
             .min_w(px(72.)),
@@ -169,16 +207,45 @@ fn inbox_row(run: &RunRow, panel: WeakEntity<TaskBoardPanel>, cx: &mut App) -> A
                 ),
         );
 
+    // Row bg: 150ms effects crossfade on hover flips (board.css:38); settled
+    // states render bare — no idle animation wrappers.
+    let row: AnyElement = if is_hovered {
+        if hover_fresh {
+            row.with_animation(
+                ElementId::Name(format!("rowbg-in-{run_id}").into()),
+                Animation::new(STATE_FADE).with_easing(EFFECTS.easing()),
+                move |row, t| row.bg(mix(no_bg, hover_bg, t)),
+            )
+            .into_any_element()
+        } else {
+            row.bg(hover_bg).into_any_element()
+        }
+    } else if unhover_fresh {
+        row.with_animation(
+            ElementId::Name(format!("rowbg-out-{run_id}").into()),
+            Animation::new(STATE_FADE).with_easing(EFFECTS.easing()),
+            move |row, t| row.bg(mix(hover_bg, no_bg, t)),
+        )
+        .into_any_element()
+    } else {
+        row.into_any_element()
+    };
+
     // `.rise` entrance (web: `.3s var(--decel-curve)`) — one-shot per run
     // identity (keyed by run id), so a tick never restarts it (the web
-    // `seenRuns`/keyed-DOM equivalent).
-    row.with_animation(
-        ElementId::Name(format!("rise-{run_id}").into()),
-        Animation::new(std::time::Duration::from_millis(300))
-            .with_easing(super::motion::DECEL.easing()),
-        |row, t| row.opacity(t),
-    )
-    .into_any_element()
+    // `seenRuns`/keyed-DOM equivalent). Wraps outside the bg fade so the
+    // two animations compose.
+    div()
+        .w_full()
+        .h(px(ROW_HEIGHT))
+        .child(row)
+        .with_animation(
+            ElementId::Name(format!("rise-{run_id}").into()),
+            Animation::new(std::time::Duration::from_millis(300))
+                .with_easing(super::motion::DECEL.easing()),
+            |row, t| row.opacity(t),
+        )
+        .into_any_element()
 }
 
 /// Web empty-state copy, verbatim.

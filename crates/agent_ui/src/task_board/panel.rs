@@ -57,6 +57,11 @@ pub struct TaskBoardPanel {
     drawer: Option<Entity<run_detail::RunDrawer>>,
     /// Seg-toggle 150ms state crossfade (web `.seg-toggle button` transition).
     view_fade: StateFade,
+    /// Tracked inbox-row hover (replaces the instant `.hover()` style):
+    /// drives the 150ms row-bg crossfade and the pill-elapsed reveal.
+    hovered_row: Option<(SharedString, StateFade)>,
+    /// The row that most recently lost hover — keeps its fade-out alive.
+    unhovered_row: Option<(SharedString, StateFade)>,
     _store_subscription: Subscription,
 }
 
@@ -72,7 +77,41 @@ impl TaskBoardPanel {
             graph_seen: std::collections::HashMap::new(),
             drawer: None,
             view_fade: StateFade::default(),
+            hovered_row: None,
+            unhovered_row: None,
             _store_subscription,
+        }
+    }
+
+    /// Tracked-hover transition for an inbox row: each flip opens a 150ms
+    /// crossfade window (web `.inbox-row { transition: background .15s }`).
+    pub(super) fn set_row_hover(
+        &mut self,
+        run_id: SharedString,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if hovered {
+            if self
+                .hovered_row
+                .as_ref()
+                .is_some_and(|(id, _)| *id == run_id)
+            {
+                return;
+            }
+            if let Some((old, _)) = self.hovered_row.take() {
+                self.unhovered_row = Some((old, StateFade::begun()));
+            }
+            self.hovered_row = Some((run_id, StateFade::begun()));
+            cx.notify();
+        } else if self
+            .hovered_row
+            .as_ref()
+            .is_some_and(|(id, _)| *id == run_id)
+        {
+            let (old, _) = self.hovered_row.take().unwrap();
+            self.unhovered_row = Some((old, StateFade::begun()));
+            cx.notify();
         }
     }
 
@@ -223,7 +262,17 @@ impl Render for TaskBoardPanel {
                 // Newest activity first (board.js reverses before render).
                 let mut rows = board;
                 rows.reverse();
-                inbox::inbox_list(std::sync::Arc::new(rows), cx.weak_entity(), cx)
+                let hover = inbox::RowHoverState {
+                    hovered: self
+                        .hovered_row
+                        .as_ref()
+                        .map(|(id, fade)| (id.clone(), fade.fresh())),
+                    unhovered: self
+                        .unhovered_row
+                        .as_ref()
+                        .map(|(id, fade)| (id.clone(), fade.fresh())),
+                };
+                inbox::inbox_list(std::sync::Arc::new(rows), hover, cx.weak_entity(), cx)
             }
             BoardView::Graph => {
                 let weak = cx.weak_entity();

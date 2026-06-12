@@ -11,6 +11,12 @@ use ui::prelude::*;
 
 use crate::agent_accents::{accent_for_agent, color_for_status, rgba_hex};
 
+use super::motion::EFFECTS;
+
+/// `.pill-elapsed` opacity reveal duration (board.css:48 `opacity .12s
+/// var(--effects-curve)`).
+const ELAPSED_REVEAL: std::time::Duration = std::time::Duration::from_millis(120);
+
 // ── Out-of-chrome board tokens (web app.css values; deliberately NOT
 //    ThemeColors fields — same rule as agent_accents) ──
 /// `--surface-1: rgba(255,255,255,0.05)` — idle-pill fill, seg-toggle active.
@@ -78,12 +84,31 @@ pub fn chip_reason(chip: Option<&str>, agent: &str) -> String {
     }
 }
 
+/// The `.pill-elapsed` reveal state — the elapsed segment lives inside the
+/// pill and reveals on tracked row hover (the web's compact↔extended island
+/// morph, board.css:45-55). At rest the segment is not rendered at all, so
+/// resting geometry matches the web's `max-width: 0` collapsed pill; on
+/// hover it appears at full width with a one-shot 120ms effects opacity
+/// fade. (The width-spring morph itself lands with Z4's hover-retargetable
+/// spring layer.)
+pub struct ElapsedReveal {
+    /// `rel(elapsed_s)` text.
+    pub text: String,
+    /// Stable per-row key (run id) — animation identity.
+    pub id: SharedString,
+    /// Whether the owning row is hovered right now.
+    pub hovered: bool,
+    /// Whether the hover flip is inside the crossfade window (attach the
+    /// one-shot fade only then; settled hovers render the segment bare).
+    pub fresh: bool,
+}
+
 /// The `.pill` element: status-colored label (+ pulsing dot while running,
 /// + optional elapsed segment). 11px/500, full-round, 12%-tinted fill.
 pub fn status_pill(
     id: impl Into<ElementId>,
     status: &str,
-    elapsed: Option<String>,
+    elapsed: Option<ElapsedReveal>,
     cx: &App,
 ) -> Stateful<Div> {
     let color = color_for_status(status);
@@ -119,15 +144,24 @@ pub fn status_pill(
         .text_color(color)
         .children(dot)
         .child(SharedString::from(status_label(status)))
-        .when_some(elapsed, |this, elapsed| {
-            // `.pill-elapsed` — compact↔extended island segment, revealed on
-            // row hover (the inbox row carries `.group("inbox-row")`).
-            this.child(
-                div()
-                    .visible_on_hover("inbox-row")
-                    .text_color(color.opacity(0.85))
-                    .child(SharedString::from(elapsed)),
-            )
+        .when_some(elapsed, |this, reveal| {
+            // `.pill-elapsed` — collapsed (absent) at rest, revealed on
+            // tracked row hover with a 120ms effects opacity fade.
+            if !reveal.hovered {
+                return this;
+            }
+            let segment = div()
+                .text_color(color.opacity(0.85))
+                .child(SharedString::from(reveal.text));
+            if reveal.fresh {
+                this.child(segment.with_animation(
+                    ElementId::Name(format!("pill-elapsed-{}", reveal.id).into()),
+                    Animation::new(ELAPSED_REVEAL).with_easing(EFFECTS.easing()),
+                    |segment, t| segment.opacity(t),
+                ))
+            } else {
+                this.child(segment)
+            }
         })
 }
 
