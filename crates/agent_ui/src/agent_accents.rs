@@ -34,7 +34,10 @@ pub const STATUS_IDLE: Rgba = rgba_hex(0xffffff73);
 
 /// Vendor accent for an agent name (case-insensitive, substring-tolerant:
 /// `"claude-fable"`, `"OpenAI Codex"`, `"gemini-3"` all resolve). Unknown
-/// agents fall back to the chrome accent family ([`ACCENT_AGY`]).
+/// agents keep the web's neutral `.sw` default ([`TEXT_3`], app.css:255) —
+/// NOT a vendor color: ACCENT_AGY doubles as --accent/--done, so an
+/// unknown vendor's identity dot would be indistinguishable from
+/// Antigravity AND from chrome-accent/done-status blue.
 pub fn accent_for_agent(name: &str) -> Hsla {
     let name = name.to_ascii_lowercase();
     let rgba = if name.contains("claude") || name.contains("anthropic") {
@@ -46,7 +49,7 @@ pub fn accent_for_agent(name: &str) -> Hsla {
     } else if name.contains("agy") || name.contains("antigravity") {
         ACCENT_AGY
     } else {
-        ACCENT_AGY
+        TEXT_3
     };
     rgba.into()
 }
@@ -123,8 +126,9 @@ mod tests {
         assert_eq!(accent_for_agent("CODEX"), ACCENT_CODEX.into());
         assert_eq!(accent_for_agent("gemini-3-pro"), ACCENT_GEMINI.into());
         assert_eq!(accent_for_agent("Antigravity"), ACCENT_AGY.into());
-        // Unknown vendor falls back to the chrome accent family.
-        assert_eq!(accent_for_agent("mystery-agent"), ACCENT_AGY.into());
+        // Unknown vendor keeps the web's neutral .sw default (--text-3) —
+        // never a vendor color (ACCENT_AGY is also --accent/--done).
+        assert_eq!(accent_for_agent("mystery-agent"), TEXT_3.into());
     }
 
     #[test]
