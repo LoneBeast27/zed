@@ -1,8 +1,13 @@
 //! The Orchestrator chat workspace panel (PARITY_SPEC §4.1): crumb header
 //! over the virtualized transcript (greeting when empty), with the composer
-//! deck beneath (Z3 Task 3). Holds the shared `Entity<BridgeStore>` and a
-//! [`TranscriptWatch`] — the `/transcript` poll runs only while this panel
-//! is alive (Lightness: panel presence gates the poll).
+//! deck beneath (Z3 Task 3). Holds the shared `Entity<BridgeStore>` and —
+//! only while the dock shows it — a [`TranscriptWatch`]: the watch is
+//! acquired on [`Panel::set_active`]`(true)` and dropped on `(false)`, so
+//! the `/transcript` poll runs only while the panel is actually visible
+//! (Lightness: panel *visibility* gates the poll — the entity itself is
+//! eagerly built at workspace init and would otherwise hold the poll open
+//! for the whole workspace lifetime; the web's `unmountChat` clears its
+//! interval on route exit the same way).
 
 use std::time::Duration;
 
@@ -61,7 +66,9 @@ pub struct OrchestratorPanel {
     /// the board's row hover).
     hovered_msg: Option<(usize, StateFade)>,
     unhovered_msg: Option<(usize, StateFade)>,
-    _transcript_watch: TranscriptWatch,
+    /// Held only while the dock shows this panel ([`Panel::set_active`]) —
+    /// the RAII guard whose presence keeps the `/transcript` poll alive.
+    transcript_watch: Option<TranscriptWatch>,
     _store_subscription: Subscription,
 }
 
@@ -72,7 +79,6 @@ impl OrchestratorPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = bridge::global_store(cx);
-        let watch = store.update(cx, |store, cx| store.watch_transcript(cx));
         let _store_subscription =
             cx.observe(&store, |this: &mut Self, _, cx| this.sync_from_store(cx));
         Self {
@@ -88,8 +94,25 @@ impl OrchestratorPanel {
             last_snapshot: None,
             hovered_msg: None,
             unhovered_msg: None,
-            _transcript_watch: watch,
+            transcript_watch: None,
             _store_subscription,
+        }
+    }
+
+    /// The dock's visibility signal drives the poll lifetime: acquire the
+    /// watch when the panel becomes the visible panel of an open dock, drop
+    /// it when the dock closes or another panel takes the slot. Acquiring
+    /// on the 0→1 watcher transition (re)starts the poll loop, whose first
+    /// iteration fetches immediately — re-activation is also the fresh
+    /// fetch.
+    fn set_poll_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if active {
+            if self.transcript_watch.is_none() {
+                self.transcript_watch =
+                    Some(self.store.update(cx, |store, cx| store.watch_transcript(cx)));
+            }
+        } else {
+            self.transcript_watch = None;
         }
     }
 
@@ -338,6 +361,13 @@ impl Panel for OrchestratorPanel {
         // Runtime-only, mirroring the task board (Z1).
         self.position = position;
         cx.notify();
+    }
+
+    fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        // The dock invokes this on open/close and panel switches
+        // (dock.rs `set_open` / `activate_panel`) — the native equivalent
+        // of the web's route mount/unmount, gating the `/transcript` poll.
+        self.set_poll_active(active, cx);
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {

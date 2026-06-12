@@ -21,6 +21,8 @@ pub mod client;
 pub mod protocol;
 pub mod sse;
 pub mod store;
+#[cfg(test)]
+mod watch_tests;
 
 pub use client::{BRIDGE_BASE_URL, fetch_json, post_json};
 pub use protocol::{
