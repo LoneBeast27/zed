@@ -89,14 +89,19 @@ impl TranscriptView {
         }
     }
 
-    /// The index whose worked-for label rolls live while busy: ONLY the
-    /// final transcript message, and only when it's an agent reply (a
-    /// progressively-streamed reply mid-generation). While the last message
-    /// is the user's — the typical busy state — nothing rolls: the previous
-    /// turn's frozen counter must never inflate and snap back. (Matches the
-    /// web's visible behavior: chat.js's tick selector dead-ends on the
-    /// shimmer node, which is always last while busy.)
-    pub fn live_agent_ix(&self) -> Option<usize> {
+    /// The index whose worked-for label rolls live: nothing while settled
+    /// (`busy == false` — a settled trailing reply's frozen counter must
+    /// never tick), and while busy ONLY the final transcript message, and
+    /// only when it's an agent reply (a progressively-streamed reply
+    /// mid-generation). While the last message is the user's — the typical
+    /// busy state — nothing rolls: the previous turn's frozen counter must
+    /// never inflate and snap back. (Matches the web's visible behavior:
+    /// chat.js's tick loop runs only while busy and its selector dead-ends
+    /// on the shimmer node, which is always last while busy.)
+    pub fn live_agent_ix(&self, busy: bool) -> Option<usize> {
+        if !busy {
+            return None;
+        }
         match self.views.last() {
             Some(view) if !view.user => Some(self.views.len() - 1),
             _ => None,
@@ -312,166 +317,5 @@ pub(super) fn render_greeting(cx: &App) -> AnyElement {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn message(role: &str, text: &str) -> TranscriptMessage {
-        TranscriptMessage {
-            role: role.into(),
-            text: text.into(),
-            ..Default::default()
-        }
-    }
-
-    fn snapshot(id: &str, busy: bool, messages: Vec<TranscriptMessage>) -> TranscriptSnapshot {
-        TranscriptSnapshot {
-            id: id.into(),
-            title: "t".into(),
-            busy,
-            brain: None,
-            messages,
-        }
-    }
-
-    #[gpui::test]
-    fn growth_appends_and_keeps_existing_view_identity(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let mut transcript = TranscriptView::new();
-            transcript.sync(
-                &snapshot("c-1", false, vec![message("user", "hi")]),
-                cx,
-            );
-            assert_eq!(transcript.message_count(), 1);
-            assert_eq!(transcript.list_state.item_count(), 1);
-            let first_id = transcript.message(0).unwrap().markdown.entity_id();
-
-            // Growth: the existing view (its markdown entity) is untouched.
-            transcript.sync(
-                &snapshot(
-                    "c-1",
-                    false,
-                    vec![message("user", "hi"), message("orchestrator", "reply")],
-                ),
-                cx,
-            );
-            assert_eq!(transcript.message_count(), 2);
-            assert_eq!(transcript.list_state.item_count(), 2);
-            assert_eq!(
-                transcript.message(0).unwrap().markdown.entity_id(),
-                first_id,
-                "growth must never rebuild on-screen views (§5.6)"
-            );
-            assert!(!transcript.message(1).unwrap().user);
-        });
-    }
-
-    #[gpui::test]
-    fn conversation_switch_rebuilds(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let mut transcript = TranscriptView::new();
-            transcript.sync(
-                &snapshot("c-1", false, vec![message("user", "hi")]),
-                cx,
-            );
-            let first_id = transcript.message(0).unwrap().markdown.entity_id();
-            transcript.sync(
-                &snapshot("c-2", false, vec![message("user", "other")]),
-                cx,
-            );
-            assert_eq!(transcript.message_count(), 1);
-            assert_ne!(
-                transcript.message(0).unwrap().markdown.entity_id(),
-                first_id,
-                "a conversation switch re-keys everything"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn shimmer_item_tracks_busy(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let mut transcript = TranscriptView::new();
-            // Busy without growth: the shimmer item is listed past the
-            // messages.
-            transcript.sync(&snapshot("c-1", true, vec![message("user", "go")]), cx);
-            assert_eq!(transcript.message_count(), 1);
-            assert_eq!(transcript.list_state.item_count(), 2, "messages + shimmer");
-
-            // Reply lands, busy drops: the shimmer slot becomes the reply.
-            transcript.sync(
-                &snapshot(
-                    "c-1",
-                    false,
-                    vec![message("user", "go"), message("orchestrator", "done")],
-                ),
-                cx,
-            );
-            assert_eq!(transcript.message_count(), 2);
-            assert_eq!(transcript.list_state.item_count(), 2);
-
-            // Busy flips again without growth: shimmer returns.
-            transcript.sync(
-                &snapshot(
-                    "c-1",
-                    true,
-                    vec![message("user", "go"), message("orchestrator", "done")],
-                ),
-                cx,
-            );
-            assert_eq!(transcript.list_state.item_count(), 3);
-        });
-    }
-
-    #[gpui::test]
-    fn transcript_is_bounded_to_60(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let mut transcript = TranscriptView::new();
-            let messages: Vec<_> = (0..70)
-                .map(|i| message("user", &format!("m{i}")))
-                .collect();
-            transcript.sync(&snapshot("c-1", false, messages), cx);
-            assert_eq!(transcript.message_count(), 60, "defensive 60-cap (§8.4)");
-            assert_eq!(transcript.message(0).unwrap().text.as_ref(), "m10");
-        });
-    }
-
-    #[gpui::test]
-    fn live_tick_only_rides_a_trailing_agent_reply(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let mut transcript = TranscriptView::new();
-            assert_eq!(transcript.live_agent_ix(), None);
-
-            // Typical busy state: the user message is last — the previous
-            // turn's frozen counter must NOT roll.
-            transcript.sync(
-                &snapshot(
-                    "c-1",
-                    true,
-                    vec![
-                        message("user", "q1"),
-                        message("orchestrator", "a1"),
-                        message("user", "q2"),
-                    ],
-                ),
-                cx,
-            );
-            assert_eq!(transcript.live_agent_ix(), None);
-
-            // A progressively-streamed reply IS last — that one rolls.
-            transcript.sync(
-                &snapshot(
-                    "c-1",
-                    true,
-                    vec![
-                        message("user", "q1"),
-                        message("orchestrator", "a1"),
-                        message("user", "q2"),
-                        message("orchestrator", "a2 (streaming)"),
-                    ],
-                ),
-                cx,
-            );
-            assert_eq!(transcript.live_agent_ix(), Some(3));
-        });
-    }
-}
+#[path = "transcript_tests.rs"]
+mod tests;

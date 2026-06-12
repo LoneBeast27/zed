@@ -270,10 +270,7 @@ impl OrchestratorPanel {
             return render_greeting(cx);
         }
         let message_count = self.transcript.message_count();
-        let live_ix = self
-            .busy
-            .then(|| self.transcript.live_agent_ix())
-            .flatten();
+        let live_ix = self.transcript.live_agent_ix(self.busy);
 
         list(
             self.transcript.list_state.clone(),
