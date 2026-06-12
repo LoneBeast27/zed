@@ -38,12 +38,16 @@
 //! - [`island_faces`] — the four representations as data + their builders
 //!   and deterministic geometry measurement.
 //! - [`usage_island`] — the island entity: store ingest, timers, morphs.
-//! - [`notif_stack`] — the corner-emergent toast stack beneath the head.
+//! - [`notif_stack`] — the toast stack entity: store diffing, surfacing,
+//!   expiry/retract lifecycle.
+//! - [`notif_card`] — the toast element: card anatomy, slot, and the §4.9
+//!   emerge/retract motion.
 //! - [`corner_cluster`] — the workspace-mounted positioner that composes
 //!   the island + stack into the one corner system.
 
 pub mod corner_cluster;
 pub mod island_faces;
+mod notif_card;
 pub mod notif_logic;
 pub mod notif_stack;
 pub mod state;

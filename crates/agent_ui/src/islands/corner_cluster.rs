@@ -13,7 +13,7 @@
 use gpui::{Context, Entity};
 use ui::prelude::*;
 
-use super::notif_stack::{NotifStack, STACK_W};
+use super::notif_stack::{NotifStack, clamped_width};
 use super::usage_island::UsageIsland;
 
 /// Corner inset for the cluster head (web `#usage-island { top: 14px;
@@ -41,8 +41,10 @@ impl CornerCluster {
 }
 
 impl Render for CornerCluster {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let expanded = self.island.read(cx).is_expanded();
+        // Web `#notif-stack { max-width: calc(100vw - 28px) }`.
+        let stack_w = clamped_width(f32::from(window.viewport_size().width));
         div()
             .absolute()
             .inset_0()
@@ -74,7 +76,7 @@ impl Render for CornerCluster {
                     .absolute()
                     .top(px(STACK_TOP))
                     .right(px(CORNER_INSET))
-                    .w(px(STACK_W))
+                    .w(px(stack_w))
                     .child(self.stack.clone()),
             )
     }
