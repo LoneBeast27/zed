@@ -67,6 +67,10 @@ pub struct TaskBoardPanel {
     drawer: Option<Entity<run_detail::RunDrawer>>,
     /// Seg-toggle 150ms state crossfade (web `.seg-toggle button` transition).
     view_fade: StateFade,
+    /// Last-seen bridge connectivity + its grey-out crossfade (the offline
+    /// grey-out is a native addition — §0 still forbids instant flips).
+    was_connected: bool,
+    connected_fade: StateFade,
     /// Tracked inbox-row hover (replaces the instant `.hover()` style):
     /// drives the 150ms row-bg crossfade and the pill-elapsed reveal.
     hovered_row: Option<(SharedString, StateFade)>,
@@ -90,6 +94,8 @@ impl TaskBoardPanel {
             graph_paint_cache: Default::default(),
             drawer: None,
             view_fade: StateFade::default(),
+            was_connected: false,
+            connected_fade: StateFade::default(),
             hovered_row: None,
             unhovered_row: None,
             _store_subscription,
@@ -267,6 +273,10 @@ impl Render for TaskBoardPanel {
         // Locally-ticked elapsed (the store's 1s ticker drives re-renders
         // while any run is live; the server frame re-bases the offset).
         let board = store.ticked_board();
+        if connected != self.was_connected {
+            self.was_connected = connected;
+            self.connected_fade.bump();
+        }
         let total = board.len();
         let running = board.iter().filter(|r| r.status == "running").count();
 
@@ -301,6 +311,30 @@ impl Render for TaskBoardPanel {
             }
         };
 
+        // Bridge offline → grey out the (kept) last snapshot, eased 200ms on
+        // the effects curve in both directions (a snap on this large a
+        // surface fails the §8.7(a) gate; the grey-out itself is a native
+        // addition — the web's catch is silent).
+        let body_container = div().relative().flex_1().min_h_0().child(body);
+        let body_container: AnyElement = if self.connected_fade.fresh() {
+            let (from, to) = if connected { (0.5, 1.0) } else { (1.0, 0.5) };
+            body_container
+                .with_animation(
+                    ElementId::NamedInteger(
+                        "board-offline-fade".into(),
+                        self.connected_fade.generation() as u64,
+                    ),
+                    Animation::new(std::time::Duration::from_millis(200))
+                        .with_easing(EFFECTS.easing()),
+                    move |body, t| body.opacity(from + (to - from) * t),
+                )
+                .into_any_element()
+        } else {
+            body_container
+                .when(!connected, |this| this.opacity(0.5))
+                .into_any_element()
+        };
+
         let colors = cx.theme().colors();
         v_flex()
             .key_context("TaskBoardPanel")
@@ -309,15 +343,7 @@ impl Render for TaskBoardPanel {
             .size_full()
             .bg(colors.panel_background)
             .child(self.render_header(total, running, cx))
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    // Bridge offline → grey out the (kept) last snapshot.
-                    .when(!connected, |this| this.opacity(0.5))
-                    .child(body),
-            )
+            .child(body_container)
             .children(self.drawer.clone())
     }
 }
