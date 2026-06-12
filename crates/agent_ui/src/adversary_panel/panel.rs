@@ -1,33 +1,22 @@
-//! The Adversary panel (PARITY_SPEC §4.5), ported from the approved web
-//! reference render (`bridge/ui/adversary.js` + `panels.css`): a composer
-//! deck that broadcasts one prompt to all three models (`POST /adversary`),
-//! three vendor columns in an `h_flex` that shimmer while the job runs and
-//! fill with Markdown when it lands, and the synthesis card
-//! (AGREEMENTS / DISAGREEMENTS / SYNTHESIS) beneath.
-//!
-//! Data path: [`crate::bridge::AdversaryJobs`] — the broadcast POST and the
-//! 2.5s job poll run on background executors through the bridge connection
-//! idiom (RUST_PORT_NOTES §4.5: never blocking the UI thread), and the poll
-//! is watch-gated on [`Panel::set_active`] exactly like the orchestrator's
-//! TranscriptWatch: hidden panel, dead poll.
+//! The adversary panel's lifecycle + composer deck: the `Panel` impl with
+//! the watch-gated job-poll lifetime, the `.adv-composer` (editor + the
+//! always-visible broadcast circle), the panel head, and the error state.
+//! Result rendering lives in [`super::columns`].
 
 use gpui::{
-    Action, Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, SharedString, Subscription, TextStyleRefinement, Window,
-    actions, pulsating_between, relative,
+    Action, App, AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    SharedString, Subscription, Window, actions, relative,
 };
-use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use settings::Settings as _;
 use ui::prelude::*;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
-use crate::agent_accents::{ACCENT, ACCENT_FILL, STATUS_BLOCKED, STATUS_RUNNING};
-use crate::bridge::{
-    AdversaryJobs, AdversaryPhase, AdversaryResult, AdversaryWatch, VENDOR_COLUMNS,
-    parse_synthesis_sections,
-};
-use crate::task_board::motion::{DECEL, STATE_FADE, StateFades, mix};
-use crate::task_board::style::{HAIRLINE_HI, SURFACE_1, SURFACE_2, agent_chip};
+use crate::agent_accents::ACCENT_FILL;
+use crate::bridge::{AdversaryJobs, AdversaryPhase, AdversaryWatch};
+use crate::task_board::motion::{STATE_FADE, StateFades, mix};
+use crate::task_board::style::{HAIRLINE_HI, SURFACE_2};
+
+use super::columns::{DoneView, build_done_view};
 
 actions!(
     adversary_panel,
@@ -40,28 +29,14 @@ actions!(
     ]
 );
 
-/// `.adv-col` / `.task-card` entrance (`animation: spring-in .26s
-/// var(--decel-curve)`).
-const SPRING_IN: std::time::Duration = std::time::Duration::from_millis(260);
-
-/// The landed result as the panel renders it: one Markdown entity per
-/// vendor column (built once per job completion, never per frame) + the
-/// synthesis card's parsed blocks.
-struct DoneView {
-    columns: Vec<(&'static str, Entity<Markdown>)>,
-    agreements: Option<Entity<Markdown>>,
-    disagreements: Option<Entity<Markdown>>,
-    synthesis: Option<Entity<Markdown>>,
-}
-
 pub struct AdversaryPanel {
     focus_handle: FocusHandle,
     position: DockPosition,
-    jobs: Entity<AdversaryJobs>,
+    pub(super) jobs: Entity<AdversaryJobs>,
     editor: Entity<editor::Editor>,
-    done: Option<DoneView>,
+    pub(super) done: Option<DoneView>,
     /// Change gate for the jobs observer.
-    last_phase: AdversaryPhase,
+    pub(super) last_phase: AdversaryPhase,
     /// Held only while the dock shows this panel — its presence keeps the
     /// job poll alive ([`Panel::set_active`]).
     watch: Option<AdversaryWatch>,
@@ -220,170 +195,6 @@ impl AdversaryPanel {
             .into_any_element()
     }
 
-    /// `.adv-cols`: three equal columns in an `h_flex`, gap 14, max 1100 —
-    /// shimmering while pending, Markdown bodies once landed.
-    fn render_columns(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let generation = self.jobs.read(cx).generation;
-        let columns: Vec<AnyElement> = match (&self.last_phase, &self.done) {
-            (AdversaryPhase::Pending, _) => VENDOR_COLUMNS
-                .iter()
-                .map(|vendor| self.render_column(vendor, generation, None, window, cx))
-                .collect(),
-            (AdversaryPhase::Done(_), Some(done)) => done
-                .columns
-                .iter()
-                .map(|(vendor, markdown)| {
-                    self.render_column(vendor, generation, Some(markdown.clone()), window, cx)
-                })
-                .collect(),
-            _ => return None,
-        };
-        Some(
-            h_flex()
-                .w_full()
-                .max_w(px(1100.))
-                .items_start()
-                .gap(px(14.))
-                .mb(px(20.))
-                .children(columns)
-                .into_any_element(),
-        )
-    }
-
-    /// One `.adv-col`: agent-chip header (vendor dot + name) over the body —
-    /// pulsate shimmer while that column is pending, prose once landed. The
-    /// spring-in entrance keys off (vendor, generation, landed) so the
-    /// web's re-rendered cols replay it per state, never per frame.
-    fn render_column(
-        &self,
-        vendor: &'static str,
-        generation: u64,
-        body: Option<Entity<Markdown>>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let landed = body.is_some();
-        let content: AnyElement = match body {
-            Some(markdown) => div()
-                .text_size(px(13.))
-                .child(MarkdownElement::new(markdown, column_prose_style(window, cx)))
-                .into_any_element(),
-            // `.shimmer-label` — pulsate stands in for the gradient sweep
-            // (the §4.1 thread_item idiom ruling).
-            None => div()
-                .text_size(px(13.))
-                .text_color(cx.theme().colors().text_placeholder)
-                .child("Thinking…")
-                .with_animation(
-                    ElementId::Name(format!("adv-shimmer-{vendor}").into()),
-                    Animation::new(std::time::Duration::from_millis(1400))
-                        .repeat()
-                        .with_easing(pulsating_between(0.4, 0.92)),
-                    |label, value| label.opacity(value),
-                )
-                .into_any_element(),
-        };
-        let column = v_flex()
-            .flex_1()
-            .min_w_0()
-            .rounded(px(12.))
-            .bg(SURFACE_1)
-            .border_1()
-            .border_color(cx.theme().colors().border)
-            .px(px(15.))
-            .py(px(14.))
-            .min_h(px(120.))
-            .items_start()
-            .child(div().mb(px(12.)).child(agent_chip(vendor, cx)))
-            .child(div().w_full().child(content));
-        // spring-in .26s on the decel curve (opacity + 4px rise; the web's
-        // scale beat is dropped — gpui has no element scale).
-        column
-            .with_animation(
-                ElementId::Name(
-                    format!("adv-col-{vendor}-{generation}-{}", landed as u8).into(),
-                ),
-                Animation::new(SPRING_IN).with_easing(DECEL.easing()),
-                |column, t| column.opacity(t).mt(px(4. * (1. - t))),
-            )
-            .into_any_element()
-    }
-
-    /// `.synth-card`: hairline-hi card with the merge head + tinted section
-    /// blocks. Always shown once a result lands (even an empty synthesis
-    /// renders the bare head — web parity); blocks skip when empty.
-    fn render_synthesis(&self, window: &Window, cx: &App) -> Option<AnyElement> {
-        let done = self.done.as_ref()?;
-        let colors = cx.theme().colors();
-        let block = |title: &'static str,
-                     body: &Option<Entity<Markdown>>,
-                     tint: gpui::Hsla|
-         -> Option<AnyElement> {
-            let markdown = body.clone()?;
-            Some(
-                v_flex()
-                    .mb(px(14.))
-                    .child(
-                        div()
-                            .mb(px(6.))
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(tint)
-                            .child(SharedString::from(title.to_uppercase())),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .child(MarkdownElement::new(
-                                markdown,
-                                column_prose_style(window, cx),
-                            )),
-                    )
-                    .into_any_element(),
-            )
-        };
-        Some(
-            v_flex()
-                .w_full()
-                .max_w(px(1100.))
-                .rounded(px(12.))
-                .bg(SURFACE_1)
-                .border_1()
-                .border_color(HAIRLINE_HI)
-                .px(px(18.))
-                .py(px(16.))
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .mb(px(14.))
-                        .child(
-                            // `.synth-head .ms { font-size: 18px; color:
-                            // var(--accent) }` — `merge` glyph's nearest
-                            // IconName analog.
-                            Icon::new(IconName::PullRequest)
-                                .size(IconSize::Custom(rems_from_px(18.)))
-                                .color(Color::Custom(ACCENT.into())),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(14.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(colors.text)
-                                .child("Synthesis"),
-                        ),
-                )
-                .children(block("Agreements", &done.agreements, STATUS_RUNNING.into()))
-                .children(block(
-                    "Disagreements",
-                    &done.disagreements,
-                    STATUS_BLOCKED.into(),
-                ))
-                .children(block("Synthesis", &done.synthesis, colors.text_placeholder))
-                .into_any_element(),
-        )
-    }
-
     /// The web's `renderError`: the `.empty-state` block in the columns'
     /// slot (icon · "Broadcast failed" · the error text).
     fn render_error(&self, error: &str, cx: &App) -> AnyElement {
@@ -417,61 +228,16 @@ impl AdversaryPanel {
     }
 }
 
-/// Build the per-vendor Markdown entities + parsed synthesis blocks for a
-/// landed result. Missing vendors render the web's `"(no answer)"`.
-fn build_done_view(result: &AdversaryResult, cx: &mut App) -> DoneView {
-    let markdown = |text: &str, cx: &mut App| {
-        let text = SharedString::from(text.to_string());
-        cx.new(|cx| Markdown::new(text, None, None, cx))
-    };
-    let columns = VENDOR_COLUMNS
-        .iter()
-        .map(|vendor| {
-            let answer = result
-                .answers
-                .get(*vendor)
-                .map(String::as_str)
-                .unwrap_or("(no answer)");
-            (*vendor, markdown(answer, cx))
-        })
-        .collect();
-    let sections = parse_synthesis_sections(result.synthesis.as_deref().unwrap_or(""));
-    let section = |text: &str, cx: &mut App| {
-        (!text.is_empty()).then(|| markdown(text, cx))
-    };
-    DoneView {
-        columns,
-        agreements: section(&sections.agreements, cx),
-        disagreements: section(&sections.disagreements, cx),
-        synthesis: section(&sections.synthesis, cx),
-    }
-}
-
-/// `.adv-col-body` / `.synth-block-body`: 13px/1.6 UI prose with the
-/// `#1a1a1a` 12px inline code.
-fn column_prose_style(window: &Window, cx: &App) -> MarkdownStyle {
-    let mut style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
-    style.base_text_style.refine(&TextStyleRefinement {
-        font_size: Some(px(13.).into()),
-        line_height: Some(relative(1.6).into()),
-        ..Default::default()
-    });
-    style.inline_code.background_color =
-        Some(crate::task_board::style::INLINE_CODE_BG.into());
-    style.inline_code.font_size = Some(px(12.).into());
-    style
-}
-
 impl Render for AdversaryPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let composer = self.render_composer(window, cx);
         let columns = self.render_columns(window, cx);
         let synthesis = self.render_synthesis(window, cx);
-        let colors = cx.theme().colors();
         let error = match &self.last_phase {
             AdversaryPhase::Failed(error) => Some(self.render_error(&error.clone(), cx)),
             _ => None,
         };
+        let colors = cx.theme().colors();
         let panel = v_flex()
             .key_context("AdversaryPanel")
             .track_focus(&self.focus_handle)
