@@ -25,6 +25,7 @@ use crate::bridge::RunRow;
 
 use super::motion::{DECEL, SPATIAL};
 use super::node::{node_label, root_node, status_dot};
+use super::paint_cache::SharedPaintCache;
 use super::panel::TaskBoardPanel;
 use super::style::{HAIRLINE_HI, empty_state, status_phrase};
 
@@ -65,14 +66,16 @@ fn tree_in_viewport(tree_top: f32, height: f32, scroll_top: f32, viewport_height
 /// scroll viewport (tracked via `scroll`) build a same-height placeholder —
 /// no nodes, no edges, no paths — and every canvas paint closure early-outs
 /// when its bounds don't intersect the window's content mask.
-pub fn graph_view(
+pub(super) fn graph_view(
     board: Vec<RunRow>,
     seen: &mut HashMap<SharedString, Instant>,
     scroll: &ScrollHandle,
+    cache: &SharedPaintCache,
     panel: WeakEntity<TaskBoardPanel>,
     cx: &mut App,
 ) -> AnyElement {
     if board.is_empty() {
+        cache.borrow_mut().retain_convs(|_| false);
         return empty_state(
             IconName::ListTree,
             "No spawn tree yet",
@@ -95,6 +98,9 @@ pub fn graph_view(
         }
         by_conv.entry(run.conv.clone()).or_default().push(run);
     }
+    cache
+        .borrow_mut()
+        .retain_convs(|conv| by_conv.contains_key(conv));
 
     // Viewport in content coordinates (offset.y goes negative as the user
     // scrolls down). Height 0 = unmeasured first frame → build everything.
@@ -123,7 +129,7 @@ pub fn graph_view(
                 || tree_in_viewport(tree_top, height, scroll_top, viewport_height);
             tree_top += height + TREE_MB;
             if visible {
-                conv_tree(conv_id, runs, fresh, panel.clone(), cx)
+                conv_tree(conv_id, runs, fresh, cache.clone(), panel.clone(), cx)
             } else {
                 // Same-height placeholder preserves scroll geometry.
                 div().w_full().h(px(height)).mb(px(TREE_MB)).into_any_element()
@@ -148,6 +154,7 @@ fn conv_tree(
     conv_id: String,
     runs: Vec<RunRow>,
     fresh: Vec<bool>,
+    cache: SharedPaintCache,
     panel: WeakEntity<TaskBoardPanel>,
     cx: &App,
 ) -> AnyElement {
@@ -166,6 +173,8 @@ fn conv_tree(
             settled_edges.push((y, color));
         }
     }
+    let edge_cache = cache.clone();
+    let edge_conv = conv_id.clone();
     let settled_canvas = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -174,10 +183,23 @@ fn conv_tree(
             if !bounds.intersects(&window.content_mask().bounds) {
                 return;
             }
-            for (y, color) in &settled_edges {
-                if let Some(path) = edge_path(bounds.origin, *y, 1.0) {
-                    window.paint_path(path, *color);
-                }
+            // Static geometry: tessellate once per (origin, edge set), not
+            // per frame (the spinner keeps the frame clock hot).
+            let paths = edge_cache.borrow_mut().settled_edge_paths(
+                &edge_conv,
+                bounds.origin,
+                &settled_edges,
+                || {
+                    settled_edges
+                        .iter()
+                        .filter_map(|(y, color)| {
+                            edge_path(bounds.origin, *y, 1.0).map(|path| (path, *color))
+                        })
+                        .collect()
+                },
+            );
+            for (path, color) in paths {
+                window.paint_path(path, color);
             }
         },
     )
@@ -197,7 +219,7 @@ fn conv_tree(
         .mb(px(TREE_MB))
         .child(settled_canvas)
         .children(drawing_edges)
-        .child(root_node(conv_id, panel.clone(), cx))
+        .child(root_node(conv_id, cache, panel.clone(), cx))
         .children(nodes)
         .into_any_element()
 }

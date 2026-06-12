@@ -60,6 +60,9 @@ pub struct TaskBoardPanel {
     inbox_seen: std::collections::HashMap<SharedString, std::time::Instant>,
     /// Graph scroll position — drives conv-tree viewport culling.
     graph_scroll: gpui::ScrollHandle,
+    /// Cached static paint geometry (settled edges, root rings) shared into
+    /// the graph's paint closures.
+    graph_paint_cache: super::paint_cache::SharedPaintCache,
     /// The open run drawer, if any (right slide-over).
     drawer: Option<Entity<run_detail::RunDrawer>>,
     /// Seg-toggle 150ms state crossfade (web `.seg-toggle button` transition).
@@ -84,6 +87,7 @@ impl TaskBoardPanel {
             graph_seen: std::collections::HashMap::new(),
             inbox_seen: std::collections::HashMap::new(),
             graph_scroll: gpui::ScrollHandle::new(),
+            graph_paint_cache: Default::default(),
             drawer: None,
             view_fade: StateFade::default(),
             hovered_row: None,
@@ -292,7 +296,8 @@ impl Render for TaskBoardPanel {
             BoardView::Graph => {
                 let weak = cx.weak_entity();
                 let scroll = self.graph_scroll.clone();
-                super::graph::graph_view(board, &mut self.graph_seen, &scroll, weak, cx)
+                let cache = self.graph_paint_cache.clone();
+                super::graph::graph_view(board, &mut self.graph_seen, &scroll, &cache, weak, cx)
             }
         };
 

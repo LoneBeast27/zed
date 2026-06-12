@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, BoxShadow, ElementId, FontWeight, Hsla,
-    PathBuilder, Rgba, SharedString, WeakEntity, canvas, point, px,
+    Animation, AnimationExt as _, AnyElement, App, Bounds, BoxShadow, ElementId, FontWeight,
+    Hsla, Path, PathBuilder, Pixels, Rgba, SharedString, WeakEntity, canvas, point, px,
 };
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
@@ -15,6 +15,7 @@ use ui::prelude::*;
 
 use crate::agent_accents::{ACCENT_AGY, ACCENT_GEMINI, color_for_status};
 
+use super::paint_cache::SharedPaintCache;
 use super::panel::TaskBoardPanel;
 use super::style::{HAIRLINE_HI, SURFACE_2};
 
@@ -108,9 +109,48 @@ fn spinner_arc(run_id: &str, color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+/// Builds the duotone ring's 24 stroked arc-segment paths for `bounds` —
+/// static geometry, cached by the caller and rebuilt only when bounds move.
+fn ring_segment_paths(bounds: Bounds<Pixels>) -> Vec<(Path<Pixels>, Hsla)> {
+    // Two-color conic approximation: stroked arc segments lerping
+    // ACCENT_AGY → ACCENT_GEMINI → ACCENT_AGY around the ring.
+    let center = bounds.center();
+    let radius = (bounds.size.width.as_f32() / 2.0) - 1.5; // 3px-stroke ring
+    const SEGMENTS: usize = 24;
+    let mut paths = Vec::with_capacity(SEGMENTS);
+    for k in 0..SEGMENTS {
+        let f = k as f32 / SEGMENTS as f32;
+        let mix = if f < 0.5 { f * 2.0 } else { 2.0 - f * 2.0 };
+        let color = lerp_rgba(ACCENT_AGY, ACCENT_GEMINI, mix);
+        let mut builder = PathBuilder::stroke(px(3.));
+        // Overlap each segment slightly to avoid hairline joints.
+        for (step, sub) in [0.0_f32, 0.55, 1.1].into_iter().enumerate() {
+            let a = (f + sub / SEGMENTS as f32) * std::f32::consts::TAU;
+            let p = point(
+                center.x + px(radius * a.cos()),
+                center.y + px(radius * a.sin()),
+            );
+            if step == 0 {
+                builder.move_to(p);
+            } else {
+                builder.line_to(p);
+            }
+        }
+        if let Ok(path) = builder.build() {
+            paths.push((path, color));
+        }
+    }
+    paths
+}
+
 /// The `.groot`: 22px duotone conic ring (accent blue → violet → back, NO
 /// full rainbows) with a ✦ core, + "conversation / orchestrator" label.
-pub(super) fn root_node(conv_id: String, panel: WeakEntity<TaskBoardPanel>, cx: &App) -> AnyElement {
+pub(super) fn root_node(
+    conv_id: String,
+    cache: SharedPaintCache,
+    panel: WeakEntity<TaskBoardPanel>,
+    cx: &App,
+) -> AnyElement {
     let title: SharedString = if conv_id.is_empty() {
         "conversation".into()
     } else {
@@ -118,6 +158,7 @@ pub(super) fn root_node(conv_id: String, panel: WeakEntity<TaskBoardPanel>, cx: 
     };
     let text = cx.theme().colors().text;
 
+    let ring_conv = conv_id.clone();
     let ring = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -125,32 +166,13 @@ pub(super) fn root_node(conv_id: String, panel: WeakEntity<TaskBoardPanel>, cx: 
             if !bounds.intersects(&window.content_mask().bounds) {
                 return;
             }
-            // Two-color conic approximation: stroked arc segments lerping
-            // ACCENT_AGY → ACCENT_GEMINI → ACCENT_AGY around the ring.
-            let center = bounds.center();
-            let radius = (bounds.size.width.as_f32() / 2.0) - 1.5; // 3px-stroke ring
-            const SEGMENTS: usize = 24;
-            for k in 0..SEGMENTS {
-                let f = k as f32 / SEGMENTS as f32;
-                let mix = if f < 0.5 { f * 2.0 } else { 2.0 - f * 2.0 };
-                let color = lerp_rgba(ACCENT_AGY, ACCENT_GEMINI, mix);
-                let mut builder = PathBuilder::stroke(px(3.));
-                // Overlap each segment slightly to avoid hairline joints.
-                for (step, sub) in [0.0_f32, 0.55, 1.1].into_iter().enumerate() {
-                    let a = (f + sub / SEGMENTS as f32) * std::f32::consts::TAU;
-                    let p = point(
-                        center.x + px(radius * a.cos()),
-                        center.y + px(radius * a.sin()),
-                    );
-                    if step == 0 {
-                        builder.move_to(p);
-                    } else {
-                        builder.line_to(p);
-                    }
-                }
-                if let Ok(path) = builder.build() {
-                    window.paint_path(path, color);
-                }
+            // Static geometry: 24 PathBuilder builds once per bounds, not
+            // per frame.
+            let paths = cache
+                .borrow_mut()
+                .ring_paths(&ring_conv, bounds, || ring_segment_paths(bounds));
+            for (path, color) in paths {
+                window.paint_path(path, color);
             }
         },
     )
