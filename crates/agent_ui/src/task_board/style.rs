@@ -178,6 +178,32 @@ pub fn queued_pill(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
     pill_with_label(id, "pending", "Queued".to_string(), None, cx)
 }
 
+/// The symphony check-off label for a subtask status — "Queued" for the
+/// pending/unlinked vocabulary, "Cancelled" for the best-effort thread abort,
+/// otherwise the inbox label ("Running"/"Done"/"Blocked"/"Killed").
+pub fn plan_status_label(status: &str) -> String {
+    match status {
+        "" | "pending" | "idle" => "Queued".to_string(),
+        "cancelled" => "Cancelled".to_string(),
+        other => status_label(other),
+    }
+}
+
+/// Symphony's LIVE per-subtask pill (the /plan check-off): an unlinked/pending
+/// subtask reads "Queued" (the symphony vocabulary); a linked run's rolled-up
+/// status reads the inbox label ("Running" with its pulse dot, "Done",
+/// "Blocked", "Killed"). The bridge maps "cancelled" through too — labelled
+/// "Cancelled", colored neutral by color_for_status (a quiet terminal state —
+/// divergence noted).
+pub fn plan_status_pill(id: impl Into<ElementId>, status: &str, cx: &App) -> Stateful<Div> {
+    let label = plan_status_label(status);
+    let pill_status = match status {
+        "" | "idle" => "pending",
+        other => other,
+    };
+    pill_with_label(id, pill_status, label, None, cx)
+}
+
 /// Shared `.pill` builder: status-colored label (+ pulsing dot while
 /// running, + optional elapsed segment).
 fn pill_with_label(
@@ -360,6 +386,22 @@ mod tests {
         assert_eq!(status_phrase("failed", 10.0), "Blocked · 10s");
         assert_eq!(status_phrase("killed", 10.0), "Killed");
         assert_eq!(status_phrase("pending", 0.0), "Queued");
+    }
+
+    #[test]
+    fn plan_status_label_maps_subtask_vocabulary() {
+        // Pending/unlinked → the symphony "Queued" vocabulary.
+        assert_eq!(plan_status_label("pending"), "Queued");
+        assert_eq!(plan_status_label("idle"), "Queued");
+        assert_eq!(plan_status_label(""), "Queued");
+        // Linked runs → the inbox labels (the live check-off).
+        assert_eq!(plan_status_label("running"), "Running");
+        assert_eq!(plan_status_label("done"), "Done"); // bridge already mapped completed→done
+        assert_eq!(plan_status_label("completed"), "Done");
+        assert_eq!(plan_status_label("failed"), "Blocked");
+        assert_eq!(plan_status_label("killed"), "Killed");
+        // Best-effort thread abort.
+        assert_eq!(plan_status_label("cancelled"), "Cancelled");
     }
 
     #[test]

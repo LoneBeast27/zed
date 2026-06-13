@@ -21,8 +21,8 @@ use gpui::{AppContext as _, AsyncApp, WeakEntity};
 use http_client::{AsyncBody, HttpClient, Response};
 
 use super::protocol::{
-    BridgeEvent, PoolRow, ProjectRow, RunRow, TranscriptSnapshot, UsageMeta, pools_from_object,
-    usage_meta_from_object,
+    BridgeEvent, PlanSnapshot, PoolRow, ProjectRow, RunRow, TranscriptSnapshot, UsageMeta,
+    pools_from_object, usage_meta_from_object,
 };
 use super::sse::SseParser;
 use super::store::BridgeStore;
@@ -43,6 +43,9 @@ const OFFLINE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const TRANSCRIPT_POLL_BUSY: Duration = Duration::from_millis(900);
 /// `/transcript` cadence while idle (web 2.5s).
 const TRANSCRIPT_POLL_IDLE: Duration = Duration::from_millis(2500);
+/// `/plan` poll cadence — the symphony check-off fallback when SSE isn't
+/// feeding the plan event (matches the web symphony `/events` 2s loop).
+const PLAN_POLL_INTERVAL: Duration = Duration::from_millis(2000);
 /// SSE reconnect backoff: start here…
 const SSE_BACKOFF_START: Duration = Duration::from_secs(1);
 /// …grow by this much per failed attach…
@@ -330,6 +333,45 @@ pub(super) async fn fetch_and_apply_transcript(
     })
     .map_err(|_| ())?;
     Ok(Some(busy))
+}
+
+/// The `/plan` poll task — spawned by the store ONLY while the Symphony panel
+/// holds a [`super::store::PlanWatch`] (Lightness: panel-presence-gated, never
+/// free-running). SSE feeds the plan event directly when connected; this poll
+/// is the polling-fallback path and a belt-and-suspenders refresh. Follows the
+/// store's active conversation each cycle; exits when the watcher count hits
+/// zero or the store is gone.
+pub(super) async fn plan_poll_loop(
+    http_client: Arc<dyn HttpClient>,
+    watchers: Arc<std::sync::atomic::AtomicUsize>,
+    this: WeakEntity<BridgeStore>,
+    cx: &mut AsyncApp,
+) {
+    loop {
+        if watchers.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            return; // panel hidden — the next watch respawns the loop
+        }
+        let conv = match this.read_with(cx, |store, _| store.transcript_conv.clone()) {
+            Ok(conv) => conv.unwrap_or_default(),
+            Err(_) => return, // store dropped
+        };
+        let client = http_client.clone();
+        let fetched = cx
+            .background_spawn(async move {
+                let url = format!("{BRIDGE_BASE_URL}/plan?conv={conv}");
+                let raw = fetch_json(client.as_ref(), &url).await?;
+                anyhow::Ok(serde_json::from_str::<PlanSnapshot>(&raw)?)
+            })
+            .await;
+        // Fetch failure = the web's silent idle catch — keep the last plan and
+        // retry next tick.
+        if let Ok(plan) = fetched
+            && this.update(cx, |store, cx| store.apply_plan(plan, cx)).is_err()
+        {
+            return; // store dropped
+        }
+        cx.background_executor().timer(PLAN_POLL_INTERVAL).await;
+    }
 }
 
 /// POST a JSON body to a bridge endpoint, returning the raw response body

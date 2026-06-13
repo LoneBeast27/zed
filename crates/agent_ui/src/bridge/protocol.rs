@@ -26,6 +26,56 @@ pub struct RunRow {
     pub chip: Option<String>,
 }
 
+/// One subtask of a persisted plan, as served by `GET /plan` / the SSE
+/// `plan` event (`orchestrator/plans.py` `Subtask.view`). Unlike the
+/// `escalate_plan`-derived [`crate::symphony_panel::PlanTask`] (which has no
+/// run link), this carries the LIVE `run_id` + rolled-up `status`
+/// (pending/running/done/failed/killed/cancelled) — the check-off truth.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct PlanSubtask {
+    #[serde(default)]
+    pub subtask_id: String,
+    #[serde(default)]
+    pub task: String,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub status: String,
+}
+
+/// The `GET /plan` / SSE `plan` snapshot: a plan already grouped into
+/// dependency waves bridge-side (`bridge/state.py` `plan_view`). The bridge
+/// owns the topological derivation now — the native panel renders the waves
+/// it's handed (with its own offline `to_waves` kept as the `/events`
+/// fallback). Liberal: every field defaults so an empty/absent plan degrades
+/// to the empty state instead of erroring.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct PlanSnapshot {
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub conv: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub waves: Vec<Vec<PlanSubtask>>,
+}
+
+impl PlanSnapshot {
+    /// Whether this snapshot carries a real plan (a `plan_id` and at least one
+    /// subtask) — the empty `{plan_id: null, waves: []}` shape the bridge
+    /// returns for a conversation with no plan reads as absent.
+    pub fn is_present(&self) -> bool {
+        self.plan_id.is_some() && self.waves.iter().any(|wave| !wave.is_empty())
+    }
+}
+
 /// One pool row extracted from the usage object
 /// (`pool-name -> { headroom_pct, window }`; `_`-prefixed keys are metadata).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -50,6 +100,13 @@ pub enum BridgeEvent {
     Usage {
         #[serde(flatten)]
         fields: serde_json::Map<String, serde_json::Value>,
+    },
+    /// The latest plan's wave view, pushed when the plan id or any subtask's
+    /// live status changes (the symphony check-off). Flattened so the snapshot
+    /// fields (`plan_id`/`conv`/`summary`/`waves`) ride next to `"type"`.
+    Plan {
+        #[serde(flatten)]
+        plan: PlanSnapshot,
     },
     /// Forward compat: unknown event types deserialize (and are dropped by
     /// the client) instead of erroring the stream.
@@ -344,6 +401,61 @@ mod tests {
         let event: BridgeEvent =
             serde_json::from_str(r#"{"type": "transcript", "lines": []}"#).unwrap();
         assert!(matches!(event, BridgeEvent::Unknown));
+    }
+
+    #[test]
+    fn plan_event_tag_deserializes_with_live_status() {
+        // Fixture truth: the SSE `plan` frame shape (bridge/state.py plan_view
+        // + serve.py emit). Waves are bridge-derived; statuses are live.
+        let event: BridgeEvent = serde_json::from_str(
+            r#"{"type": "plan", "plan_id": "p-abc", "conv": "conv-9",
+                "summary": "two-step port",
+                "waves": [
+                  [{"subtask_id": "t1", "task": "scaffold", "agent": "claude",
+                    "reason": "multi-file", "depends_on": [],
+                    "run_id": "claude-1", "status": "done"}],
+                  [{"subtask_id": "t2", "task": "parse", "agent": "codex",
+                    "depends_on": ["t1"], "run_id": "codex-2",
+                    "status": "running", "future_field": true}]
+                ]}"#,
+        )
+        .unwrap();
+        let BridgeEvent::Plan { plan } = event else {
+            panic!("expected Plan, got {event:?}");
+        };
+        assert!(plan.is_present());
+        assert_eq!(plan.plan_id.as_deref(), Some("p-abc"));
+        assert_eq!(plan.conv, "conv-9");
+        assert_eq!(plan.waves.len(), 2);
+        let t1 = &plan.waves[0][0];
+        assert_eq!(t1.subtask_id, "t1");
+        assert_eq!(t1.status, "done");
+        assert_eq!(t1.run_id.as_deref(), Some("claude-1"));
+        let t2 = &plan.waves[1][0];
+        assert_eq!(t2.status, "running");
+        assert_eq!(t2.depends_on, vec!["t1"]);
+        assert_eq!(t2.reason, None); // missing optional tolerated
+    }
+
+    #[test]
+    fn empty_plan_snapshot_reads_as_absent() {
+        // The bridge returns this shape for a conversation with no plan — it
+        // must not render as a (blank) plan.
+        let plan: PlanSnapshot =
+            serde_json::from_str(r#"{"conv": "c-1", "plan_id": null, "summary": "", "waves": []}"#)
+                .unwrap();
+        assert!(!plan.is_present());
+        // A plan_id with only empty waves is also absent.
+        let plan: PlanSnapshot =
+            serde_json::from_str(r#"{"plan_id": "p", "waves": [[]]}"#).unwrap();
+        assert!(!plan.is_present());
+    }
+
+    #[test]
+    fn plan_snapshot_is_liberal() {
+        let plan: PlanSnapshot = serde_json::from_str("{}").unwrap();
+        assert_eq!(plan, PlanSnapshot::default());
+        assert!(!plan.is_present());
     }
 
     fn usage_object(json: &str) -> serde_json::Map<String, serde_json::Value> {

@@ -1,33 +1,34 @@
 //! The Symphony panel (PARITY_SPEC §4.3) — the plan/wave FSM score, ported
 //! from the approved web reference render (`bridge/ui/symphony.js` +
-//! `panels.css`): orchestrator `escalate_plan` results render as wave bands
-//! (a `v_flex` of bordered cards, top→bottom = execution order, grouped by
-//! `depends_on` topological depth), each wave holding task cards (agent
-//! chip + status pill + clamped title + reason); the first wave carries the
-//! active accent stripe; empty state explains the panel.
+//! `panels.css`): a persisted plan renders as wave bands (a `v_flex` of
+//! bordered cards, top→bottom = execution order, grouped by `depends_on`
+//! topological depth), each wave holding task cards (agent chip + LIVE status
+//! pill + clamped title + reason); the first wave carries the active accent
+//! stripe; empty state explains the panel.
 //!
-//! Data is the web's truth-source feed: `GET /events?conv=…&since=0` polled
-//! at the 2s cadence — and ONLY while the dock shows the panel (the task is
-//! dropped on [`Panel::set_active`]`(false)`, the TranscriptWatch lifetime
-//! law; `/events` rides neither SSE nor the BridgeStore today). The web's
-//! cards are static "Queued" pills — the bridge wires no plan-task ↔ run
-//! linkage yet, so live check-off has no data to ride; the §9 approval gate
-//! says mirror the shipped render, so check-off stays banked bridge-side.
-
-use std::time::Duration;
+//! LIVE CHECK-OFF (the bridge now wires plan↔run linkage): the panel renders
+//! from [`BridgeStore::plan`] — a `PlanSnapshot` off `GET /plan` / the SSE
+//! `plan` event, where each subtask carries its linked run's rolled-up status
+//! (pending/running/done/failed/killed/cancelled). The cards check off as
+//! their runs progress. The store feeds the plan over SSE when connected; a
+//! watch-gated `/plan` poll (held only while the dock shows the panel —
+//! [`Panel::set_active`], the [`PlanWatch`] lifetime law) covers the
+//! polling-fallback window. The bridge owns the wave derivation now; the
+//! panel-local [`to_waves`]/[`extract_plans`] stay as the `/events`-shape
+//! offline fallback + behavior anchors.
 
 use gpui::{
     Action, Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, SharedString, Task, Window, actions,
+    FocusHandle, Focusable, FontWeight, SharedString, Subscription, Window, actions,
 };
 use serde::Deserialize;
 use ui::prelude::*;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::agent_accents::ACCENT;
-use crate::bridge::{self, BRIDGE_BASE_URL, BridgeStore, fetch_json};
+use crate::bridge::{self, BridgeStore, PlanSnapshot, PlanSubtask, PlanWatch};
 use crate::task_board::motion::DECEL;
-use crate::task_board::style::{HAIRLINE_HI, SURFACE_1, agent_chip, empty_state, queued_pill};
+use crate::task_board::style::{HAIRLINE_HI, SURFACE_1, agent_chip, empty_state, plan_status_pill};
 
 actions!(
     symphony_panel,
@@ -37,8 +38,8 @@ actions!(
     ]
 );
 
-/// `/events` cadence (symphony.js `setInterval(loop, 2000)`).
-const EVENTS_POLL_INTERVAL: Duration = Duration::from_millis(2000);
+use std::time::Duration;
+
 /// `.wave { animation: rise .3s var(--decel-curve) }`.
 const WAVE_RISE: Duration = Duration::from_millis(300);
 /// `.task-card { animation: spring-in .26s var(--decel-curve) }`.
@@ -136,86 +137,29 @@ pub fn to_waves(tasks: &[PlanTask]) -> Vec<Vec<PlanTask>> {
     waves.into_values().collect()
 }
 
-/// `GET /events` reply.
-#[derive(Default, Deserialize)]
-struct EventsResponse {
-    #[serde(default)]
-    events: Vec<serde_json::Value>,
-}
-
 pub struct SymphonyPanel {
     focus_handle: FocusHandle,
     position: DockPosition,
-    /// Read for the followed conversation (`state.conv`) each poll cycle.
+    /// The shared bridge store — its [`BridgeStore::plan`] is the panel's
+    /// truth source (fed by SSE / the watch-gated `/plan` poll). Observed for
+    /// `cx.notify()` so check-off updates repaint.
     store: Entity<BridgeStore>,
-    plans: Vec<Plan>,
-    /// The `/events` poll — `Some` only while the dock shows the panel
-    /// ([`Panel::set_active`]); dropping it cancels the loop mid-sleep.
-    poll: Option<Task<()>>,
+    /// Held only while the dock shows the panel ([`Panel::set_active`]) — its
+    /// presence keeps the `/plan` poll alive (the SSE-fallback path).
+    plan_watch: Option<PlanWatch>,
+    _store_subscription: Subscription,
 }
 
 impl SymphonyPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let store = bridge::global_store(cx);
+        let _store_subscription = cx.observe(&store, |_, _, cx| cx.notify());
         Self {
             focus_handle: cx.focus_handle(),
             position: DockPosition::Left,
-            store: bridge::global_store(cx),
-            plans: Vec::new(),
-            poll: None,
-        }
-    }
-
-    /// The dock's visibility signal gates the poll (web `mountSymphony`
-    /// starts the interval / `unmountSymphony` clears it). The loop's first
-    /// iteration fetches immediately, so re-activation is the fresh fetch.
-    fn set_poll_active(&mut self, active: bool, cx: &mut Context<Self>) {
-        if !active {
-            self.poll = None;
-            return;
-        }
-        if self.poll.is_some() {
-            return;
-        }
-        let http_client = cx.http_client();
-        self.poll = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let Ok(conv) = this.read_with(cx, |this, cx| {
-                    this.store
-                        .read(cx)
-                        .transcript_conv
-                        .clone()
-                        .unwrap_or_default()
-                }) else {
-                    return; // panel dropped
-                };
-                let client = http_client.clone();
-                let fetched = cx
-                    .background_spawn(async move {
-                        let url = format!("{BRIDGE_BASE_URL}/events?conv={conv}&since=0");
-                        let raw = fetch_json(client.as_ref(), &url).await?;
-                        let response: EventsResponse = serde_json::from_str(&raw)?;
-                        anyhow::Ok(extract_plans(&response.events))
-                    })
-                    .await;
-                // Fetch failure = the web's silent `catch (e) { /* idle */ }`.
-                if let Ok(plans) = fetched
-                    && this
-                        .update(cx, |this, cx| this.apply_plans(plans, cx))
-                        .is_err()
-                {
-                    return;
-                }
-                cx.background_executor().timer(EVENTS_POLL_INTERVAL).await;
-            }
-        }));
-    }
-
-    /// Change-gated apply (the web's `lastSig` task-id signature, made
-    /// strict: any plan/task field change re-renders).
-    fn apply_plans(&mut self, plans: Vec<Plan>, cx: &mut Context<Self>) {
-        if self.plans != plans {
-            self.plans = plans;
-            cx.notify();
+            store,
+            plan_watch: None,
+            _store_subscription,
         }
     }
 
@@ -247,18 +191,22 @@ impl SymphonyPanel {
     }
 
     /// One `.score`: summary line over the wave bands (a `v_flex` of
-    /// bordered cards — RUST_PORT_NOTES §4.3).
-    fn render_score(&self, plan_ix: usize, plan: &Plan, cx: &App) -> AnyElement {
+    /// bordered cards — RUST_PORT_NOTES §4.3). Waves are bridge-derived
+    /// (`PlanSnapshot::waves`); each card checks off from its subtask's live
+    /// status.
+    fn render_score(&self, plan: &PlanSnapshot, cx: &App) -> AnyElement {
+        let plan_ix = 0usize; // one live plan at a time off /plan
         let colors = cx.theme().colors();
         let summary = if plan.summary.is_empty() {
             "plan".to_string()
         } else {
             plan.summary.clone()
         };
-        let waves: Vec<AnyElement> = to_waves(&plan.tasks)
-            .into_iter()
+        let waves: Vec<AnyElement> = plan
+            .waves
+            .iter()
             .enumerate()
-            .map(|(wave_ix, wave)| self.render_wave(plan_ix, wave_ix, &wave, cx))
+            .map(|(wave_ix, wave)| self.render_wave(plan_ix, wave_ix, wave, cx))
             .collect();
         v_flex()
             .w_full()
@@ -281,7 +229,7 @@ impl SymphonyPanel {
         &self,
         plan_ix: usize,
         wave_ix: usize,
-        wave: &[PlanTask],
+        wave: &[PlanSubtask],
         cx: &App,
     ) -> AnyElement {
         let colors = cx.theme().colors();
@@ -339,14 +287,15 @@ impl SymphonyPanel {
         .into_any_element()
     }
 
-    /// One `.task-card`: agent chip + the "Queued" pill over the clamped
-    /// title (and the routing reason when present).
+    /// One `.task-card`: agent chip + the LIVE status pill (the check-off:
+    /// Queued → Running → Done/Blocked/Killed as the linked run progresses)
+    /// over the clamped title (and the routing reason when present).
     fn render_card(
         &self,
         plan_ix: usize,
         wave_ix: usize,
         card_ix: usize,
-        task: &PlanTask,
+        task: &PlanSubtask,
         cx: &App,
     ) -> AnyElement {
         let colors = cx.theme().colors();
@@ -369,7 +318,11 @@ impl SymphonyPanel {
                     .gap(px(8.))
                     .mb(px(9.))
                     .child(agent_chip(&task.agent, cx))
-                    .child(queued_pill(ElementId::Name(format!("{key}-pill").into()), cx)),
+                    .child(plan_status_pill(
+                        ElementId::Name(format!("{key}-pill").into()),
+                        &task.status,
+                        cx,
+                    )),
             )
             .child(
                 div()
@@ -398,23 +351,17 @@ impl SymphonyPanel {
 
 impl Render for SymphonyPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body: AnyElement = if self.plans.is_empty() {
-            empty_state(
+        let plan = self.store.read(cx).plan.clone();
+        let body: AnyElement = match plan.filter(PlanSnapshot::is_present) {
+            None => empty_state(
                 IconName::AudioOn,
                 "No plans yet",
                 "Plans from the judgment tier render here as waves — top-to-bottom \
                  execution order, cards checking off live as agents complete.",
                 cx,
             )
-            .into_any_element()
-        } else {
-            let plans = self.plans.clone();
-            let scores: Vec<AnyElement> = plans
-                .iter()
-                .enumerate()
-                .map(|(plan_ix, plan)| self.render_score(plan_ix, plan, cx))
-                .collect();
-            v_flex()
+            .into_any_element(),
+            Some(plan) => v_flex()
                 .id("symphony-scroll")
                 .size_full()
                 .overflow_y_scroll()
@@ -422,8 +369,8 @@ impl Render for SymphonyPanel {
                 .pt(px(20.))
                 .pb(px(32.))
                 .items_start()
-                .children(scores)
-                .into_any_element()
+                .child(self.render_score(&plan, cx))
+                .into_any_element(),
         };
         let colors = cx.theme().colors();
         v_flex()
@@ -468,9 +415,17 @@ impl Panel for SymphonyPanel {
     }
 
     fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
-        // The native route mount/unmount — `/events` polls only while the
-        // dock shows the panel.
-        self.set_poll_active(active, cx);
+        // The native route mount/unmount — the `/plan` poll (the SSE-fallback
+        // path) lives exactly as long as the dock shows the panel
+        // (PlanWatch / TranscriptWatch pattern). SSE feeds the plan directly
+        // when connected; the watch covers the polling-fallback window.
+        if active {
+            if self.plan_watch.is_none() {
+                self.plan_watch = Some(self.store.update(cx, |store, cx| store.watch_plan(cx)));
+            }
+        } else {
+            self.plan_watch = None;
+        }
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {

@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext as _, Entity, Task};
 
-use super::client::{connection_loop, fetch_and_apply_transcript, transcript_poll_loop};
+use super::client::{
+    connection_loop, fetch_and_apply_transcript, plan_poll_loop, transcript_poll_loop,
+};
 use super::protocol::{
-    BridgeEvent, PoolRow, ProjectRow, RunRow, TranscriptSnapshot, UsageMeta, pools_from_object,
-    usage_meta_from_object,
+    BridgeEvent, PlanSnapshot, PoolRow, ProjectRow, RunRow, TranscriptSnapshot, UsageMeta,
+    pools_from_object, usage_meta_from_object,
 };
 
 /// Local elapsed-tick cadence while any run is `running`.
@@ -51,6 +53,10 @@ pub struct BridgeStore {
     /// The conversation the transcript poll follows. `None` = the bridge's
     /// default (latest); the poll canonicalizes it to the served id.
     pub transcript_conv: Option<String>,
+    /// The last plan/wave snapshot (Symphony live check-off) — `None` until
+    /// the first `plan` event / `/plan` poll. Fed by SSE when connected and by
+    /// the watch-gated `/plan` poll in the polling-fallback window.
+    pub plan: Option<PlanSnapshot>,
     /// `GET /projects` rows — fetched lazily by the transcript poll when the
     /// crumb can't resolve the conversation's project name yet.
     projects: Vec<ProjectRow>,
@@ -72,6 +78,12 @@ pub struct BridgeStore {
     transcript_task: Option<Task<()>>,
     /// In-flight one-shot refetch (post-send / conv switch).
     transcript_refetch: Option<Task<()>>,
+    /// Live [`PlanWatch`] count — the `/plan` poll reads it each wake and
+    /// exits at zero (Symphony panel presence gates the poll). SSE feeds the
+    /// plan directly when connected; this poll is the polling-window fallback.
+    plan_watchers: Arc<AtomicUsize>,
+    /// The `/plan` poll task — replaced on every 0→1 watcher transition.
+    plan_task: Option<Task<()>>,
 }
 
 impl Default for BridgeStore {
@@ -84,6 +96,7 @@ impl Default for BridgeStore {
             transport: Transport::None,
             transcript: None,
             transcript_conv: None,
+            plan: None,
             projects: Vec::new(),
             board_received_at: Instant::now(),
             last_event_at: None,
@@ -91,6 +104,8 @@ impl Default for BridgeStore {
             transcript_watchers: Arc::new(AtomicUsize::new(0)),
             transcript_task: None,
             transcript_refetch: None,
+            plan_watchers: Arc::new(AtomicUsize::new(0)),
+            plan_task: None,
         }
     }
 }
@@ -103,6 +118,19 @@ pub struct TranscriptWatch {
 }
 
 impl Drop for TranscriptWatch {
+    fn drop(&mut self) {
+        self.watchers.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// RAII registration of a live plan consumer (the Symphony panel). Dropping
+/// it pauses the `/plan` poll on the next wake — the [`TranscriptWatch`]
+/// pattern, cx-free teardown.
+pub struct PlanWatch {
+    watchers: Arc<AtomicUsize>,
+}
+
+impl Drop for PlanWatch {
     fn drop(&mut self) {
         self.watchers.fetch_sub(1, Ordering::SeqCst);
     }
@@ -160,6 +188,12 @@ impl BridgeStore {
                     changed = true;
                 }
             }
+            BridgeEvent::Plan { plan } => {
+                if self.plan.as_ref() != Some(&plan) {
+                    self.plan = Some(plan);
+                    changed = true;
+                }
+            }
             BridgeEvent::Unknown => {}
         }
         if changed {
@@ -182,6 +216,31 @@ impl BridgeStore {
             }));
         }
         TranscriptWatch { watchers }
+    }
+
+    /// Registers a plan consumer (the Symphony panel) and (re)starts the
+    /// `/plan` poll on the 0→1 transition. SSE feeds [`Self::plan`] directly
+    /// when connected; this poll covers the polling-fallback window so the
+    /// panel checks off either way. The poll follows [`Self::transcript_conv`]
+    /// (the active conversation) each cycle.
+    pub fn watch_plan(&mut self, cx: &mut gpui::Context<Self>) -> PlanWatch {
+        let watchers = self.plan_watchers.clone();
+        if watchers.fetch_add(1, Ordering::SeqCst) == 0 {
+            let http_client = cx.http_client();
+            let loop_watchers = watchers.clone();
+            self.plan_task = Some(cx.spawn(async move |this, cx| {
+                plan_poll_loop(http_client, loop_watchers, this, cx).await
+            }));
+        }
+        PlanWatch { watchers }
+    }
+
+    /// Apply a `/plan` poll result — change-gated like every other apply.
+    pub(super) fn apply_plan(&mut self, plan: PlanSnapshot, cx: &mut gpui::Context<Self>) {
+        if self.plan.as_ref() != Some(&plan) {
+            self.plan = Some(plan);
+            cx.notify();
+        }
     }
 
     /// Follow a different conversation (`None` = the bridge default) and
