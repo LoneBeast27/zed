@@ -9,19 +9,24 @@
 //! LIVE CHECK-OFF (the bridge now wires plan↔run linkage): the panel renders
 //! from [`BridgeStore::plan`] — a `PlanSnapshot` off `GET /plan` / the SSE
 //! `plan` event, where each subtask carries its linked run's rolled-up status
-//! (pending/running/done/failed/killed/cancelled). The cards check off as
-//! their runs progress. The store feeds the plan over SSE when connected; a
-//! watch-gated `/plan` poll (held only while the dock shows the panel —
+//! (pending/running/done/failed/killed). The cards check off as their runs
+//! progress. The store feeds the plan over SSE when connected; a watch-gated
+//! `/plan` poll (held only while the dock shows the panel —
 //! [`Panel::set_active`], the [`PlanWatch`] lifetime law) covers the
-//! polling-fallback window. The bridge owns the wave derivation now; the
-//! panel-local [`to_waves`]/[`extract_plans`] stay as the `/events`-shape
-//! offline fallback + behavior anchors.
+//! polling-fallback window.
+//!
+//! The bridge OWNS the wave derivation (`bridge/state.py` `plan_view` →
+//! `orchestrator/plans.py` `to_waves`) and is the single source of truth: the
+//! panel renders the bands it is handed via [`PlanSnapshot::waves`] and never
+//! re-derives topology natively. (A panel-local `to_waves`/`extract_plans`
+//! port once lived here as a notional `/events`-shape fallback; it was never
+//! wired into the render path — dead code masquerading as a live fallback,
+//! the B1 drift trap — and was deleted in the fix pass.)
 
 use gpui::{
     Action, Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, SharedString, Subscription, Window, actions,
 };
-use serde::Deserialize;
 use ui::prelude::*;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
@@ -44,98 +49,6 @@ use std::time::Duration;
 const WAVE_RISE: Duration = Duration::from_millis(300);
 /// `.task-card { animation: spring-in .26s var(--decel-curve) }`.
 const CARD_SPRING_IN: Duration = Duration::from_millis(260);
-
-/// One task off an `escalate_plan` result (`judgment.py` plan shape).
-/// Liberal like the bridge protocol — every field defaults.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-pub struct PlanTask {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub task: String,
-    #[serde(default)]
-    pub agent: String,
-    #[serde(default)]
-    pub reason: Option<String>,
-    #[serde(default)]
-    pub depends_on: Vec<String>,
-}
-
-/// One rendered plan (`extractPlans`): the judgment summary + its tasks.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Plan {
-    pub summary: String,
-    pub tasks: Vec<PlanTask>,
-}
-
-/// `extractPlans(events)` — `kind == "tool" && name == "escalate_plan"`
-/// events whose result carries a plan ARRAY (error results have no `plan`
-/// key and are skipped, exactly like the web filter).
-pub fn extract_plans(events: &[serde_json::Value]) -> Vec<Plan> {
-    events
-        .iter()
-        .filter_map(|event| {
-            let object = event.as_object()?;
-            if object.get("kind").and_then(|v| v.as_str()) != Some("tool")
-                || object.get("name").and_then(|v| v.as_str()) != Some("escalate_plan")
-            {
-                return None;
-            }
-            let result = object.get("result")?.as_object()?;
-            let plan = result.get("plan")?.as_array()?;
-            Some(Plan {
-                summary: result
-                    .get("summary")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                tasks: plan
-                    .iter()
-                    .map(|task| serde_json::from_value(task.clone()).unwrap_or_default())
-                    .collect(),
-            })
-        })
-        .collect()
-}
-
-/// `toWaves(tasks)` — group tasks into bands by dependency depth
-/// (topological band; unknown dep ids don't count, and the JS `seen`-set
-/// cycle guard ports 1:1 so a dependency cycle settles instead of
-/// recursing forever). Insertion order is kept within a wave.
-pub fn to_waves(tasks: &[PlanTask]) -> Vec<Vec<PlanTask>> {
-    use std::collections::{BTreeMap, HashMap, HashSet};
-    let by_id: HashMap<&str, &PlanTask> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
-    fn depth(
-        task: &PlanTask,
-        by_id: &HashMap<&str, &PlanTask>,
-        seen: &HashSet<String>,
-    ) -> usize {
-        let deps: Vec<&PlanTask> = task
-            .depends_on
-            .iter()
-            .filter(|dep| !seen.contains(*dep))
-            .filter_map(|dep| by_id.get(dep.as_str()).copied())
-            .collect();
-        if deps.is_empty() {
-            return 0;
-        }
-        let mut seen = seen.clone();
-        seen.insert(task.id.clone());
-        1 + deps
-            .iter()
-            .map(|dep| depth(dep, by_id, &seen))
-            .max()
-            .unwrap_or(0)
-    }
-    let mut waves: BTreeMap<usize, Vec<PlanTask>> = BTreeMap::new();
-    for task in tasks {
-        waves
-            .entry(depth(task, &by_id, &HashSet::new()))
-            .or_default()
-            .push(task.clone());
-    }
-    waves.into_values().collect()
-}
 
 pub struct SymphonyPanel {
     focus_handle: FocusHandle,
@@ -448,7 +361,3 @@ impl Panel for SymphonyPanel {
         8
     }
 }
-
-#[cfg(test)]
-#[path = "symphony_panel_tests.rs"]
-mod tests;

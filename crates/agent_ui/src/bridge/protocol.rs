@@ -27,10 +27,10 @@ pub struct RunRow {
 }
 
 /// One subtask of a persisted plan, as served by `GET /plan` / the SSE
-/// `plan` event (`orchestrator/plans.py` `Subtask.view`). Unlike the
-/// `escalate_plan`-derived [`crate::symphony_panel::PlanTask`] (which has no
-/// run link), this carries the LIVE `run_id` + rolled-up `status`
-/// (pending/running/done/failed/killed/cancelled) — the check-off truth.
+/// `plan` event (`orchestrator/plans.py` `Subtask.view`). Carries the LIVE
+/// `run_id` + rolled-up `status` (pending/running/done/failed/killed) — the
+/// check-off truth. The bridge owns the topological derivation; the native
+/// panel renders the waves it is handed and never re-derives them.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct PlanSubtask {
     #[serde(default)]
@@ -51,10 +51,10 @@ pub struct PlanSubtask {
 
 /// The `GET /plan` / SSE `plan` snapshot: a plan already grouped into
 /// dependency waves bridge-side (`bridge/state.py` `plan_view`). The bridge
-/// owns the topological derivation now — the native panel renders the waves
-/// it's handed (with its own offline `to_waves` kept as the `/events`
-/// fallback). Liberal: every field defaults so an empty/absent plan degrades
-/// to the empty state instead of erroring.
+/// owns the topological derivation (the single source of truth) — the native
+/// panel renders the waves it's handed and never re-derives them. Liberal:
+/// every field defaults so an empty/absent plan degrades to the empty state
+/// instead of erroring.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct PlanSnapshot {
     #[serde(default)]
