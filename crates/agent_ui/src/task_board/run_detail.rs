@@ -198,6 +198,13 @@ impl RunDrawer {
     /// the background executor. The bridge terminates the run's tracked child
     /// process and marks it killed; the drawer's own tail-poll then lands the
     /// killed status (no local detail flip needed). No-op unless running.
+    ///
+    /// On a POST FAILURE (P2: bridge 500, 404 from a since-reaped run, refused
+    /// connection) the button must NOT stick on the disabled "Aborting…"
+    /// placeholder forever — the tail-poll only clears `aborting` once the run
+    /// reaches a non-running status, which never happens if the abort didn't
+    /// land. So a failed POST resets `aborting` and notifies, re-arming the
+    /// affordance for a retry.
     pub(super) fn abort(&mut self, cx: &mut Context<Self>) {
         let Some(detail) = self.detail.as_ref() else {
             return;
@@ -208,13 +215,22 @@ impl RunDrawer {
         self.aborting = true;
         let run_id = detail.run_id.clone();
         let http_client: Arc<dyn HttpClient> = cx.http_client();
-        self._abort = Some(cx.spawn(async move |_this, cx| {
-            cx.background_spawn(async move {
-                let url = format!("{BRIDGE_BASE_URL}/run/{run_id}/abort");
-                post_json(http_client.as_ref(), &url, "{}".to_string()).await
-            })
-            .await
-            .ok();
+        self._abort = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let url = format!("{BRIDGE_BASE_URL}/run/{run_id}/abort");
+                    post_json(http_client.as_ref(), &url, "{}".to_string()).await
+                })
+                .await;
+            if result.is_err() {
+                // Abort didn't land — re-arm the button so the user can retry
+                // (the poll would otherwise never clear `aborting`).
+                this.update(cx, |this, cx| {
+                    this.aborting = false;
+                    cx.notify();
+                })
+                .ok();
+            }
         }));
         cx.notify();
     }
@@ -402,51 +418,5 @@ impl Focusable for RunDrawer {
 impl EventEmitter<DismissDrawer> for RunDrawer {}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn slide_travel_is_sheet_width_terms_at_every_panel_width() {
-        // Narrow panel (Z1 default 420px): sheet resolves to 92% = 386.4px,
-        // travel = 1.02 × that — the geometry where the old panel-relative
-        // math coincidentally agreed (within the 2% border clearance).
-        assert!((slide_offset(420., 1.0) - (-394.128)).abs() < 1e-3);
-        // Wide panel (1200px): sheet caps at 560px, travel = 571.2px —
-        // NOT the old 0.92 × panel = 1104px over-travel (§8.7(b) dead zone).
-        assert!((slide_offset(1200., 1.0) - (-571.2)).abs() < 1e-3);
-        // Crossover panel width (560/0.92 ≈ 608.7): both formulas agree.
-        assert!((slide_offset(608.7, 1.0) - (-571.2)).abs() < 0.1);
-        // Settled (out = 0) is exactly in place.
-        assert_eq!(slide_offset(1200., 0.0), 0.0);
-        // Travel scales linearly with the animator's `out`.
-        assert!((slide_offset(1200., 0.5) - (-285.6)).abs() < 1e-3);
-    }
-
-    #[test]
-    fn run_detail_deserializes_liberally() {
-        let detail: RunDetail = serde_json::from_str(
-            r#"{
-                "run_id": "r-9", "agent": "claude", "status": "running",
-                "elapsed_s": 12.5, "task": "do the thing",
-                "chip": "claude · code-heavy · 92%",
-                "usage": {"tokens": 1234, "cost": null},
-                "events": [
-                    {"kind": "spawn", "payload": {"a": 1}},
-                    {"kind": "log", "payload": "line"}
-                ],
-                "unknown_field": true
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(detail.run_id, "r-9");
-        assert_eq!(detail.status, "running");
-        assert_eq!(detail.events.len(), 2);
-        assert_eq!(detail.events[0].kind, "spawn");
-        assert_eq!(detail.text, None);
-        assert_eq!(detail.error, None);
-
-        // Minimal payload also parses.
-        let minimal: RunDetail = serde_json::from_str("{}").unwrap();
-        assert_eq!(minimal.events.len(), 0);
-    }
-}
+#[path = "run_detail_tests.rs"]
+mod tests;
