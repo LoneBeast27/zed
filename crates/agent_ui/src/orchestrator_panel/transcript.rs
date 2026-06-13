@@ -12,8 +12,8 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, AppContext as _, Entity, FontWeight,
-    ListAlignment, ListState, SharedString, TextStyleRefinement, Window, pulsating_between,
+    AnyElement, App, AppContext as _, Entity, FontWeight, ListAlignment, ListState, SharedString,
+    TextStyleRefinement, Window,
 };
 use markdown::{Markdown, MarkdownFont, MarkdownStyle};
 use settings::Settings as _;
@@ -21,6 +21,7 @@ use ui::prelude::*;
 
 use crate::agent_accents::GREET_BLOOM;
 use crate::bridge::{TranscriptMessage, TranscriptRun, TranscriptSnapshot};
+use crate::task_board::motion;
 use crate::task_board::style::{INLINE_CODE_BG, SURFACE_2B};
 
 /// How long a freshly-appended message keeps its one-shot entrance wrapper
@@ -203,24 +204,25 @@ pub(super) fn prose_style(window: &Window, cx: &App) -> MarkdownStyle {
     style
 }
 
-/// The trailing "Orchestrating…" shimmer item while busy — opacity pulse
-/// via `pulsating_between` (the `ui` thread_item idiom; a true gradient
-/// text-sweep needs a custom canvas paint and stays banked).
+/// The trailing "Orchestrating…" shimmer item while busy — the gradient
+/// text-sweep (`motion::shimmer`), with pulsate as the reduced-motion
+/// fallback. Replaces the prior `pulsating_between` placeholder.
 pub(super) fn render_shimmer(cx: &App) -> AnyElement {
-    div()
-        .mb(px(26.))
-        .text_size(px(15.))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(cx.theme().colors().text_placeholder)
-        .child("Orchestrating…")
-        .with_animation(
-            ElementId::Name("orchestrating-shimmer".into()),
-            Animation::new(Duration::from_millis(1400))
-                .repeat()
-                .with_easing(pulsating_between(0.4, 0.92)),
-            |label, value| label.opacity(value),
-        )
-        .into_any_element()
+    // The §4.1 in-progress label as the true gradient text-sweep (web
+    // `.shimmer-label`): a highlight band travels through "Orchestrating…"
+    // while busy, stopping cleanly when the reply lands (the element only
+    // exists while the shimmer item is listed). Pulsate stays the reduced-
+    // motion fallback — see `motion::ShimmerMode`.
+    div().mb(px(26.)).child(motion::shimmer(
+        ElementId::Name("orchestrating-shimmer".into()),
+        "Orchestrating…",
+        px(15.),
+        FontWeight::MEDIUM,
+        cx.theme().colors().text_placeholder,
+        crate::agent_accents::SHIMMER_HIGHLIGHT.into(),
+        motion::ShimmerMode::Sweep,
+    ))
+    .into_any_element()
 }
 
 /// Resolve a greeting display family with a non-mono safety net: gpui's

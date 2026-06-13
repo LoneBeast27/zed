@@ -20,6 +20,7 @@ mod animated;
 mod curves;
 mod fades;
 mod numeric_roll;
+mod shimmer;
 
 pub use animated::{
     AnimatedColor, AnimatedValue, STATE_FADE, STATE_FADE_WINDOW, StateFade, mix,
@@ -27,3 +28,4 @@ pub use animated::{
 pub use curves::{CubicBezier, DECEL, EFFECTS, EXIT_POINTS, MotionCurve, SPATIAL, exit_eval};
 pub use fades::StateFades;
 pub use numeric_roll::{NumericRoll, ROLL_MS, RollValue};
+pub use shimmer::{PULSATE_MS, SWEEP_MS, Shimmer, ShimmerMode, shimmer};

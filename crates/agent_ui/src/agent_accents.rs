@@ -36,6 +36,10 @@ pub const STATUS_DONE: Rgba = rgba_hex(0x8ab4f8ff);
 /// `rgba(255, 255, 255, 0.45)` — the idle/neutral dot.
 pub const STATUS_IDLE: Rgba = rgba_hex(0xffffff73);
 
+/// `rgba(250, 249, 245, 0.85)` — the highlight the in-progress label shimmer
+/// sweeps through its glyphs (web `chat.css` `.shimmer-label` gradient stop).
+pub const SHIMMER_HIGHLIGHT: Rgba = rgba_hex(0xfaf9f5d9);
+
 /// Vendor accent for an agent name (case-insensitive, substring-tolerant:
 /// `"claude-fable"`, `"OpenAI Codex"`, `"gemini-3"` all resolve). Unknown
 /// agents keep the web's neutral `.sw` default ([`TEXT_3`], app.css:255) —

@@ -5,7 +5,7 @@
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, Entity, FontWeight, SharedString,
-    TextStyleRefinement, Window, pulsating_between, relative,
+    TextStyleRefinement, Window, relative,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use ui::prelude::*;
@@ -125,19 +125,21 @@ impl AdversaryPanel {
                 .text_size(px(13.))
                 .child(MarkdownElement::new(markdown, column_prose_style(window, cx)))
                 .into_any_element(),
-            // `.shimmer-label` — pulsate stands in for the gradient sweep
-            // (the §4.1 thread_item idiom ruling).
+            // `.shimmer-label` — the gradient text-sweep (web `chat.css`);
+            // a highlight band travels through "Thinking…" while the column
+            // is pending, stopping when the result lands. Pulsate is the
+            // reduced-motion fallback (`motion::ShimmerMode::Pulsate`).
             None => div()
                 .text_size(px(13.))
-                .text_color(cx.theme().colors().text_placeholder)
-                .child("Thinking…")
-                .with_animation(
+                .child(crate::task_board::motion::shimmer(
                     ElementId::Name(format!("adv-shimmer-{vendor}").into()),
-                    Animation::new(std::time::Duration::from_millis(1400))
-                        .repeat()
-                        .with_easing(pulsating_between(0.4, 0.92)),
-                    |label, value| label.opacity(value),
-                )
+                    "Thinking…",
+                    px(13.),
+                    FontWeight::default(),
+                    cx.theme().colors().text_placeholder,
+                    crate::agent_accents::SHIMMER_HIGHLIGHT.into(),
+                    crate::task_board::motion::ShimmerMode::Sweep,
+                ))
                 .into_any_element(),
         };
         let column = v_flex()
