@@ -32,6 +32,20 @@ use std::time::Instant;
 /// critically-damped spring, so ω ≈ 14 → ~240ms.)
 pub const CHROME_OMEGA: f32 = 14.0;
 
+/// Default settle threshold as a FRACTION of the retarget span (P6): the
+/// spring is done when it is within this fraction of `|target − x0|` of its
+/// target. Span-relative so the predicate is SCALE-INVARIANT — a unit-scale
+/// reveal (0→1) and a pixel-scale width spring settle at the same *visual*
+/// closeness, comfortably under the §8.7 ">10% of delta in one frame = snap"
+/// gate. (The old hardcoded `0.5` was a pixel-scale assumption that, on the
+/// unit-scale reveal, meant "settled within 50% of the whole range".)
+const SETTLE_FRAC: f32 = 0.005;
+
+/// Absolute floor for the span used in the settle test, so a near-zero-span
+/// retarget (degenerate; `retarget` already no-ops an exact-same target) can
+/// never make the threshold collapse to 0 and deadlock the frame pump.
+const MIN_SETTLE_SPAN: f32 = 1e-3;
+
 /// A critically-damped (or configurable-ratio) analytic spring. State is the
 /// start position/velocity and the target captured at the last retarget plus
 /// a `started` Instant; `position`/`velocity` at any later instant are
@@ -53,6 +67,13 @@ pub struct Spring {
     started: Option<Instant>,
     /// Identity key for the latest retarget (frame-pump wrapper keying).
     generation: usize,
+    /// `|target − x0|` captured at the last retarget — the span the settle
+    /// test scales against so it is scale-invariant (P6).
+    span: f32,
+    /// Optional ABSOLUTE settle epsilons (position, velocity) that override the
+    /// span-relative default — for a consumer that wants an explicit fixed
+    /// tolerance (e.g. a pixel-scale "within 0.25px"). `None` = span-relative.
+    abs_eps: Option<(f32, f32)>,
 }
 
 impl Spring {
@@ -66,6 +87,8 @@ impl Spring {
             zeta: 1.0,
             started: None,
             generation: 0,
+            span: 0.,
+            abs_eps: None,
         }
     }
 
@@ -73,6 +96,16 @@ impl Spring {
     /// >1 over-damped sluggish). Chrome leaves it at critical.
     pub fn with_damping(mut self, zeta: f32) -> Self {
         self.zeta = zeta.max(0.0);
+        self
+    }
+
+    /// Pin ABSOLUTE settle epsilons (position, velocity) instead of the
+    /// span-relative default (P6) — for a consumer that wants a fixed tolerance
+    /// regardless of span (e.g. pixel geometry: "settled within 0.25px and
+    /// 0.25px/s"). Without this, [`animating`](Self::animating) scales the
+    /// threshold to the retarget span so it is correct at any scale.
+    pub fn with_epsilons(mut self, dx_eps: f32, v_eps: f32) -> Self {
+        self.abs_eps = Some((dx_eps.max(0.0), v_eps.max(0.0)));
         self
     }
 
@@ -90,6 +123,10 @@ impl Spring {
         self.x0 = self.position_at(t);
         self.v0 = self.velocity_at(t);
         self.target = to;
+        // The span the settle test scales against (P6) — captured from the
+        // continuous current position, so a mid-flight re-aim re-scopes the
+        // tolerance to the NEW journey's size.
+        self.span = (self.target - self.x0).abs();
         self.started = Some(now);
         self.generation = self.generation.wrapping_add(1);
     }
@@ -127,10 +164,17 @@ impl Spring {
         self.generation
     }
 
-    /// Whether the spring is still settling — within ~0.5px of target AND
-    /// nearly stopped means done (a critically-damped spring approaches
+    /// Whether the spring is still settling — close to target AND nearly
+    /// stopped means done (a critically-damped spring approaches
     /// asymptotically; this is the practical settle test the frame pump uses
     /// to stop scheduling frames, §8 idle cost).
+    ///
+    /// The tolerances are SPAN-RELATIVE by default (P6): position within
+    /// `SETTLE_FRAC × span` and velocity within `SETTLE_FRAC × span × ω` (peak
+    /// velocity scales with span·ω). This is scale-invariant — a unit-scale
+    /// reveal (0→1) and a pixel-scale width spring both settle at the same
+    /// *visual* closeness, well under the §8.7 10%-of-delta gate. A consumer
+    /// can pin fixed absolute tolerances via [`with_epsilons`](Self::with_epsilons).
     pub fn animating(&self) -> bool {
         match self.started {
             None => false,
@@ -138,9 +182,22 @@ impl Spring {
                 let t = started.elapsed().as_secs_f32();
                 let dx = (self.position_at(t) - self.target).abs();
                 let v = self.velocity_at(t).abs();
-                dx > 0.5 || v > 0.5
+                let (dx_eps, v_eps) = self.settle_epsilons();
+                dx > dx_eps || v > v_eps
             }
         }
+    }
+
+    /// The (position, velocity) settle tolerances: the pinned absolute pair if
+    /// set, else span-relative (`SETTLE_FRAC × span` for position, the same
+    /// fraction of the span's characteristic velocity `span × ω` for velocity),
+    /// with a span floor so a degenerate near-zero-span flight never deadlocks.
+    fn settle_epsilons(&self) -> (f32, f32) {
+        if let Some(eps) = self.abs_eps {
+            return eps;
+        }
+        let span = self.span.max(MIN_SETTLE_SPAN);
+        (SETTLE_FRAC * span, SETTLE_FRAC * span * self.omega)
     }
 
     fn elapsed_secs(&self, now: Instant) -> f32 {
@@ -330,5 +387,72 @@ mod tests {
     fn settle_helper_agrees_with_animating() {
         let s = Spring::settled(0.0, CHROME_OMEGA);
         assert!(settle_within(&s, Duration::from_millis(10)));
+    }
+
+    // --- P9: the settle predicate the frame pump gates on (§8 idle cost) is
+    // pinned on the production RETARGET path, not just jump()/constructor. ----
+
+    #[test]
+    fn retarget_settles_and_stops_pumping() {
+        // Advance a critically-damped flight well past its settle time and
+        // assert BOTH halves of the pump's stop condition: position essentially
+        // at target AND `!animating()` (so the frame pump stops scheduling).
+        let mut s = Spring::settled(0.0, CHROME_OMEGA);
+        s.retarget(100.0);
+        for _ in 0..200 {
+            advance(&mut s, 0.005); // 1.0s total — far past the ~250ms settle
+        }
+        assert!(
+            (s.position() - 100.0).abs() < 0.5,
+            "settled near target, at {}",
+            s.position()
+        );
+        assert!(!s.animating(), "a settled retarget must stop the frame pump");
+    }
+
+    #[test]
+    fn unit_scale_spring_does_not_report_settled_before_it_arrives() {
+        // The P6 regression guard. The reveal drives the spring on a UNIT
+        // fraction (0→1). The old hardcoded `dx>0.5 || v>0.5` test reported a
+        // unit-scale spring SETTLED at ~96% revealed (the velocity clause bit
+        // while position was still 0.04 short — 4% residual, scraping under
+        // §8.7 by accident). With span-relative epsilons it must still report
+        // ANIMATING at ~96%, only settling once genuinely at the target.
+        let mut s = Spring::settled(0.0, CHROME_OMEGA);
+        s.retarget(1.0);
+        // Advance to ~96% revealed (the doc's measured premature-stop point).
+        let mut guard = 0;
+        while s.position() < 0.96 && guard < 1000 {
+            advance(&mut s, 0.002);
+            guard += 1;
+        }
+        assert!(s.position() >= 0.96 && s.position() < 1.0, "at {}", s.position());
+        assert!(
+            s.animating(),
+            "a unit-scale spring at {} is NOT settled — the old 0.5 \
+             pixel-scale threshold wrongly stopped here",
+            s.position()
+        );
+        // And it DOES settle once it actually reaches the target.
+        for _ in 0..300 {
+            advance(&mut s, 0.005);
+        }
+        assert!((s.position() - 1.0).abs() < 0.005, "arrives at {}", s.position());
+        assert!(!s.animating(), "settles once genuinely at the unit target");
+    }
+
+    #[test]
+    fn with_epsilons_pins_absolute_tolerances() {
+        // An explicit fixed tolerance overrides the span-relative default — a
+        // consumer can opt into "settled within 2.0 units" regardless of span.
+        let mut s = Spring::settled(0.0, CHROME_OMEGA).with_epsilons(2.0, 2.0);
+        s.retarget(100.0);
+        for _ in 0..200 {
+            advance(&mut s, 0.005);
+        }
+        // The looser absolute epsilon settles earlier than the 0.5% span default
+        // would (0.5 units) — within 2.0 here.
+        assert!(!s.animating(), "absolute epsilons settle within their tolerance");
+        assert!((s.position() - 100.0).abs() < 2.0);
     }
 }
