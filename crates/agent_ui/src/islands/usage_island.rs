@@ -28,7 +28,9 @@ use workspace::Workspace;
 
 use crate::agent_accents::{STATUS_ERROR, Tone, tone_for_used, used_pct};
 use crate::bridge::{self, BridgeStore};
-use crate::task_board::motion::{AnimatedColor, AnimatedValue, EFFECTS, SPATIAL, StateFade};
+use crate::task_board::motion::{
+    AnimatedColor, AnimatedValue, EFFECTS, RollValue, SPATIAL, StateFade,
+};
 use crate::task_board::style::HAIRLINE_HI;
 use crate::usage_panel::{UsagePanel, fmt_pct};
 
@@ -80,6 +82,11 @@ pub struct UsageIsland {
     current_face: Option<Face>,
     outgoing_face: Option<Face>,
     face_fade: StateFade,
+    /// The rest pill's tightest-pool % as a numeric roll (web `rollNumber`
+    /// on the island %). A %-only change rolls the digits in place — no face
+    /// crossfade — because [`Face::same_representation`] treats it as the
+    /// same Rest representation.
+    rest_pct_roll: RollValue,
     /// Container geometry — retargetable so an interrupt mid-morph re-bases
     /// from the interpolated value instead of snapping (§8.7a).
     geom_w: AnimatedValue,
@@ -113,6 +120,7 @@ impl UsageIsland {
             current_face: None,
             outgoing_face: None,
             face_fade: StateFade::default(),
+            rest_pct_roll: RollValue::new(String::new()),
             geom_w: AnimatedValue::settled(0., SPATIAL, MORPH),
             geom_h: AnimatedValue::settled(0., SPATIAL, MORPH),
             geom_r: AnimatedValue::settled(0., SPATIAL, MORPH_R),
@@ -335,19 +343,29 @@ impl Render for UsageIsland {
         // ── morph bookkeeping: face change → dual-layer crossfade +
         //    geometry retarget, all opened the same frame ──
         let face = self.desired_face();
-        if self.current_face.as_ref() != Some(&face) {
-            // Same-content guard is the PartialEq above — poll ticks that
-            // change nothing never run morph theater (web innerHTML check).
+        // The dual-layer crossfade triggers only on a representation change
+        // (`same_representation`): a Rest %-only tick is NOT a face swap — the
+        // % rolls in place instead (the numeric-roll primitive). The derived
+        // `PartialEq` still gates the store-tick repaint skip below.
+        let representation_changed = self
+            .current_face
+            .as_ref()
+            .is_none_or(|current| !current.same_representation(&face));
+        if representation_changed {
             if self.current_face.is_some() {
                 self.outgoing_face = self.current_face.take();
                 self.face_fade.bump();
             }
-            self.current_face = Some(face);
         }
+        self.current_face = Some(face);
         if !self.face_fade.fresh() {
             self.outgoing_face = None;
         }
         let current = self.current_face.as_ref().expect("set above").clone();
+        // Roll the rest % toward its current value (no-op off-Rest / when
+        // unchanged). Only the changed digits slide; "%" is a sep.
+        self.rest_pct_roll
+            .set(current.rest_pct().map(|pct| pct.to_string()).unwrap_or_default());
         let metrics = measure(&current, window, cx);
         if self.geom_init {
             self.geom_w.retarget(metrics.w);
@@ -376,7 +394,14 @@ impl Render for UsageIsland {
                 .ok();
         };
         let face_generation = self.face_fade.generation() as u64;
-        let incoming = build_face(&current, on_row, cx);
+        // The live face's % rolls in place (keyed `isl-pct`, stable across
+        // ticks — identity survives so a roll mid-flight is never reset).
+        let rest_pct_el = current.rest_pct().map(|_| {
+            self.rest_pct_roll
+                .element("isl-pct", px(12.), gpui::FontWeight::MEDIUM, cx.theme().colors().text)
+                .into_any_element()
+        });
+        let incoming = build_face(&current, on_row, rest_pct_el, cx);
         let incoming: AnyElement = if self.face_fade.fresh() {
             div()
                 .child(incoming)
@@ -394,7 +419,7 @@ impl Render for UsageIsland {
                 .absolute()
                 .top_0()
                 .left_0()
-                .child(build_face(face, |_, _, _| {}, cx))
+                .child(build_face(face, |_, _, _| {}, None, cx))
                 .with_animation(
                     ElementId::NamedInteger("isl-face-out".into(), face_generation),
                     Animation::new(FACE_OUT).with_easing(EFFECTS.easing()),
@@ -425,18 +450,25 @@ impl Render for UsageIsland {
         let geometry_live =
             self.geom_w.animating() || self.geom_h.animating() || self.geom_r.animating();
         let tint_live = self.tint_bg.animating() || self.tint_border.animating();
-        if geometry_live || tint_live {
+        // The rest-% roll shares the island's single frame pump: while it is
+        // in flight the morph wrapper stays attached (at settled geometry if
+        // nothing else moves), re-running `render` each frame so `incoming`
+        // rebuilds with the fresh roll progress. No second pump, no identity
+        // churn on the roll element (keyed `isl-pct`, §8.7a).
+        let roll_live = self.rest_pct_roll.animating();
+        if geometry_live || tint_live || roll_live {
             let (w, h, r) = (
                 self.geom_w.clone(),
                 self.geom_h.clone(),
                 self.geom_r.clone(),
             );
             let (bg, border) = (self.tint_bg.clone(), self.tint_border.clone());
-            let generation = (self.geom_w.generation() as u64) << 24
-                ^ (self.geom_h.generation() as u64) << 16
-                ^ (self.geom_r.generation() as u64) << 8
-                ^ (self.tint_bg.generation() as u64) << 4
-                ^ (self.tint_border.generation() as u64);
+            let generation = (self.geom_w.generation() as u64) << 32
+                ^ (self.geom_h.generation() as u64) << 24
+                ^ (self.geom_r.generation() as u64) << 16
+                ^ (self.tint_bg.generation() as u64) << 12
+                ^ (self.tint_border.generation() as u64) << 8
+                ^ (self.rest_pct_roll.generation() as u64);
             base.with_animation(
                 ElementId::NamedInteger("usage-island-morph".into(), generation),
                 // The wrapper is only a FRAME PUMP: every axis is Instant-

@@ -17,7 +17,7 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 use crate::agent_accents::STATUS_RUNNING;
 use crate::bridge::{self, BridgeStore};
 
-use super::motion::{EFFECTS, STATE_FADE, StateFade, mix};
+use super::motion::{EFFECTS, RollValue, STATE_FADE, StateFade, mix};
 use super::style::SURFACE_1;
 use super::{inbox, run_detail};
 
@@ -76,6 +76,11 @@ pub struct TaskBoardPanel {
     hovered_row: Option<(SharedString, StateFade)>,
     /// The row that most recently lost hover — keeps its fade-out alive.
     unhovered_row: Option<(SharedString, StateFade)>,
+    /// `.board-head` numeric rolls (web `rollNumber` on `#run-count` /
+    /// `#run-live`): the "N runs" total and the "N live" running count slide
+    /// their changed digits on a board update instead of snapping.
+    run_count_roll: RollValue,
+    run_live_roll: RollValue,
     _store_subscription: Subscription,
 }
 
@@ -98,6 +103,8 @@ impl TaskBoardPanel {
             connected_fade: StateFade::default(),
             hovered_row: None,
             unhovered_row: None,
+            run_count_roll: RollValue::new(String::new()),
+            run_live_roll: RollValue::new(String::new()),
             _store_subscription,
         }
     }
@@ -163,26 +170,39 @@ impl TaskBoardPanel {
 
     /// `.board-head`: title 18px/500 · mono run count (+ "N live" in the
     /// running color) · Graph/Grid seg-toggle (hairline, flat, no boxes).
+    /// The two counters roll their changed digits on a board update (web
+    /// `rollNumber` on `#run-count`/`#run-live`); the roll values were
+    /// re-targeted from `render` (which holds `&mut self`).
     fn render_header(&self, total: usize, running: usize, cx: &mut Context<Self>) -> Div {
         let colors = cx.theme().colors();
         let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
 
         let run_count = (total > 0).then(|| {
+            // Mono digits are inherently tabular; the roll inherits the
+            // chain's 13px font from the surrounding `font_family(mono)`.
+            let count = self.run_count_roll.element(
+                "board-run-count",
+                px(13.),
+                FontWeight::NORMAL,
+                colors.text_placeholder,
+            );
             h_flex()
                 .items_center()
                 .gap(px(4.))
                 .font_family(mono)
                 .text_size(px(13.))
                 .text_color(colors.text_placeholder)
-                .child(SharedString::from(format!(
-                    "{total} run{}",
-                    if total > 1 { "s" } else { "" }
-                )))
+                .child(count)
                 .when(running > 0, |this| {
                     this.child("·").child(
-                        div()
-                            .text_color(STATUS_RUNNING)
-                            .child(SharedString::from(format!("{running} live"))),
+                        div().text_color(STATUS_RUNNING).child(
+                            self.run_live_roll.element(
+                                "board-run-live",
+                                px(13.),
+                                FontWeight::NORMAL,
+                                STATUS_RUNNING.into(),
+                            ),
+                        ),
                     )
                 })
         });
@@ -267,7 +287,7 @@ impl TaskBoardPanel {
 }
 
 impl Render for TaskBoardPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
         let connected = store.connected;
         // Locally-ticked elapsed (the store's 1s ticker drives re-renders
@@ -279,6 +299,14 @@ impl Render for TaskBoardPanel {
         }
         let total = board.len();
         let running = board.iter().filter(|r| r.status == "running").count();
+        // Re-target the header rolls (no-op when unchanged). The "N live"
+        // value only updates while running > 0 — the segment unmounts at 0,
+        // so freezing the last count avoids a roll-to-zero on the way out.
+        self.run_count_roll
+            .set(format!("{total} run{}", if total > 1 { "s" } else { "" }));
+        if running > 0 {
+            self.run_live_roll.set(format!("{running} live"));
+        }
 
         let body = match self.view {
             BoardView::Grid => {
@@ -334,6 +362,15 @@ impl Render for TaskBoardPanel {
                 .when(!connected, |this| this.opacity(0.5))
                 .into_any_element()
         };
+
+        // Frame pump for the header rolls (the §8.7a stable-identity rule:
+        // the roll elements read `current()` per frame instead of riding
+        // identity-churning wrappers). The store's 1s tick is too coarse for
+        // a 200ms roll, so pump explicitly while a roll is in flight; settled
+        // frames schedule nothing (§8 idle cost).
+        if self.run_count_roll.animating() || self.run_live_roll.animating() {
+            window.request_animation_frame();
+        }
 
         let colors = cx.theme().colors();
         v_flex()

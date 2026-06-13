@@ -75,6 +75,13 @@ pub struct CardRow {
 
 /// A representation of the island — the islands flex between these by
 /// morphing in place, never by remounting (§0 Island Principle).
+///
+/// Derived `PartialEq` is the same-content guard for measurement and the
+/// store-tick repaint skip; the dual-layer FACE crossfade instead triggers
+/// on [`Face::same_representation`], which treats a Rest face whose only
+/// change is the tightest-pool % as unchanged — that % now rolls IN PLACE
+/// (the numeric-roll primitive) rather than crossfading the whole pill,
+/// matching the web (a digit roll, not a face swap, on a % tick).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Face {
     /// Compact pill: pool dots + the tightest pool's %.
@@ -88,6 +95,29 @@ pub enum Face {
     Notify { tone: Tone, text: SharedString },
     /// The five-row mini-usage card.
     Card { rows: Vec<CardRow> },
+}
+
+impl Face {
+    /// Whether two faces are the SAME representation for the dual-layer
+    /// crossfade — i.e. a morph between them is unnecessary. Two Rest faces
+    /// with identical dots count as the same even when the % differs, because
+    /// the % rolls in place (the numeric-roll primitive owns that change);
+    /// every other difference is a real face morph.
+    pub fn same_representation(&self, other: &Face) -> bool {
+        match (self, other) {
+            (Face::Rest { dots: a, .. }, Face::Rest { dots: b, .. }) => a == b,
+            _ => self == other,
+        }
+    }
+
+    /// The tightest-pool % a Rest face shows, if any (the value the island's
+    /// `rest_pct` numeric roll tracks).
+    pub fn rest_pct(&self) -> Option<&SharedString> {
+        match self {
+            Face::Rest { pct, .. } => pct.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 /// `SHORT` from usage-island.js — compact pool names for the pill/card.
@@ -191,10 +221,15 @@ fn island_text(text: SharedString, color: gpui::Hsla) -> Div {
 }
 
 /// Build a face's static content. Card rows route clicks through `on_row`
-/// (the entity contracts + switches to the usage mode).
+/// (the entity contracts + switches to the usage mode). `rest_pct` is the
+/// island's pre-built numeric-roll element for the Rest face's tightest-pool
+/// % — supplied by the live (incoming) face so the % rolls in place; `None`
+/// (the outgoing crossfade snapshot, or a non-Rest face) falls back to bare
+/// text so a fading-out pill never animates a stale roll.
 pub fn build_face(
     face: &Face,
     on_row: impl Fn(SharedString, &mut Window, &mut App) + Clone + 'static,
+    rest_pct: Option<AnyElement>,
     cx: &App,
 ) -> AnyElement {
     let colors = cx.theme().colors();
@@ -210,10 +245,10 @@ pub fn build_face(
                     .gap(px(DOT_GAP))
                     .children(dots.iter().map(|tone| dot(*tone))),
             )
-            .children(
+            .children(rest_pct.or_else(|| {
                 pct.as_ref()
-                    .map(|pct| island_text(pct.clone(), colors.text)),
-            )
+                    .map(|pct| island_text(pct.clone(), colors.text).into_any_element())
+            }))
             .into_any_element(),
         Face::Notify { tone, text } => h_flex()
             .h(px(PILL_H))

@@ -17,6 +17,7 @@ fn island() -> TasksIsland {
         retracting: false,
         hide_task: None,
         rows: Vec::new(),
+        count_roll: RollValue::new(String::new()),
     }
 }
 

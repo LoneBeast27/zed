@@ -24,7 +24,7 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::agent_accents::{STATUS_BLOCKED, tone_for_used, used_pct};
 use crate::bridge::{self, BridgeStore, PoolRow, UsageMeta};
-use crate::task_board::motion::{EFFECTS, StateFade};
+use crate::task_board::motion::{EFFECTS, RollValue, StateFade};
 use crate::task_board::style::{SURFACE_1, tabular_nums};
 use crate::usage_panel_meter::{MeterState, render_meter};
 
@@ -55,6 +55,10 @@ pub struct UsagePanel {
     /// Pool name → meter fill/tone animation state (persists across store
     /// ticks so fills morph in place — §5.6 keyed reconciliation).
     meters: HashMap<String, MeterState>,
+    /// Pool name → used-% numeric roll (web `rollNumber` on `.pool-pct`):
+    /// the % digits slide on a usage change, in lockstep with the meter
+    /// fill. Persisted across ticks, pruned alongside `meters`.
+    pct_rolls: HashMap<String, RollValue>,
     /// Bridge-offline grey-out (same native addition as the task board).
     was_connected: bool,
     connected_fade: StateFade,
@@ -83,6 +87,7 @@ impl UsagePanel {
             store,
             position: DockPosition::Left,
             meters: HashMap::new(),
+            pct_rolls: HashMap::new(),
             was_connected: false,
             connected_fade: StateFade::default(),
             last_seen: None,
@@ -169,14 +174,24 @@ impl UsagePanel {
         let window_label = pool.window.clone().unwrap_or_default();
 
         // `.pool-pct` 500 13px --text tabular; the unknown case takes the
-        // `.meter-unknown` treatment instead (12px mono italic --text-3).
+        // `.meter-unknown` treatment instead (12px mono italic --text-3). The
+        // % rolls its changed digits (web `rollNumber`) in lockstep with the
+        // meter fill; " used" and "%" are seps. The roll state is keyed by
+        // pool name so it survives store ticks (§5.6).
         let pct_cell = match used {
-            Some(used) => div()
-                .text_size(px(13.))
-                .font_weight(FontWeight::MEDIUM)
-                .font_features(tabular_nums())
-                .text_color(colors.text)
-                .child(SharedString::from(format!("{}% used", fmt_pct(used)))),
+            Some(used) => {
+                let roll = self
+                    .pct_rolls
+                    .entry(pool.name.clone())
+                    .or_insert_with(|| RollValue::new(String::new()));
+                roll.set(format!("{}% used", fmt_pct(used)));
+                div().text_size(px(13.)).child(roll.element(
+                    ElementId::Name(format!("pool-pct-{}", pool.name).into()),
+                    px(13.),
+                    FontWeight::MEDIUM,
+                    colors.text,
+                ))
+            }
             None => div()
                 .text_size(px(12.))
                 .font_family(mono.clone())
@@ -266,7 +281,7 @@ pub(crate) fn fmt_pct(value: f64) -> String {
 }
 
 impl Render for UsagePanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
         let connected = store.connected;
         let pools = store.usage.clone();
@@ -279,6 +294,7 @@ impl Render for UsagePanel {
         let live: std::collections::HashSet<&str> =
             pools.iter().map(|pool| pool.name.as_str()).collect();
         self.meters.retain(|name, _| live.contains(name.as_str()));
+        self.pct_rolls.retain(|name, _| live.contains(name.as_str()));
 
         let body: AnyElement = if pools.is_empty() {
             crate::task_board::style::empty_state(
@@ -328,6 +344,14 @@ impl Render for UsagePanel {
                 .when(!connected, |this| this.opacity(0.5))
                 .into_any_element()
         };
+
+        // Frame pump for the used-% rolls (the meter fill already self-pumps
+        // its own `with_animation`, but a roll-only frame — value changed,
+        // fill already settled — still needs ticking). Settled frames
+        // schedule nothing (§8 idle cost).
+        if self.pct_rolls.values().any(RollValue::animating) {
+            window.request_animation_frame();
+        }
 
         let colors = cx.theme().colors();
         v_flex()

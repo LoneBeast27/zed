@@ -28,8 +28,10 @@ use ui::prelude::*;
 use crate::agent_accents::STATUS_RUNNING;
 use crate::bridge::RunRow;
 use crate::orchestrator_panel::OrchestratorPanel;
-use crate::task_board::motion::{AnimatedValue, DECEL, EFFECTS, MotionCurve, SPATIAL, StateFades, mix};
-use crate::task_board::style::{HAIRLINE_HI, tabular_nums};
+use crate::task_board::motion::{
+    AnimatedValue, DECEL, EFFECTS, MotionCurve, RollValue, SPATIAL, StateFades, mix,
+};
+use crate::task_board::style::HAIRLINE_HI;
 
 use super::usage_island::SURFACE_FLOAT;
 
@@ -92,6 +94,10 @@ pub struct TasksIsland {
     /// so the head count + spinner rows stay frozen through the 400ms exit
     /// (§4.9 retract-the-last-representation; never a "0 running" flash).
     rows: Vec<(SharedString, SharedString)>,
+    /// Head-count numeric roll (web `rollNumber(#ti-n, …)`): the leading "N"
+    /// of "N subagents/tasks running" slides on a count change; the words are
+    /// seps. Frozen with `rows` through the retract (never rolls to 0 on exit).
+    count_roll: RollValue,
 }
 
 /// What a board ingest decided (the pure half of [`TasksIsland::sync`]).
@@ -120,6 +126,7 @@ impl TasksIsland {
             retracting: false,
             hide_task: None,
             rows: Vec::new(),
+            count_roll: RollValue::new(String::new()),
         }
     }
 
@@ -134,6 +141,7 @@ impl TasksIsland {
             || self.fade.animating()
             || self.rows_reveal.animating()
             || self.chev.animating()
+            || self.count_roll.animating()
     }
 
     /// Ingest the latest running rows (derived via [`running_rows`] under
@@ -173,6 +181,9 @@ impl TasksIsland {
             let mut changed = rows != self.rows;
             if changed {
                 self.rows = rows;
+                // Roll the head count toward the new running total (only the
+                // leading digit slides; "subagents/tasks running" are seps).
+                self.count_roll.set(head_label(self.rows.len()));
             }
             if self.retracting {
                 self.retracting = false;
@@ -230,6 +241,13 @@ impl TasksIsland {
         });
         cx.notify();
     }
+}
+
+/// The collapsed head copy (`tasks-island.js`: "N subagents/tasks running",
+/// singular below 2). Only the leading count is a digit — the rest are
+/// numeric-roll seps.
+fn head_label(n: usize) -> String {
+    format!("{n} subagent{}/tasks running", if n > 1 { "s" } else { "" })
 }
 
 /// `running.map(r => r.task || r.agent || "task")` keyed by run id — the
@@ -290,11 +308,6 @@ pub fn render_tasks_island(
     cx: &mut gpui::Context<OrchestratorPanel>,
 ) -> AnyElement {
     let colors = cx.theme().colors();
-    let n = island.rows.len();
-    let head_label = format!(
-        "{n} subagent{}/tasks running",
-        if n > 1 { "s" } else { "" }
-    );
 
     // ── head: spinner + count + chevron (down⇄up stacked-glyph crossfade
     //    — the web rotates 180°; see the `chev` field note). The flip
@@ -350,12 +363,15 @@ pub fn render_tasks_island(
         .on_click(cx.listener(|panel, _, _, cx| panel.tasks_island.toggle_open(cx)))
         .child(spinner("ti-head-spin"))
         .child(
-            div()
-                .text_size(px(13.))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(colors.text)
-                .font_features(tabular_nums())
-                .child(SharedString::from(head_label)),
+            // The head count rolls its leading digit (web `rollNumber`); the
+            // "subagents/tasks running" words are seps. Tabular-nums is
+            // applied on the run inside the roll element.
+            div().text_size(px(13.)).child(island.count_roll.element(
+                "ti-n",
+                px(13.),
+                gpui::FontWeight::MEDIUM,
+                colors.text,
+            )),
         )
         .child(div().flex_1())
         .child(chevron);
