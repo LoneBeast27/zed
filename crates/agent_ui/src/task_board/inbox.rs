@@ -150,6 +150,12 @@ fn inbox_row(
         _ => (false, false),
     };
     let unhover_fresh = matches!(&hover.unhovered, Some((id, fresh)) if *id == run_id && *fresh);
+    // The pill-elapsed reveal width fraction — the panel's per-row velocity-
+    // carrying spring (collapsed 0 → revealed 1). Read per visible row at
+    // build time; unknown/never-hovered rows read 0.
+    let reveal_t = panel
+        .upgrade()
+        .map_or(0., |panel| panel.read(cx).reveal_t(&run_id));
 
     let on_click_panel = panel.clone();
     let click_run_id = run_id.clone();
@@ -178,8 +184,9 @@ fn inbox_row(
                 .ok();
         })
         // Status pill; the elapsed segment inside reveals on row hover (the
-        // web's compact↔extended island morph — collapsed at rest, 120ms
-        // effects fade on hover; width-spring lands with Z4).
+        // web's compact↔extended island morph) as a velocity-carrying width
+        // spring — collapsed at rest, grown on hover, momentum carried across
+        // a rapid hover flip (the Z4 spring layer).
         .child(
             status_pill(
                 ElementId::Name(format!("pill-{run_id}").into()),
@@ -187,8 +194,7 @@ fn inbox_row(
                 Some(ElapsedReveal {
                     text: rel(run.elapsed_s),
                     id: run_id.clone(),
-                    hovered: is_hovered,
-                    fresh: hover_fresh,
+                    reveal_t,
                 }),
                 cx,
             )

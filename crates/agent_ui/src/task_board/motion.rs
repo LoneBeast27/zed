@@ -21,6 +21,7 @@ mod curves;
 mod fades;
 mod numeric_roll;
 mod shimmer;
+mod spring;
 
 pub use animated::{
     AnimatedColor, AnimatedValue, STATE_FADE, STATE_FADE_WINDOW, StateFade, mix,
@@ -29,3 +30,4 @@ pub use curves::{CubicBezier, DECEL, EFFECTS, EXIT_POINTS, MotionCurve, SPATIAL,
 pub use fades::StateFades;
 pub use numeric_roll::{NumericRoll, ROLL_MS, RollValue};
 pub use shimmer::{PULSATE_MS, SWEEP_MS, Shimmer, ShimmerMode, shimmer};
+pub use spring::{CHROME_OMEGA, Spring};

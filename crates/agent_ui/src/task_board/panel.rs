@@ -17,7 +17,7 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 use crate::agent_accents::STATUS_RUNNING;
 use crate::bridge::{self, BridgeStore};
 
-use super::motion::{EFFECTS, RollValue, STATE_FADE, StateFade, mix};
+use super::motion::{AnimatedValue, CHROME_OMEGA, EFFECTS, RollValue, STATE_FADE, StateFade, mix};
 use super::style::SURFACE_1;
 use super::{inbox, run_detail};
 
@@ -81,6 +81,12 @@ pub struct TaskBoardPanel {
     /// their changed digits on a board update instead of snapping.
     run_count_roll: RollValue,
     run_live_roll: RollValue,
+    /// Per-row pill-elapsed reveal width as a velocity-carrying spring (the
+    /// Z1/Z4 "pill elapsed width-spring · hover-retargetable interruption"
+    /// deferral): 0 = collapsed, 1 = revealed. A rapid hover on/off retargets
+    /// it mid-flight CARRYING momentum (the spring layer), where the prior
+    /// opacity-only reveal snapped. Pruned to the hovered/animating set.
+    reveal_springs: std::collections::HashMap<SharedString, AnimatedValue>,
     _store_subscription: Subscription,
 }
 
@@ -105,8 +111,22 @@ impl TaskBoardPanel {
             unhovered_row: None,
             run_count_roll: RollValue::new(String::new()),
             run_live_roll: RollValue::new(String::new()),
+            reveal_springs: std::collections::HashMap::new(),
             _store_subscription,
         }
+    }
+
+    /// The velocity-carrying reveal fraction (0..1) for a row's pill-elapsed
+    /// segment — unknown rows are collapsed (0).
+    pub(super) fn reveal_t(&self, run_id: &SharedString) -> f32 {
+        self.reveal_springs
+            .get(run_id)
+            .map_or(0., |spring| spring.current().clamp(0., 1.))
+    }
+
+    /// Whether any reveal spring is still settling (the frame-pump signal).
+    fn reveal_animating(&self) -> bool {
+        self.reveal_springs.values().any(AnimatedValue::animating)
     }
 
     /// Tracked-hover transition for an inbox row: each flip opens a 150ms
@@ -117,6 +137,11 @@ impl TaskBoardPanel {
         hovered: bool,
         cx: &mut Context<Self>,
     ) {
+        // Retarget this row's pill-elapsed reveal width spring, CARRYING
+        // velocity across a mid-flight hover flip (the Z4 spring layer): a
+        // quick on→off keeps the segment's momentum instead of snapping the
+        // opacity. Collapse the previously-hovered row's reveal too.
+        self.retarget_reveal(&run_id, hovered);
         if hovered {
             if self
                 .hovered_row
@@ -126,6 +151,7 @@ impl TaskBoardPanel {
                 return;
             }
             if let Some((old, _)) = self.hovered_row.take() {
+                self.retarget_reveal(&old, false);
                 self.unhovered_row = Some((old, StateFade::begun()));
             }
             self.hovered_row = Some((run_id, StateFade::begun()));
@@ -139,6 +165,24 @@ impl TaskBoardPanel {
             self.unhovered_row = Some((old, StateFade::begun()));
             cx.notify();
         }
+    }
+
+    /// Retarget a row's reveal spring toward revealed (1) or collapsed (0),
+    /// carrying velocity. Allocates on first hover; settled-collapsed entries
+    /// are pruned so the map tracks only the touched set.
+    fn retarget_reveal(&mut self, run_id: &SharedString, revealed: bool) {
+        let target = if revealed { 1. } else { 0. };
+        match self.reveal_springs.get_mut(run_id) {
+            Some(spring) => spring.retarget(target),
+            None if !revealed => return, // never hovered → nothing to collapse
+            None => {
+                let mut spring = AnimatedValue::spring(0., CHROME_OMEGA);
+                spring.retarget(1.);
+                self.reveal_springs.insert(run_id.clone(), spring);
+            }
+        }
+        self.reveal_springs
+            .retain(|_, spring| spring.target() > 0.5 || spring.animating());
     }
 
     /// Row/node click → emit `OpenRun` + open the run drawer in place.
@@ -363,12 +407,16 @@ impl Render for TaskBoardPanel {
                 .into_any_element()
         };
 
-        // Frame pump for the header rolls (the §8.7a stable-identity rule:
-        // the roll elements read `current()` per frame instead of riding
-        // identity-churning wrappers). The store's 1s tick is too coarse for
-        // a 200ms roll, so pump explicitly while a roll is in flight; settled
-        // frames schedule nothing (§8 idle cost).
-        if self.run_count_roll.animating() || self.run_live_roll.animating() {
+        // Frame pump for the header rolls AND the pill-elapsed reveal springs
+        // (the §8.7a stable-identity rule: roll elements and the spring read
+        // `current()` per frame instead of riding identity-churning wrappers).
+        // The store's 1s tick is too coarse for a 200ms roll / a settling
+        // spring, so pump explicitly while either is in flight; settled frames
+        // schedule nothing (§8 idle cost).
+        if self.run_count_roll.animating()
+            || self.run_live_roll.animating()
+            || self.reveal_animating()
+        {
             window.request_animation_frame();
         }
 

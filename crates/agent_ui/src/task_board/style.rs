@@ -14,12 +14,6 @@ use ui::prelude::*;
 
 use crate::agent_accents::{accent_for_agent, color_for_status, rgba_hex};
 
-use super::motion::EFFECTS;
-
-/// `.pill-elapsed` opacity reveal duration (board.css:48 `opacity .12s
-/// var(--effects-curve)`).
-const ELAPSED_REVEAL: std::time::Duration = std::time::Duration::from_millis(120);
-
 // ── Out-of-chrome board tokens (web app.css values; deliberately NOT
 //    ThemeColors fields — same rule as agent_accents) ──
 /// `--surface-1: rgba(255,255,255,0.05)` — idle-pill fill, seg-toggle active.
@@ -141,21 +135,22 @@ pub fn chip_reason(chip: Option<&str>, agent: &str) -> String {
 
 /// The `.pill-elapsed` reveal state — the elapsed segment lives inside the
 /// pill and reveals on tracked row hover (the web's compact↔extended island
-/// morph, board.css:45-55). At rest the segment is not rendered at all, so
-/// resting geometry matches the web's `max-width: 0` collapsed pill; on
-/// hover it appears at full width with a one-shot 120ms effects opacity
-/// fade. (The width-spring morph itself lands with Z4's hover-retargetable
-/// spring layer.)
+/// morph, board.css:45-55). At rest the segment collapses to zero width
+/// (the web's `max-width: 0`); on hover it grows to full width.
+///
+/// The reveal is now a velocity-carrying WIDTH spring (`reveal_t` ∈ [0,1],
+/// from the panel's per-row [`Spring`](super::motion::Spring)): the segment's
+/// width AND opacity scale with `reveal_t`, and a rapid hover on/off retargets
+/// the spring mid-flight CARRYING momentum — the Z1/Z4 "pill elapsed width-
+/// spring · hover-retargetable interruption" deferral. (The prior path was
+/// opacity-only with a hard width snap.)
 pub struct ElapsedReveal {
     /// `rel(elapsed_s)` text.
     pub text: String,
     /// Stable per-row key (run id) — animation identity.
     pub id: SharedString,
-    /// Whether the owning row is hovered right now.
-    pub hovered: bool,
-    /// Whether the hover flip is inside the crossfade window (attach the
-    /// one-shot fade only then; settled hovers render the segment bare).
-    pub fresh: bool,
+    /// Reveal fraction 0 (collapsed) → 1 (full) from the row's width spring.
+    pub reveal_t: f32,
 }
 
 /// The `.pill` element with the inbox vocabulary (`statusLabel()`:
@@ -228,23 +223,39 @@ fn pill_with_label(
         .children(dot)
         .child(SharedString::from(label))
         .when_some(elapsed, |this, reveal| {
-            // `.pill-elapsed` — collapsed (absent) at rest, revealed on
-            // tracked row hover with a 120ms effects opacity fade.
-            if !reveal.hovered {
+            // `.pill-elapsed` — a velocity-carrying width spring (the Z4
+            // hover-retargetable reveal). Fully collapsed at `reveal_t == 0`
+            // (nothing rendered — resting geometry = the web's `max-width:0`),
+            // otherwise an `overflow_hidden` box whose width grows with the
+            // spring fraction while the text fades in concurrently.
+            //
+            // Divergence (noted): the natural width is ESTIMATED from the
+            // glyph count (≈6px per char + the 6px lead gap at 11px tabular)
+            // rather than text-shaped — the pill builders take `&App`, no
+            // `Window` to shape with. At this size the estimate is sub-pixel
+            // honest for the 2–4 char `rel()` strings ("34s", "1.2h").
+            let t = reveal.reveal_t.clamp(0., 1.);
+            if t <= 0.001 {
                 return this;
             }
-            let segment = div()
-                .text_color(color.opacity(0.85))
-                .child(SharedString::from(reveal.text));
-            if reveal.fresh {
-                this.child(segment.with_animation(
-                    ElementId::Name(format!("pill-elapsed-{}", reveal.id).into()),
-                    Animation::new(ELAPSED_REVEAL).with_easing(EFFECTS.easing()),
-                    |segment, t| segment.opacity(t),
-                ))
-            } else {
-                this.child(segment)
-            }
+            // Width grows with the spring fraction; the parent `gap(6px)`
+            // provides the lead space (same as the dot/label spacing). The
+            // text fades in concurrently and is clipped while the box is
+            // narrower than its content.
+            let natural = reveal.text.chars().count() as f32 * 6.0;
+            this.child(
+                div()
+                    .flex_none()
+                    .overflow_hidden()
+                    .w(px(natural * t))
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .opacity(t)
+                            .text_color(color.opacity(0.85))
+                            .child(SharedString::from(reveal.text)),
+                    ),
+            )
         })
 }
 

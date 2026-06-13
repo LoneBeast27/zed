@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use gpui::{Hsla, Rgba};
 
 use super::curves::MotionCurve;
+use super::spring::Spring;
 
 /// Interactive-state crossfade duration — the web's
 /// `transition: … .15s var(--effects-curve)` on seg-toggle buttons, inbox
@@ -90,6 +91,12 @@ pub struct AnimatedValue {
     generation: usize,
     curve: MotionCurve,
     duration: Duration,
+    /// Opt-in velocity-carrying backing (the Z4 spring layer). When `Some`,
+    /// `retarget`/`current`/`animating` delegate to the [`Spring`] so a
+    /// mid-flight retarget carries momentum instead of re-basing position at
+    /// rest velocity (COMPLEMENTARY_SOLUTIONS gap B-2). `None` is the
+    /// curve-based default — every existing consumer is byte-identical.
+    spring: Option<Spring>,
 }
 
 impl AnimatedValue {
@@ -102,6 +109,25 @@ impl AnimatedValue {
             generation: 0,
             curve: curve.into(),
             duration,
+            spring: None,
+        }
+    }
+
+    /// A settled value backed by a velocity-carrying [`Spring`] (the opt-in
+    /// Z4 mode for interrupt-heavy values — hover widths, reveal extents).
+    /// `omega` is the spring's angular frequency ([`super::CHROME_OMEGA`] for
+    /// chrome). `retarget` then carries momentum across re-aims; `curve`/
+    /// `duration` are retained only so a later `retarget_with` could drop
+    /// back to a curve if ever needed.
+    pub fn spring(value: f32, omega: f32) -> Self {
+        Self {
+            from: value,
+            to: value,
+            started: None,
+            generation: 0,
+            curve: super::curves::EFFECTS.into(),
+            duration: Duration::from_millis(250),
+            spring: Some(Spring::settled(value, omega)),
         }
     }
 
@@ -110,6 +136,14 @@ impl AnimatedValue {
     /// so render-loop calls never restart a settled animation.
     pub fn retarget(&mut self, to: f32) {
         if to == self.to {
+            return;
+        }
+        // Spring-backed values carry velocity through the retarget (the Z4
+        // gap fix); the curve path re-bases position at rest velocity.
+        if let Some(spring) = self.spring.as_mut() {
+            spring.retarget(to);
+            self.to = to;
+            self.generation = spring.generation();
             return;
         }
         self.from = self.current();
@@ -145,6 +179,9 @@ impl AnimatedValue {
 
     /// Jump without animating (initial paints, offscreen updates).
     pub fn jump(&mut self, value: f32) {
+        if let Some(spring) = self.spring.as_mut() {
+            spring.jump(value);
+        }
         self.from = value;
         self.to = value;
         self.started = None;
@@ -152,6 +189,9 @@ impl AnimatedValue {
 
     /// The interpolated value at this instant.
     pub fn current(&self) -> f32 {
+        if let Some(spring) = self.spring.as_ref() {
+            return spring.position();
+        }
         match self.started {
             None => self.to,
             Some(started) => {
@@ -174,8 +214,17 @@ impl AnimatedValue {
 
     /// Whether the last retarget's animation window is still open.
     pub fn animating(&self) -> bool {
+        if let Some(spring) = self.spring.as_ref() {
+            return spring.animating();
+        }
         self.started
             .is_some_and(|started| started.elapsed() < self.duration)
+    }
+
+    /// Current velocity (spring-backed only; curve values report 0 — they
+    /// carry no momentum, which is exactly the gap the spring closes).
+    pub fn velocity(&self) -> f32 {
+        self.spring.as_ref().map_or(0., Spring::velocity)
     }
 
     /// Animation-identity key for the latest retarget.
