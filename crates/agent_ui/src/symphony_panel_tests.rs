@@ -4,8 +4,6 @@
 
 use super::*;
 
-use super::*;
-
 fn task(id: &str, deps: &[&str]) -> PlanTask {
     PlanTask {
         id: id.to_string(),

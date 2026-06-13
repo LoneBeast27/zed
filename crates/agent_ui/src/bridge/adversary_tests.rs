@@ -4,8 +4,6 @@
 //! `watch_tests.rs` idiom).
 
 use super::*;
-
-use super::*;
 use gpui::TestAppContext;
 use http_client::{FakeHttpClient, Method, Response};
 

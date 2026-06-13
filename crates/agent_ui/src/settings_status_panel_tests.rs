@@ -1,8 +1,6 @@
 //! Tests for the settings status panel's pure label helpers.
 
 use super::*;
-
-use super::*;
 use crate::bridge::ScrapeMeta;
 
 #[test]
