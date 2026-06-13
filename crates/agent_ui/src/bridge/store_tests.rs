@@ -180,6 +180,55 @@ fn project_name_resolves_via_conversation_membership(cx: &mut gpui::TestAppConte
     });
 }
 
+fn plan_event(conv: &str, plan_id: &str) -> BridgeEvent {
+    BridgeEvent::Plan {
+        plan: super::super::protocol::PlanSnapshot {
+            plan_id: Some(plan_id.to_string()),
+            conv: conv.to_string(),
+            waves: vec![vec![super::super::protocol::PlanSubtask {
+                subtask_id: "t1".into(),
+                status: "running".into(),
+                ..Default::default()
+            }]],
+            ..Default::default()
+        },
+    }
+}
+
+#[gpui::test]
+fn sse_plan_frame_for_another_conv_is_dropped(cx: &mut gpui::TestAppContext) {
+    // P5: the SSE plan frame is global-newest across all conversations. While
+    // the panel follows conv A, a frame describing conv B must NOT replace A's
+    // plan (the /plan?conv=A poll scopes by conv; the SSE apply must too).
+    let store = cx.new(|_| BridgeStore::default());
+    store.update(cx, |store, cx| {
+        store.transcript_conv = Some("conv-a".to_string());
+
+        // A frame for the followed conv A applies.
+        store.apply_event(plan_event("conv-a", "plan-a"), cx);
+        assert_eq!(
+            store.plan.as_ref().and_then(|p| p.plan_id.clone()),
+            Some("plan-a".into())
+        );
+
+        // A frame for conv B is dropped — A's plan is untouched (no flicker).
+        store.apply_event(plan_event("conv-b", "plan-b"), cx);
+        assert_eq!(
+            store.plan.as_ref().and_then(|p| p.plan_id.clone()),
+            Some("plan-a".into()),
+            "a different conv's SSE plan frame must not replace the followed plan"
+        );
+
+        // An empty-conv frame (single-conv usage / older bridge) still applies.
+        store.apply_event(plan_event("", "plan-default"), cx);
+        assert_eq!(
+            store.plan.as_ref().and_then(|p| p.plan_id.clone()),
+            Some("plan-default".into()),
+            "an empty conv is never filtered"
+        );
+    });
+}
+
 #[gpui::test]
 fn ticker_lives_only_while_a_run_is_running(cx: &mut gpui::TestAppContext) {
     let store = cx.new(|_| BridgeStore::default());

@@ -189,7 +189,18 @@ impl BridgeStore {
                 }
             }
             BridgeEvent::Plan { plan } => {
-                if self.plan.as_ref() != Some(&plan) {
+                // P5: the SSE `plan` frame is GLOBAL-newest across all
+                // conversations (bridge serve.py pushes latest_plan_view on the
+                // single stream). If it describes a DIFFERENT conversation than
+                // the one the panel follows, dropping it here keeps the panel
+                // from flickering to conv B's plan while following conv A — the
+                // watch-gated `/plan?conv=A` poll already scopes by conv, so
+                // the SSE push must too. An empty `conv` (single-conv usage or
+                // an older bridge) is never filtered.
+                let follows = self.transcript_conv.as_deref();
+                let mismatched = !plan.conv.is_empty()
+                    && follows.is_some_and(|conv| conv != plan.conv);
+                if !mismatched && self.plan.as_ref() != Some(&plan) {
                     self.plan = Some(plan);
                     changed = true;
                 }
