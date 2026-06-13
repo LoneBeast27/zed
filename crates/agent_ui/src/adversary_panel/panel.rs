@@ -50,7 +50,11 @@ impl AdversaryPanel {
         let _jobs_subscription =
             cx.observe(&jobs, |this: &mut Self, _, cx| this.sync_from_jobs(cx));
         let editor = cx.new(|cx| {
-            let mut editor = editor::Editor::auto_height(1, 6, window, cx);
+            // Web parity (adversary.js:16 `<textarea rows="2">`): the adversary
+            // composer opens two lines tall — the reference deliberately gives
+            // this deck a taller resting height than the generic rows="1" house
+            // idiom — and caps at ~160px ≈ 7 lines (panels.css:97).
+            let mut editor = editor::Editor::auto_height(2, 7, window, cx);
             editor.set_placeholder_text("Ask all three models the same question…", window, cx);
             editor.set_soft_wrap();
             editor.set_show_indent_guides(false, cx);
