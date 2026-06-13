@@ -376,6 +376,41 @@ mod tests {
         assert!((hi.b - 1.).abs() < 1e-4 && hi.r < 1e-4);
     }
 
+    // --- P5: the landing-frame tint snap is bounded — for the majority of the
+    // cycle the band is fully off the label, so a drop has NO tint to snap.
+    // (The remaining mid-sweep landings are concurrent with the landed
+    // content's own entrance fade — adversary col opacity 0→1 spring-in,
+    // transcript reply view — which covers the drop. A true exit crossfade
+    // would need consumer-side "finishing" state and is GUI-trace-gated; this
+    // is NOT a §8.7 violation — a sub-glyph one-shot tint, not a geometry/
+    // opacity snap. Pinned here: the all-base hold the disposition relies on.)
+
+    #[test]
+    fn band_is_fully_off_the_label_through_the_hold_tail() {
+        // The sweep traverses in the first 40% of the clock, then holds the
+        // band off the right edge for the remaining ~60%. Across that hold,
+        // EVERY glyph position is at base weight (0) — so ~60% of landings
+        // drop a label that is already all-base, with no tint to snap.
+        const BAND_HALF: f32 = 0.1; // band reaches BAND_HALF past its centre
+        for i in 0..=60 {
+            let t = 0.4 + 0.6 * (i as f32 / 60.); // the hold range [0.4, 1.0]
+            let center = sweep_center(t);
+            assert!(
+                center >= 1.0 + BAND_HALF,
+                "during the hold the band must clear the right edge (t={t}, center={center})"
+            );
+            // Sample glyph positions across the whole label — all bare base.
+            for j in 0..=20 {
+                let x = j as f32 / 20.;
+                assert_eq!(
+                    band_weight(x, center),
+                    0.,
+                    "glyph at x={x} must be base during the hold (t={t})"
+                );
+            }
+        }
+    }
+
     // --- P8: the char-layout cache reuses across frames, rebuilding only on a
     // text/size change — this is the predicate that decides reuse-vs-realloc.
 
