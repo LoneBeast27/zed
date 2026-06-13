@@ -180,28 +180,40 @@ pub fn queued_pill(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
 
 /// The symphony check-off label for a subtask status. The bridge serves the
 /// ALREADY-ROLLED subtask vocabulary (`orchestrator/plans.py` `RUN_TO_SUBTASK`:
-/// pending/running/done/failed/killed/cancelled) — distinct from the inbox's
-/// raw run-status, so this maps that vocabulary directly rather than delegating
-/// to `status_label` (which expects "completed", not the rolled "done"). The
-/// run-status spellings (completed/blocked) are accepted too for robustness.
+/// pending/running/done/failed/killed) — distinct from the inbox's raw
+/// run-status, so this maps that vocabulary directly rather than delegating to
+/// `status_label` (which expects "completed", not the rolled "done").
+///
+/// EACH WORD MATCHES ITS COLOR BUCKET (`color_for_status`, P1): `failed` reads
+/// "Failed" in RED (the error bucket), while a genuinely blocked/waiting
+/// subtask reads "Blocked"/"Waiting" in AMBER (the blocked bucket). The two
+/// must never disagree — a red "Blocked" pill on a failure is exactly the
+/// glanceable-correctness regression this surface exists to prevent. The
+/// blocked/waiting/stalled spellings aren't in the subtask vocabulary today
+/// (no producible state rolls up to them) but are mapped so a future amber
+/// state stays word/color-consistent. `completed` is accepted for robustness.
 pub fn plan_status_label(status: &str) -> String {
     match status {
         "" | "pending" | "idle" => "Queued".to_string(),
         "running" => "Running".to_string(),
         "done" | "completed" => "Done".to_string(),
-        "failed" | "blocked" => "Blocked".to_string(),
+        "failed" => "Failed".to_string(),
+        "blocked" => "Blocked".to_string(),
+        "waiting" => "Waiting".to_string(),
+        "stalled" => "Stalled".to_string(),
         "killed" => "Killed".to_string(),
-        "cancelled" => "Cancelled".to_string(),
         other => other.to_string(),
     }
 }
 
 /// Symphony's LIVE per-subtask pill (the /plan check-off): an unlinked/pending
 /// subtask reads "Queued" (the symphony vocabulary); a linked run's rolled-up
-/// status reads the inbox label ("Running" with its pulse dot, "Done",
-/// "Blocked", "Killed"). The bridge maps "cancelled" through too — labelled
-/// "Cancelled", colored neutral by color_for_status (a quiet terminal state —
-/// divergence noted).
+/// status reads the matching word+color — "Running" (pulse dot), "Done"
+/// (green), "Failed" (RED), "Killed" (red), and the amber "Blocked"/"Waiting"
+/// bucket. Word and color agree by construction: `plan_status_label` and
+/// `color_for_status` are driven off the same status string (P1). The bridge
+/// never rolls a subtask to "cancelled" (single-run abort → "killed"; see P3),
+/// so that path is intentionally absent from the symphony vocabulary.
 pub fn plan_status_pill(id: impl Into<ElementId>, status: &str, cx: &App) -> Stateful<Div> {
     let label = plan_status_label(status);
     let pill_status = match status {
@@ -401,14 +413,38 @@ mod tests {
         assert_eq!(plan_status_label("pending"), "Queued");
         assert_eq!(plan_status_label("idle"), "Queued");
         assert_eq!(plan_status_label(""), "Queued");
-        // Linked runs → the inbox labels (the live check-off).
+        // Linked runs → the live check-off labels.
         assert_eq!(plan_status_label("running"), "Running");
         assert_eq!(plan_status_label("done"), "Done"); // bridge already mapped completed→done
         assert_eq!(plan_status_label("completed"), "Done");
-        assert_eq!(plan_status_label("failed"), "Blocked");
+        // P1: failed reads "Failed" (NOT "Blocked") — the word matches the RED
+        // error color. "Blocked"/"Waiting" stay reserved for the amber bucket.
+        assert_eq!(plan_status_label("failed"), "Failed");
+        assert_eq!(plan_status_label("blocked"), "Blocked");
+        assert_eq!(plan_status_label("waiting"), "Waiting");
+        assert_eq!(plan_status_label("stalled"), "Stalled");
         assert_eq!(plan_status_label("killed"), "Killed");
-        // Best-effort thread abort.
-        assert_eq!(plan_status_label("cancelled"), "Cancelled");
+    }
+
+    #[test]
+    fn plan_status_word_agrees_with_color_bucket() {
+        // P1 regression guard: every status word must sit in the SAME color
+        // bucket its label implies. A red "Blocked" (the old failed→"Blocked"
+        // bug) is exactly the glanceable-correctness mismatch this pins out.
+        use crate::agent_accents::{STATUS_BLOCKED, STATUS_DONE, STATUS_ERROR, STATUS_RUNNING};
+        // "Failed" → RED error bucket.
+        assert_eq!(plan_status_label("failed"), "Failed");
+        assert_eq!(color_for_status("failed"), STATUS_ERROR.into());
+        // "Killed" → also the RED bucket (a hard kill, not amber).
+        assert_eq!(plan_status_label("killed"), "Killed");
+        assert_eq!(color_for_status("killed"), STATUS_ERROR.into());
+        // "Blocked"/"Waiting" → AMBER blocked bucket.
+        assert_eq!(plan_status_label("blocked"), "Blocked");
+        assert_eq!(color_for_status("blocked"), STATUS_BLOCKED.into());
+        assert_eq!(color_for_status("waiting"), STATUS_BLOCKED.into());
+        // "Running" → running bucket; "Done" → done bucket.
+        assert_eq!(color_for_status("running"), STATUS_RUNNING.into());
+        assert_eq!(color_for_status("done"), STATUS_DONE.into());
     }
 
     #[test]
