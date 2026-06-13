@@ -342,20 +342,18 @@ impl Render for UsageIsland {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // ── morph bookkeeping: face change → dual-layer crossfade +
         //    geometry retarget, all opened the same frame ──
-        let face = self.desired_face();
-        // The dual-layer crossfade triggers only on a representation change
+        // The dual-layer crossfade triggers only on a REPRESENTATION change
         // (`same_representation`): a Rest %-only tick is NOT a face swap — the
-        // % rolls in place instead (the numeric-roll primitive). The derived
+        // % rolls in place instead (the numeric-roll primitive). Derived
         // `PartialEq` still gates the store-tick repaint skip below.
-        let representation_changed = self
+        let face = self.desired_face();
+        if self
             .current_face
             .as_ref()
-            .is_none_or(|current| !current.same_representation(&face));
-        if representation_changed {
-            if self.current_face.is_some() {
-                self.outgoing_face = self.current_face.take();
-                self.face_fade.bump();
-            }
+            .is_some_and(|current| !current.same_representation(&face))
+        {
+            self.outgoing_face = self.current_face.take();
+            self.face_fade.bump();
         }
         self.current_face = Some(face);
         if !self.face_fade.fresh() {
