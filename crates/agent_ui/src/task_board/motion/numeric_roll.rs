@@ -4,33 +4,23 @@
 //! usage island rest-%, the usage panel pool %, the task-board run count +
 //! "N live", the tasks-island "N subagents" count.
 //!
-//! **Genuinely per-digit (the conscious divergence, decided here):** the web
-//! rolls PER DIGIT — `roll.js:41` `if (before === ch) return;` leaves an
-//! unchanged digit untouched, and `:39` `setSep` swaps a separator with no
-//! transform; ONLY a changed digit's stack slides (`:84-88`
-//! `translateY(0)`→`translateY(-1em)`). Per-digit is *cheap* in gpui too:
-//! tabular-nums gives every digit a fixed advance, so a changed cell is a
-//! fixed-width sub-box that can clip + paint its old/new glyph at a vertical
-//! offset without disturbing its neighbours. The paint here mirrors that
-//! exactly: unchanged digits and separators are painted ONCE at rest (dy=0,
-//! the `static_glyphs` group) and never move; only the changed digits' glyphs
-//! ride the slide (the `incoming`/`outgoing` groups). Any cell whose shape
-//! changed (different digit count) takes the `needRebuild` branch — the new
-//! value appears settled with no roll (`roll.js:28-33`).
+//! **Genuinely per-digit.** The web rolls PER DIGIT — `roll.js:41`
+//! `if (before === ch) return;` leaves an unchanged digit untouched, `:39`
+//! `setSep` swaps a separator with no transform; ONLY a changed digit's stack
+//! slides (`:84-88` `translateY(0)`→`translateY(-1em)`). Tabular-nums gives
+//! every digit a fixed advance, so the paint mirrors that exactly: unchanged
+//! digits and separators paint ONCE at rest (the `static_glyphs` group, dy=0)
+//! and never move; only the changed digits ride the slide (`incoming`/
+//! `outgoing`). A shape change (different digit count) takes the `needRebuild`
+//! branch — the new value appears settled with no roll (`roll.js:28-33`).
 //!
-//! **Identity & the pump.** This is a stateless paint helper, not a
-//! timer-owning element: the caller owns one [`RollValue`] in its view state
-//! and a single frame pump (the same `request_animation_frame` /
-//! `any_animating` idiom the islands already arm). Each frame the caller
-//! reads the roll progress and hands it here; the element is keyed by the
-//! caller's stable id, so it never churns identity (§8.7a). When settled it
-//! paints one bare shaped line — zero per-frame cost (§8 idle).
-//!
-//! **Measurement honesty.** A roll lays out at the shaped width of its
-//! TARGET string. The usage island morphs its container to the measured face
-//! width; because tabular-nums fixes digit advances and the roll always
-//! reports the target extent, the island's existing geometry math stays
-//! frame-exact across a roll (no measure drift, RUST_PORT_NOTES §0).
+//! **Identity & the pump.** A stateless paint helper, not a timer-owning
+//! element: the caller owns one [`RollValue`] plus a single frame pump (the
+//! `request_animation_frame` / `any_animating` idiom the islands arm), reads
+//! the roll progress per frame, and keys the element by a stable id so it
+//! never churns identity (§8.7a). Settled, it paints one bare line — zero
+//! per-frame cost (§8 idle). A roll lays out at its TARGET width, so the
+//! island's geometry math stays frame-exact across a roll (no measure drift).
 
 use std::time::Duration;
 
@@ -259,15 +249,11 @@ pub struct NumericRoll {
     color: Hsla,
 }
 
-/// Shaped runs prepared in prepaint and handed to paint, grouped by motion so
-/// only the changed digits ever move (the genuine per-digit roll):
-/// - `static_glyphs`: every NON-rolling new glyph — unchanged digits and all
-///   separators (and, when settled / on a shape rebuild, EVERY glyph). Painted
-///   once at rest (dy=0); these never slide (`roll.js:39,41`).
-/// - `incoming`: each CHANGED digit's NEW glyph — slides in from +1em
-///   (`enter_dy`) to rest as the roll completes.
-/// - `outgoing`: each CHANGED digit's OLD glyph — slides from rest up and out
-///   to −1em (`leave_dy`).
+/// Shaped runs grouped by motion so only the changed digits ever move:
+/// `static_glyphs` (non-rolling new glyphs — unchanged digits, separators, and
+/// when settled EVERY glyph — painted once at rest), `incoming` (each changed
+/// digit's NEW glyph, entering from +1em), `outgoing` (each changed digit's OLD
+/// glyph, leaving to −1em).
 pub struct RollPrepaint {
     line_height: Pixels,
     /// (x within bounds, shaped glyph) for each non-rolling new glyph.
@@ -282,10 +268,8 @@ impl NumericRoll {
     fn run(&self, text: &str, window: &Window) -> (ShapedLine, TextRun) {
         let mut font = window.text_style().font();
         font.weight = self.weight;
-        // A numeric roll is always tabular — fixed digit advances are what
-        // keep changed cells from reflowing their neighbours (PARITY_SPEC §0
-        // "tabular-nums on counters"). Applied here so every consumer gets it
-        // for free.
+        // Always tabular — fixed digit advances keep changed cells from
+        // reflowing neighbours (PARITY_SPEC §0); every consumer gets it free.
         font.features = crate::task_board::style::tabular_nums();
         let run = TextRun {
             len: text.len(),
@@ -346,19 +330,17 @@ impl Element for NumericRoll {
         _cx: &mut App,
     ) -> RollPrepaint {
         // The full target line gives every cell its exact x-advance
-        // (`x_for_index` over byte offsets — tabular-nums keeps every digit
-        // box fixed-width, so a per-cell paint lands precisely where the
-        // shaped line places it and never disturbs a neighbour).
+        // (tabular-nums keeps every digit box fixed-width, so a per-cell paint
+        // lands precisely and never disturbs a neighbour). One pass classifies
+        // each cell via the shared `cell_motion` law and routes its glyph(s) to
+        // a motion group at the cell's x. Settled counters (progress >= 1, or a
+        // shape rebuild whose cells are all `from: None`) classify EVERY cell
+        // `Static` → one bare row at rest, zero slide, zero phantom entrance.
         let (line, _) = self.run(&self.current, window);
         let line_height = window.line_height();
         let mut static_glyphs = Vec::new();
         let mut incoming = Vec::new();
         let mut outgoing = Vec::new();
-        // One pass: classify each cell via the shared `cell_motion` law, then
-        // route its glyph(s) to a motion group at the cell's x-advance.
-        // Settled counters (progress >= 1, or a shape rebuild whose cells are
-        // all `from: None`) classify EVERY cell `Static`, so they paint one
-        // bare row at rest — zero slide, zero phantom entrance (§8 idle; P1/P2).
         let cells = cells(&self.current, &self.previous);
         for ((byte, _), cell) in self.current.char_indices().zip(cells) {
             let x = line.x_for_index(byte);
@@ -400,17 +382,14 @@ impl Element for NumericRoll {
         // web's `.roll-digit { overflow: hidden; height: 1em }`).
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
             // Unchanged digits + separators (and, when settled, every glyph)
-            // are painted ONCE at rest and NEVER move — the genuine per-digit
-            // roll: a neighbour of a rolling digit does not slide with it
-            // (`roll.js:39,41`). At progress 1 `incoming`/`outgoing` are
-            // empty, so this is the entire bare line at zero cost.
+            // paint ONCE at rest and NEVER move (`roll.js:39,41`). At progress
+            // 1 `incoming`/`outgoing` are empty — the entire bare line, no cost.
             for (x, glyph) in static_glyphs.iter() {
                 glyph
                     .paint(point(origin.x + *x, origin.y), lh, TextAlign::Left, None, window, cx)
                     .ok();
             }
-            // Each CHANGED digit's NEW glyph enters from +1em: at progress 0 it
-            // sits one line below (entering), at 1 it rests at origin.
+            // Each CHANGED digit's NEW glyph enters from +1em (0 at rest).
             let enter = enter_dy(lh, self.progress);
             for (x, glyph) in incoming.iter() {
                 glyph
@@ -443,83 +422,5 @@ impl Element for NumericRoll {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unchanged_value_is_a_noop() {
-        let mut roll = RollValue::new("82%");
-        assert!(!roll.animating());
-        assert!(!roll.set("82%"), "same value never rolls");
-        assert!(!roll.animating());
-    }
-
-    #[test]
-    fn changed_digit_rolls_and_settles() {
-        let mut roll = RollValue::new("82%");
-        assert!(roll.set("83%"), "a digit change repaints");
-        assert!(roll.animating());
-        assert_eq!(roll.value(), "83%");
-    }
-
-    #[test]
-    fn cells_roll_only_changed_digits_of_same_shape() {
-        // "82%" → "83%": the ones digit rolls (8 stays, 3 replaces 2, % is a
-        // sep) — the web's per-digit roll.
-        let cells = cells("83%", "82%");
-        assert_eq!(
-            cells,
-            vec![
-                Cell::Digit { from: None, to: '8' }, // unchanged → no roll
-                Cell::Digit { from: Some('2'), to: '3' }, // changed → rolls
-                Cell::Sep('%'),
-            ]
-        );
-    }
-
-    #[test]
-    fn ones_place_stays_put_as_magnitude_grows() {
-        // Shape change ("9s" 2 chars → "10s" 3 chars): the web REBUILDS with
-        // no roll. Every cell is settled (`from = None`).
-        let cells = cells("10s", "9s");
-        assert_eq!(
-            cells,
-            vec![
-                Cell::Digit { from: None, to: '1' },
-                Cell::Digit { from: None, to: '0' },
-                Cell::Sep('s'),
-            ]
-        );
-    }
-
-    #[test]
-    fn separators_never_roll() {
-        // "1.2h" → "1.5h": only the tenths digit rolls; ".", "h" are seps.
-        let cells = cells("1.5h", "1.2h");
-        assert_eq!(
-            cells,
-            vec![
-                Cell::Digit { from: None, to: '1' },
-                Cell::Sep('.'),
-                Cell::Digit { from: Some('2'), to: '5' },
-                Cell::Sep('h'),
-            ]
-        );
-    }
-
-    #[test]
-    fn same_shape_requires_matching_digit_sep_layout() {
-        assert!(same_shape("82%", "91%"), "both ##%");
-        assert!(!same_shape("9s", "10s"), "different length");
-        assert!(!same_shape("5 live", "5live"), "space vs none shifts shape");
-    }
-
-    #[test]
-    fn n_live_label_rolls_only_the_count() {
-        // "5 live" → "6 live": only the leading count digit rolls; the space
-        // and the word are seps (the board-head "N live" consumer).
-        let cells = cells("6 live", "5 live");
-        assert_eq!(cells[0], Cell::Digit { from: Some('5'), to: '6' });
-        assert!(cells[1..].iter().all(|c| matches!(c, Cell::Sep(_))));
-    }
-}
+#[path = "numeric_roll_tests.rs"]
+mod tests;
