@@ -178,14 +178,21 @@ pub fn queued_pill(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
     pill_with_label(id, "pending", "Queued".to_string(), None, cx)
 }
 
-/// The symphony check-off label for a subtask status — "Queued" for the
-/// pending/unlinked vocabulary, "Cancelled" for the best-effort thread abort,
-/// otherwise the inbox label ("Running"/"Done"/"Blocked"/"Killed").
+/// The symphony check-off label for a subtask status. The bridge serves the
+/// ALREADY-ROLLED subtask vocabulary (`orchestrator/plans.py` `RUN_TO_SUBTASK`:
+/// pending/running/done/failed/killed/cancelled) — distinct from the inbox's
+/// raw run-status, so this maps that vocabulary directly rather than delegating
+/// to `status_label` (which expects "completed", not the rolled "done"). The
+/// run-status spellings (completed/blocked) are accepted too for robustness.
 pub fn plan_status_label(status: &str) -> String {
     match status {
         "" | "pending" | "idle" => "Queued".to_string(),
+        "running" => "Running".to_string(),
+        "done" | "completed" => "Done".to_string(),
+        "failed" | "blocked" => "Blocked".to_string(),
+        "killed" => "Killed".to_string(),
         "cancelled" => "Cancelled".to_string(),
-        other => status_label(other),
+        other => other.to_string(),
     }
 }
 
