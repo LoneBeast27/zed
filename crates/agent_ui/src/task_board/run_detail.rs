@@ -17,7 +17,7 @@ use markdown::Markdown;
 use serde::Deserialize;
 use ui::prelude::*;
 
-use crate::bridge::{BRIDGE_BASE_URL, fetch_json};
+use crate::bridge::{BRIDGE_BASE_URL, fetch_json, post_json};
 
 use super::motion::{DECEL, EFFECTS, StateFade};
 use super::style::HAIRLINE_HI;
@@ -117,7 +117,11 @@ pub struct RunDrawer {
     focus_handle: FocusHandle,
     needs_focus: bool,
     closing: bool,
+    /// True once an abort has been POSTed — the head's abort button reflects
+    /// it (disabled "Aborting…") until the poll lands the killed status.
+    pub(super) aborting: bool,
     _poll: Task<()>,
+    _abort: Option<Task<()>>,
 }
 
 impl RunDrawer {
@@ -184,8 +188,35 @@ impl RunDrawer {
             focus_handle: cx.focus_handle(),
             needs_focus: true,
             closing: false,
+            aborting: false,
             _poll: poll,
+            _abort: None,
         }
+    }
+
+    /// Abort this run (the drawer abort affordance): POST `/run/<id>/abort` on
+    /// the background executor. The bridge terminates the run's tracked child
+    /// process and marks it killed; the drawer's own tail-poll then lands the
+    /// killed status (no local detail flip needed). No-op unless running.
+    pub(super) fn abort(&mut self, cx: &mut Context<Self>) {
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        if self.aborting || detail.status != "running" || detail.run_id.is_empty() {
+            return;
+        }
+        self.aborting = true;
+        let run_id = detail.run_id.clone();
+        let http_client: Arc<dyn HttpClient> = cx.http_client();
+        self._abort = Some(cx.spawn(async move |_this, cx| {
+            cx.background_spawn(async move {
+                let url = format!("{BRIDGE_BASE_URL}/run/{run_id}/abort");
+                post_json(http_client.as_ref(), &url, "{}".to_string()).await
+            })
+            .await
+            .ok();
+        }));
+        cx.notify();
     }
 
     fn set_detail(&mut self, detail: RunDetail, cx: &mut Context<Self>) {

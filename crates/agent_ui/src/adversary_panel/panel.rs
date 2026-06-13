@@ -25,7 +25,9 @@ actions!(
         ToggleFocus,
         /// Broadcasts the composer's prompt to all three models (Enter via
         /// the `AdversaryComposer > Editor` keymap binding).
-        Broadcast
+        Broadcast,
+        /// Aborts the in-flight broadcast — kills the three legs' children.
+        Abort
     ]
 );
 
@@ -100,6 +102,13 @@ impl AdversaryPanel {
         self.jobs.update(cx, |jobs, cx| jobs.start(text, cx));
     }
 
+    /// Abort the in-flight broadcast (the abort affordance) — POSTs
+    /// `/adversary/<job>/abort` via the jobs entity; the live poll lands the
+    /// aborted result. A no-op unless a broadcast is pending.
+    fn abort(&mut self, cx: &mut Context<Self>) {
+        self.jobs.update(cx, |jobs, cx| jobs.abort(cx));
+    }
+
     /// `.panel-head`: "Adversary" 18px/500 + the sub-line.
     fn render_header(&self, cx: &App) -> Div {
         let colors = cx.theme().colors();
@@ -155,9 +164,36 @@ impl AdversaryPanel {
             }
         };
 
+        // While a broadcast is in flight the circle becomes an abort affordance
+        // (Stop glyph) — POSTs the abort endpoint; otherwise it's the
+        // broadcast circle.
+        let pending = matches!(self.last_phase, AdversaryPhase::Pending);
+        let circle = if pending {
+            div()
+                .id("adv-abort")
+                .on_click(cx.listener(|this, _, _, cx| this.abort(cx)))
+                .child(
+                    Icon::new(IconName::Stop)
+                        .size(IconSize::Custom(rems_from_px(20.)))
+                        .color(Color::Custom(gpui::white())),
+                )
+        } else {
+            // The broadcast circle — the web's `swords` glyph has no IconName
+            // analog; Send is the nearest broadcast affordance.
+            div()
+                .id("adv-send")
+                .on_click(cx.listener(|this, _, _, cx| this.broadcast(cx)))
+                .child(
+                    Icon::new(IconName::Send)
+                        .size(IconSize::Custom(rems_from_px(20.)))
+                        .color(Color::Custom(gpui::white())),
+                )
+        };
+
         h_flex()
             .key_context("AdversaryComposer")
             .on_action(cx.listener(|this, _: &Broadcast, _, cx| this.broadcast(cx)))
+            .on_action(cx.listener(|this, _: &Abort, _, cx| this.abort(cx)))
             .w_full()
             .max_w(px(920.))
             .items_end()
@@ -176,11 +212,8 @@ impl AdversaryPanel {
                     .child(editor::EditorElement::new(&self.editor, editor_style)),
             )
             .child(
-                // The broadcast circle — 40px `--accent-fill`, white glyph
-                // (the web's `swords` glyph has no IconName analog; Send is
-                // the nearest broadcast affordance).
-                div()
-                    .id("adv-send")
+                // 40px `--accent-fill` circle, white glyph (broadcast or abort).
+                circle
                     .flex_none()
                     .size(px(40.))
                     .rounded_full()
@@ -188,13 +221,7 @@ impl AdversaryPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| this.broadcast(cx)))
-                    .child(
-                        Icon::new(IconName::Send)
-                            .size(IconSize::Custom(rems_from_px(20.)))
-                            .color(Color::Custom(gpui::white())),
-                    ),
+                    .cursor_pointer(),
             )
             .into_any_element()
     }

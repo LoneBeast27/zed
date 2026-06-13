@@ -68,7 +68,46 @@ impl RunDrawer {
             // Raw lowercase status — the web drawer's vocabulary
             // (drawer.js:37-38), distinct from the inbox's `statusLabel`.
             .child(raw_status_pill("drawer-pill", &detail.status, cx))
+            // Abort affordance — only while the run is live (POSTs
+            // /run/<id>/abort; the bridge kills the tracked child process).
+            .children(self.render_abort(&detail.status, cx))
             .child(self.render_close(cx))
+    }
+
+    /// The abort button: a 30×30 Stop-glyph control shown only while the run
+    /// is `running`. Click POSTs the abort endpoint; once posted it reads
+    /// disabled (placeholder tint) until the tail-poll lands the killed status.
+    fn render_abort(&self, status: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if status != "running" {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        let aborting = self.aborting;
+        let color = if aborting {
+            colors.text_placeholder
+        } else {
+            crate::agent_accents::color_for_status("failed")
+        };
+        Some(
+            div()
+                .id("drawer-abort")
+                .flex_none()
+                .size(px(30.))
+                .rounded(px(8.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(!aborting, |this| {
+                    this.cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| this.abort(cx)))
+                })
+                .child(
+                    Icon::new(IconName::Stop)
+                        .size(IconSize::Custom(rems_from_px(18.)))
+                        .color(Color::Custom(color)),
+                )
+                .into_any_element(),
+        )
     }
 
     /// `#drawer-close`: 30×30 grid-centered button, 20px glyph, 8px radius;

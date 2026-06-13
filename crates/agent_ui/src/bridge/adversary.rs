@@ -89,6 +89,8 @@ pub struct AdversaryJobs {
     poll_task: Option<Task<()>>,
     /// The in-flight `POST /adversary`.
     start_task: Option<Task<()>>,
+    /// The in-flight `POST /adversary/<job>/abort` (the abort affordance).
+    abort_task: Option<Task<()>>,
 }
 
 /// RAII registration of a visible adversary panel. Dropping it decrements
@@ -160,6 +162,29 @@ impl AdversaryJobs {
         self.phase = AdversaryPhase::Failed(error);
         self.poll_task = None;
         cx.notify();
+    }
+
+    /// Abort the in-flight broadcast (the abort affordance): POST
+    /// `/adversary/<job>/abort` on the background executor. The bridge kills
+    /// the three legs' tracked children and flags the job cancelled; the live
+    /// job poll then lands the terminal (aborted) snapshot, so no local phase
+    /// flip is needed here. A no-op unless a job is Pending with an id.
+    pub fn abort(&mut self, cx: &mut gpui::Context<Self>) {
+        if !matches!(self.phase, AdversaryPhase::Pending) {
+            return;
+        }
+        let Some(job) = self.job.clone() else {
+            return; // POST still in flight — no job id to abort yet
+        };
+        let http_client = cx.http_client();
+        self.abort_task = Some(cx.spawn(async move |_this, cx| {
+            cx.background_spawn(async move {
+                let url = format!("{BRIDGE_BASE_URL}/adversary/{job}/abort");
+                post_json(http_client.as_ref(), &url, "{}".to_string()).await
+            })
+            .await
+            .ok();
+        }));
     }
 
     /// (Re)arm the poll when — and only when — a job id is pending and at
