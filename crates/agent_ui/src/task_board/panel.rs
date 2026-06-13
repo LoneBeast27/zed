@@ -343,6 +343,15 @@ impl Render for TaskBoardPanel {
         }
         let total = board.len();
         let running = board.iter().filter(|r| r.status == "running").count();
+        // P7: prune reveal springs against the live board set every render
+        // (mirroring `usage_panel`'s meter/roll retain). A row hover-revealed
+        // and then gone from the board with no mouse-leave would otherwise leak
+        // its settled spring entry forever — GPUI never synthesises
+        // `on_hover(false)` when a row stops being built. Keeps animating
+        // entries so an in-flight collapse on a just-vanished row completes.
+        let live_ids: std::collections::HashSet<SharedString> =
+            board.iter().map(|r| SharedString::from(r.run_id.clone())).collect();
+        super::reveal_prune::prune_reveal_springs(&mut self.reveal_springs, &live_ids);
         // Re-target the header rolls (no-op when unchanged). The "N live"
         // value only updates while running > 0 — the segment unmounts at 0,
         // so freezing the last count avoids a roll-to-zero on the way out.

@@ -20,6 +20,7 @@ pub mod motion;
 mod node;
 mod paint_cache;
 pub mod panel;
+mod reveal_prune;
 pub mod run_detail;
 mod run_detail_body;
 mod run_detail_head;
