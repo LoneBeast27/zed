@@ -157,6 +157,17 @@ impl AnimatedValue {
     /// from its current offset onto the sharper exit spline, never snapping
     /// to either endpoint first). Same-target calls are no-ops like
     /// `retarget`.
+    ///
+    /// **Spring handoff (the P4 fix — "drop back to a curve").** The affordance
+    /// the [`spring`](Self::spring) constructor documents. On a spring-backed
+    /// value it samples the spring's CONTINUOUS current position, then DROPS the
+    /// spring (`self.spring = None`) so the curve fields drive it from here.
+    /// Position is continuous (no §8.7 snap — the curve starts exactly where the
+    /// spring was); velocity is intentionally NOT carried (a curve has no
+    /// momentum — a true velocity-carry interrupt stays on plain
+    /// [`retarget`](Self::retarget), which keeps the spring). Before this fix the
+    /// written fields were dead: `current`/`animating` dispatch to `self.spring`
+    /// FIRST, so the value kept its stale spring trajectory — a silent no-op.
     pub fn retarget_with(
         &mut self,
         to: f32,
@@ -166,9 +177,12 @@ impl AnimatedValue {
         if to == self.to {
             return self;
         }
-        // Sample the in-flight value under the OLD curve/clock first — the
-        // current value belongs to the old flight, not the new one.
+        // Sample the in-flight value under the OLD clock first (spring position
+        // or old curve) — the current value belongs to the old flight. Then
+        // drop any spring so the new curve fields actually drive the value
+        // (`current`/`animating` dispatch to `self.spring` FIRST when `Some`).
         self.from = self.current();
+        self.spring = None;
         self.curve = curve.into();
         self.duration = duration;
         self.to = to;
@@ -314,169 +328,5 @@ impl AnimatedColor {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::curves::{DECEL, EFFECTS, MotionCurve};
-    use super::*;
-
-    #[test]
-    fn state_fade_opens_window_and_advances_generation() {
-        let mut fade = StateFade::default();
-        assert!(!fade.fresh(), "untouched state is settled");
-        assert_eq!(fade.generation(), 0);
-        fade.bump();
-        assert!(fade.fresh(), "a flip opens the crossfade window");
-        assert_eq!(fade.generation(), 1);
-        fade.bump();
-        assert_eq!(fade.generation(), 2, "each flip is a new animation key");
-        assert!(StateFade::begun().fresh());
-    }
-
-    #[test]
-    fn animated_value_retargets_from_interpolated_current() {
-        let mut value = AnimatedValue::settled(10.0, EFFECTS, Duration::from_millis(200));
-        assert!(!value.animating());
-        assert_eq!(value.current(), 10.0);
-
-        value.retarget(20.0);
-        assert!(value.animating());
-        assert_eq!(value.generation(), 1);
-        // t=0 starts at the old value; t=1 lands on the target; midway is
-        // strictly between (no snap — §8.7a).
-        assert_eq!(value.value_at(0.0), 10.0);
-        assert_eq!(value.value_at(1.0), 20.0);
-        let mid = value.value_at(0.5);
-        assert!(mid > 10.0 && mid < 20.0, "mid = {mid}");
-
-        // Same-target retarget is a no-op (render loops call this per frame).
-        value.retarget(20.0);
-        assert_eq!(value.generation(), 1);
-
-        // A mid-flight retarget re-bases from the interpolated current value.
-        let current = value.current();
-        value.retarget(0.0);
-        assert_eq!(value.generation(), 2);
-        assert!(
-            (value.value_at(0.0) - current).abs() < 0.5,
-            "retarget must start from the in-flight value ({current}), got {}",
-            value.value_at(0.0)
-        );
-
-        value.jump(5.0);
-        assert!(!value.animating());
-        assert_eq!(value.current(), 5.0);
-    }
-
-    #[test]
-    fn retarget_with_switches_curve_and_rebases_continuously() {
-        // The toast interrupt: a DECEL emerge (1 → 0) cut short by a
-        // retract retargeting onto the exit spline. The new flight must
-        // start from the in-flight offset — NOT the fully-emerged endpoint
-        // (§8.7a; the mid-emerge dismiss snap).
-        let mut emerge = AnimatedValue::settled(1.0, DECEL, Duration::from_millis(500));
-        emerge.retarget(0.0);
-        std::thread::sleep(Duration::from_millis(30));
-        let in_flight = emerge.current();
-        assert!(
-            in_flight > 0.0 && in_flight < 1.0,
-            "mid-emerge offset, got {in_flight}"
-        );
-
-        emerge.retarget_with(1.0, MotionCurve::Exit, Duration::from_millis(400));
-        assert_eq!(emerge.generation(), 2);
-        assert_eq!(emerge.duration(), Duration::from_millis(400));
-        assert!(
-            (emerge.value_at(0.0) - in_flight).abs() < 0.1,
-            "exit must re-base from the in-flight value ({in_flight}), got {}",
-            emerge.value_at(0.0)
-        );
-        assert_eq!(emerge.value_at(1.0), 1.0);
-
-        // Same-target call is a no-op (double-retract).
-        emerge.retarget_with(1.0, MotionCurve::Exit, Duration::from_millis(400));
-        assert_eq!(emerge.generation(), 2);
-    }
-
-    #[test]
-    fn animated_color_retargets_from_interpolated_current() {
-        let red: Hsla = gpui::Rgba {
-            r: 1.0,
-            g: 0.0,
-            b: 0.0,
-            a: 1.0,
-        }
-        .into();
-        let blue: Hsla = gpui::Rgba {
-            r: 0.0,
-            g: 0.0,
-            b: 1.0,
-            a: 0.2,
-        }
-        .into();
-        let mut tint = AnimatedColor::settled(red, EFFECTS, Duration::from_millis(200));
-        assert!(!tint.animating());
-        assert_eq!(tint.current(), red);
-
-        tint.retarget(blue);
-        assert!(tint.animating());
-        assert_eq!(tint.generation(), 1);
-        // Same-target retarget is a no-op — a ticking render can never
-        // restart the crossfade.
-        tint.retarget(blue);
-        assert_eq!(tint.generation(), 1);
-
-        std::thread::sleep(Duration::from_millis(30));
-        let in_flight = Rgba::from(tint.current());
-        assert!(
-            in_flight.r < 1.0 && in_flight.b > 0.0,
-            "mid-fade color, got {in_flight:?}"
-        );
-
-        // Retargeting back re-bases from the CURRENT mix — never the
-        // opposite endpoint (the critical-tint-flash blocker).
-        tint.retarget(red);
-        assert_eq!(tint.generation(), 2);
-        let rebased = Rgba::from(tint.current());
-        assert!(
-            (rebased.r - in_flight.r).abs() < 0.15 && (rebased.b - in_flight.b).abs() < 0.15,
-            "re-base must continue from {in_flight:?}, got {rebased:?}"
-        );
-
-        tint.jump(blue);
-        assert!(!tint.animating());
-        assert_eq!(tint.current(), blue);
-    }
-
-    #[test]
-    fn mix_interpolates_srgb_endpoints_exactly() {
-        let a = gpui::Rgba {
-            r: 1.0,
-            g: 0.0,
-            b: 0.5,
-            a: 1.0,
-        };
-        let b = gpui::Rgba {
-            r: 0.0,
-            g: 1.0,
-            b: 0.5,
-            a: 0.0,
-        };
-        // Hsla round-trips cost a little float precision — compare with tolerance.
-        let assert_rgba = |got: gpui::Rgba, want: gpui::Rgba| {
-            assert!((got.r - want.r).abs() < 1e-4, "r: {got:?} vs {want:?}");
-            assert!((got.g - want.g).abs() < 1e-4, "g: {got:?} vs {want:?}");
-            assert!((got.b - want.b).abs() < 1e-4, "b: {got:?} vs {want:?}");
-            assert!((got.a - want.a).abs() < 1e-4, "a: {got:?} vs {want:?}");
-        };
-        assert_rgba(gpui::Rgba::from(mix(a.into(), b.into(), 0.0)), a);
-        assert_rgba(gpui::Rgba::from(mix(a.into(), b.into(), 1.0)), b);
-        assert_rgba(
-            gpui::Rgba::from(mix(a.into(), b.into(), 0.5)),
-            gpui::Rgba {
-                r: 0.5,
-                g: 0.5,
-                b: 0.5,
-                a: 0.5,
-            },
-        );
-    }
-}
+#[path = "animated_tests.rs"]
+mod tests;
