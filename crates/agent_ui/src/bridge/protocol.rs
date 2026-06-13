@@ -65,6 +65,22 @@ pub struct PlanSnapshot {
     pub summary: String,
     #[serde(default)]
     pub waves: Vec<Vec<PlanSubtask>>,
+    /// Live/recent runs NOT bound to any subtask (an auto-match miss, P6) —
+    /// the panel badges these ("running, unlinked") so a stray run is visible
+    /// instead of a subtask silently stranded on "Queued". Defaults to empty.
+    #[serde(default)]
+    pub unlinked_runs: Vec<UnlinkedRun>,
+}
+
+/// One run the bridge could not bind to a plan subtask (P6 auto-match miss).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct UnlinkedRun {
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub status: String,
 }
 
 impl PlanSnapshot {

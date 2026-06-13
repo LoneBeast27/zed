@@ -31,7 +31,7 @@ use ui::prelude::*;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::agent_accents::ACCENT;
-use crate::bridge::{self, BridgeStore, PlanSnapshot, PlanSubtask, PlanWatch};
+use crate::bridge::{self, BridgeStore, PlanSnapshot, PlanSubtask, PlanWatch, UnlinkedRun};
 use crate::task_board::motion::DECEL;
 use crate::task_board::style::{HAIRLINE_HI, SURFACE_1, agent_chip, empty_state, plan_status_pill};
 
@@ -133,7 +133,57 @@ impl SymphonyPanel {
                     .child(SharedString::from(summary)),
             )
             .children(waves)
+            .children(self.render_unlinked(&plan.unlinked_runs, cx))
             .into_any_element()
+    }
+
+    /// A footer banner for runs the bridge could not bind to a subtask (P6):
+    /// an auto-match miss is shown as "N run(s) running, unlinked · agent" in
+    /// the amber blocked tint, so a stray run is visible instead of a subtask
+    /// silently stranded on "Queued". `None` (no banner) when all runs linked.
+    fn render_unlinked(&self, unlinked: &[UnlinkedRun], cx: &App) -> Option<AnyElement> {
+        if unlinked.is_empty() {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        let amber = crate::agent_accents::color_for_status("blocked");
+        let agents = unlinked
+            .iter()
+            .map(|run| run.agent.as_str())
+            .filter(|agent| !agent.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let label = if agents.is_empty() {
+            format!("{} run(s) running, unlinked", unlinked.len())
+        } else {
+            format!("{} run(s) running, unlinked · {agents}", unlinked.len())
+        };
+        Some(
+            h_flex()
+                .w_full()
+                .gap(px(8.))
+                .items_center()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(amber.opacity(0.4))
+                .bg(amber.opacity(0.1))
+                .px(px(12.))
+                .py(px(9.))
+                .child(
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(amber)
+                        .flex_none(),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(colors.text_muted)
+                        .child(SharedString::from(label)),
+                )
+                .into_any_element(),
+        )
     }
 
     /// One `.wave` band: label + the card grid; the FIRST wave is `.active`
