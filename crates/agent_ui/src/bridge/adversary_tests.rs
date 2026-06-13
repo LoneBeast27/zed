@@ -212,6 +212,38 @@ async fn job_error_status_fails_with_the_bridge_message(cx: &mut TestAppContext)
     });
 }
 
+/// An aborted broadcast: the bridge job lands `status == "cancelled"` with the
+/// partial "(aborted)" answers (orchestrator/adversary.py).
+const CANCELLED: &str = r#"{"status": "cancelled", "result": {
+    "answers": {"claude": "(aborted)", "codex": "(aborted)", "gemini": "(aborted)"},
+    "synthesis": "(aborted)"}}"#;
+
+#[gpui::test]
+async fn job_cancelled_status_lands_distinct_aborted_phase(cx: &mut TestAppContext) {
+    // P4: a cancelled job must land AdversaryPhase::Cancelled, NOT Done — so
+    // the panel renders the distinct aborted banner instead of passing the
+    // "(aborted)" legs off as a normal completed broadcast.
+    let (_, _) = fake_adversary_bridge(cx, 0, CANCELLED);
+    let jobs = cx.new(|_| AdversaryJobs::default());
+    let _watch = jobs.update(cx, |jobs, cx| {
+        let watch = jobs.watch(cx);
+        jobs.start("q".into(), cx);
+        watch
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(2600));
+    cx.run_until_parked();
+    jobs.read_with(cx, |jobs, _| {
+        let AdversaryPhase::Cancelled(result) = &jobs.phase else {
+            panic!("expected Cancelled (distinct from Done), got {:?}", jobs.phase);
+        };
+        // The partial result is carried so the columns still render under the
+        // aborted banner.
+        assert_eq!(result.answers["claude"], "(aborted)");
+        assert_eq!(result.synthesis.as_deref(), Some("(aborted)"));
+    });
+}
+
 #[gpui::test]
 async fn poll_dies_when_unwatched_and_resumes_on_rewatch(cx: &mut TestAppContext) {
     let (_, poll_hits) = fake_adversary_bridge(cx, 0, DONE);

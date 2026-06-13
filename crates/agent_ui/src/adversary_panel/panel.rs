@@ -83,7 +83,11 @@ impl AdversaryPanel {
             return;
         }
         self.done = match &phase {
-            AdversaryPhase::Done(result) => Some(build_done_view(result, cx)),
+            // Cancelled carries the partial result — build the same column view
+            // so the (aborted) legs render under the aborted banner (P4).
+            AdversaryPhase::Done(result) | AdversaryPhase::Cancelled(result) => {
+                Some(build_done_view(result, cx))
+            }
             _ => None,
         };
         self.last_phase = phase;
@@ -262,6 +266,7 @@ impl AdversaryPanel {
 impl Render for AdversaryPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let composer = self.render_composer(window, cx);
+        let aborted_banner = self.render_aborted_banner(cx);
         let columns = self.render_columns(window, cx);
         let synthesis = self.render_synthesis(window, cx);
         let error = match &self.last_phase {
@@ -287,6 +292,7 @@ impl Render for AdversaryPanel {
                     .pb(px(32.))
                     .items_start()
                     .child(composer)
+                    .children(aborted_banner)
                     .children(columns)
                     .children(error)
                     .children(synthesis),

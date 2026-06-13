@@ -86,7 +86,9 @@ impl AdversaryPanel {
                 .iter()
                 .map(|vendor| self.render_column(vendor, generation, None, window, cx))
                 .collect(),
-            (AdversaryPhase::Done(_), Some(done)) => done
+            // Done OR Cancelled (P4): both render the landed columns; Cancelled
+            // additionally shows the aborted banner (render_aborted_banner).
+            (AdversaryPhase::Done(_) | AdversaryPhase::Cancelled(_), Some(done)) => done
                 .columns
                 .iter()
                 .map(|(vendor, markdown)| {
@@ -164,6 +166,45 @@ impl AdversaryPanel {
                 |column, t| column.opacity(t).mt(px(4. * (1. - t))),
             )
             .into_any_element()
+    }
+
+    /// The P4 aborted banner: shown ONLY in `Cancelled` phase, above the
+    /// (partial) columns, so an aborted broadcast is visibly distinct from a
+    /// normal completed Done. Amber-tinted (the blocked bucket) with an
+    /// explanation that the legs were stopped mid-flight.
+    pub(super) fn render_aborted_banner(&self, cx: &App) -> Option<AnyElement> {
+        if !matches!(self.last_phase, AdversaryPhase::Cancelled(_)) {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        let amber: gpui::Hsla = STATUS_BLOCKED.into();
+        Some(
+            h_flex()
+                .w_full()
+                .max_w(px(1100.))
+                .gap(px(8.))
+                .items_center()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(amber.opacity(0.4))
+                .bg(amber.opacity(0.1))
+                .px(px(14.))
+                .py(px(10.))
+                .mb(px(16.))
+                .child(
+                    Icon::new(IconName::Stop)
+                        .size(IconSize::Custom(rems_from_px(16.)))
+                        .color(Color::Custom(amber)),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(colors.text_muted)
+                        .child("Broadcast aborted — legs stopped mid-flight; answers below are partial."),
+                )
+                .into_any_element(),
+        )
     }
 
     /// `.synth-card`: hairline-hi card with the merge head + tinted section

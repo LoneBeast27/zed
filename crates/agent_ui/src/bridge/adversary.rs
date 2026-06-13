@@ -67,6 +67,11 @@ pub enum AdversaryPhase {
     Pending,
     /// Terminal: the three columns + synthesis.
     Done(AdversaryResult),
+    /// Terminal: the broadcast was ABORTED (bridge job `status == "cancelled"`,
+    /// `orchestrator/adversary.py`). Carries the partial result ("(aborted)"
+    /// legs) so the panel can render the columns WITH a distinct aborted
+    /// banner, rather than passing it off as a normal completed Done (P4).
+    Cancelled(AdversaryResult),
     /// Terminal: POST failed or the bridge job errored.
     Failed(String),
 }
@@ -207,10 +212,11 @@ impl AdversaryJobs {
         }));
     }
 
-    /// A terminal `GET /adversary/<job>` snapshot lands: `error` fails, any
-    /// other non-`running` status renders the result (the web's
-    /// `renderResult(j.result)` else-branch — liberal toward future
-    /// statuses).
+    /// A terminal `GET /adversary/<job>` snapshot lands: `error` fails,
+    /// `cancelled` lands the partial result as a distinct ABORTED phase (P4 —
+    /// not a normal Done), and any other non-`running` status renders the
+    /// result (the web's `renderResult(j.result)` else-branch — liberal toward
+    /// future statuses).
     fn apply_terminal(&mut self, snapshot: AdversaryJobSnapshot, cx: &mut gpui::Context<Self>) {
         self.poll_task = None;
         self.phase = match snapshot.status.as_str() {
@@ -219,6 +225,7 @@ impl AdversaryJobs {
                     .error
                     .unwrap_or_else(|| "unknown error".to_string()),
             ),
+            "cancelled" => AdversaryPhase::Cancelled(snapshot.result.unwrap_or_default()),
             _ => AdversaryPhase::Done(snapshot.result.unwrap_or_default()),
         };
         cx.notify();
