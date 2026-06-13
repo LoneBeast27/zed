@@ -184,8 +184,12 @@ impl SettingsStatusPanel {
             .into_any_element()
     }
 
-    /// The "open settings.json" jump — dispatches `zed::OpenSettings`
-    /// (read-only panel; edits happen where Zed edits live).
+    /// The "open settings.json" jump — dispatches `zed::OpenSettingsFile`,
+    /// which opens the raw settings JSON file (`paths::settings_file()`), matching
+    /// the label and the §4.6 settings-live-in-settings.json philosophy. (The
+    /// sibling `zed::OpenSettings` action opens the settings *editor* UI instead —
+    /// the wrong surface for a read-only status panel whose whole thesis is the
+    /// file is the source.)
     fn render_jump(&self, key: &'static str, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
         let jump_id = ElementId::Name(format!("settings-jump-{key}").into());
@@ -212,7 +216,7 @@ impl SettingsStatusPanel {
                         }
                     }))
                     .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(zed_actions::OpenSettings), cx);
+                        window.dispatch_action(Box::new(zed_actions::OpenSettingsFile), cx);
                     })
                     .child(
                         Icon::new(IconName::Settings)
