@@ -109,7 +109,10 @@ pub fn sweep_center(t: f32) -> f32 {
 }
 
 impl Shimmer {
-    fn run(&self, text: &str, color: Hsla, window: &Window) -> ShapedLine {
+    /// Shape `text` (a `SharedString` — clones are Arc bumps, no realloc) at
+    /// `color`. Shaping is a line-layout cache hit across frames (the cache key
+    /// excludes colour), so a per-frame recolour is cheap.
+    fn run(&self, text: gpui::SharedString, color: Hsla, window: &Window) -> ShapedLine {
         let mut font = window.text_style().font();
         font.weight = self.weight;
         let run = TextRun {
@@ -122,7 +125,25 @@ impl Shimmer {
         };
         window
             .text_system()
-            .shape_line(text.to_string().into(), self.font_size, &[run], None)
+            .shape_line(text, self.font_size, &[run], None)
+    }
+
+    /// Build the per-char `(x, SharedString)` layout once (P8 cache miss): shape
+    /// the whole label to get exact per-char x-advances, then record each
+    /// character's start x and its single-char string. The single-char
+    /// `SharedString`s are allocated here ONCE and reused across frames.
+    fn build_char_cache(&self, window: &Window) -> ShimmerCharCache {
+        let full = self.run(self.text.clone(), self.base, window);
+        let mut chars = Vec::new();
+        for (byte, ch) in self.text.char_indices() {
+            let x = full.x_for_index(byte);
+            chars.push((x, gpui::SharedString::from(ch.to_string())));
+        }
+        ShimmerCharCache {
+            text: self.text.clone(),
+            font_size: self.font_size,
+            chars,
+        }
     }
 }
 
@@ -169,6 +190,30 @@ pub struct ShimmerPrepaint {
     line_height: Pixels,
 }
 
+/// Cross-frame element-state cache (P8): the per-char `(x, SharedString)`
+/// layout is STABLE while busy — only the band centre moves — so it is built
+/// once and reused, keyed by `(text, font_size)`. Without it, prepaint
+/// (re-run every frame while the `.repeat()` animation pumps) rebuilt the Vec
+/// and allocated one `SharedString` per char EVERY frame (~840 allocs/s for a
+/// 14-char label at 60fps). Shaping itself is a line-layout cache HIT (the
+/// cache key excludes colour), so only the per-frame recolour remains.
+#[derive(Clone)]
+struct ShimmerCharCache {
+    text: gpui::SharedString,
+    font_size: Pixels,
+    chars: Vec<(Pixels, gpui::SharedString)>,
+}
+
+impl ShimmerCharCache {
+    /// Whether this cache is still valid for `(text, font_size)` — a hit means
+    /// prepaint reuses it (no per-frame string allocation); a miss rebuilds.
+    /// The layout depends ONLY on text + size (colour is applied per-frame), so
+    /// those two are the whole cache key.
+    fn matches(&self, text: &gpui::SharedString, font_size: Pixels) -> bool {
+        self.text == *text && self.font_size == font_size
+    }
+}
+
 impl Element for ShimmerInner {
     type RequestLayoutState = ();
     type PrepaintState = ShimmerPrepaint;
@@ -188,7 +233,7 @@ impl Element for ShimmerInner {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        let line = self.shimmer.run(&self.shimmer.text, self.shimmer.base, window);
+        let line = self.shimmer.run(self.shimmer.text.clone(), self.shimmer.base, window);
         let mut style = Style::default();
         style.size = size(line.width().into(), window.line_height().into());
         (window.request_layout(style, [], cx), ())
@@ -196,7 +241,7 @@ impl Element for ShimmerInner {
 
     fn prepaint(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
         _request_layout: &mut (),
@@ -204,16 +249,20 @@ impl Element for ShimmerInner {
         _cx: &mut App,
     ) -> ShimmerPrepaint {
         let line_height = window.line_height();
-        // Shape the whole label once to get exact per-char x-advances, then
-        // record each character's start x (tabular-or-not, this is the true
-        // painted layout). Sweep mode paints per char; pulsate paints the
-        // whole line, so we still keep the char list cheap.
-        let full = self.shimmer.run(&self.shimmer.text, self.shimmer.base, window);
-        let mut chars = Vec::new();
-        for (byte, ch) in self.shimmer.text.char_indices() {
-            let x = full.x_for_index(byte);
-            chars.push((x, gpui::SharedString::from(ch.to_string())));
-        }
+        // The per-char (x, SharedString) layout is stable across frames (only
+        // the band centre moves), so cache it in element state keyed by
+        // (text, font_size) and reuse — only the per-frame recolour stays
+        // (P8). `chars` clones are Arc bumps, not string allocations. Without a
+        // stable id (defensive — the shimmer always has one), rebuild.
+        let chars = match id {
+            Some(id) => window.with_element_state::<ShimmerCharCache, _>(id, |cached, window| {
+                let hit =
+                    cached.filter(|c| c.matches(&self.shimmer.text, self.shimmer.font_size));
+                let cache = hit.unwrap_or_else(|| self.shimmer.build_char_cache(window));
+                (cache.chars.clone(), cache)
+            }),
+            None => self.shimmer.build_char_cache(window).chars,
+        };
         ShimmerPrepaint { chars, line_height }
     }
 
@@ -236,7 +285,7 @@ impl Element for ShimmerInner {
                 // 0.4 and 0.92 (the standing `pulsating_between` behaviour).
                 let alpha = 0.4 + 0.52 * pulse(self.phase);
                 let color = self.shimmer.base.opacity(alpha);
-                let line = self.shimmer.run(&self.shimmer.text, color, window);
+                let line = self.shimmer.run(self.shimmer.text.clone(), color, window);
                 line.paint(origin, lh, TextAlign::Left, None, window, cx).ok();
             }
             ShimmerMode::Sweep => {
@@ -249,7 +298,9 @@ impl Element for ShimmerInner {
                     let frac = (f32::from(*x) / width).clamp(0., 1.); // glyph start as the sample point
                     let w = band_weight(frac, center);
                     let color = mix_hsla(self.shimmer.base, self.shimmer.highlight, w);
-                    let glyph = self.shimmer.run(ch, color, window);
+                    // `ch` is the cached single-char string — clone is an Arc
+                    // bump, so the per-frame recolour allocates nothing.
+                    let glyph = self.shimmer.run(ch.clone(), color, window);
                     glyph
                         .paint(point(origin.x + *x, origin.y), lh, TextAlign::Left, None, window, cx)
                         .ok();
@@ -323,5 +374,34 @@ mod tests {
         let hi = gpui::Rgba::from(mix_hsla(a, b, 1.));
         assert!((lo.r - 1.).abs() < 1e-4 && lo.b < 1e-4);
         assert!((hi.b - 1.).abs() < 1e-4 && hi.r < 1e-4);
+    }
+
+    // --- P8: the char-layout cache reuses across frames, rebuilding only on a
+    // text/size change — this is the predicate that decides reuse-vs-realloc.
+
+    #[test]
+    fn char_cache_is_reused_for_the_same_text_and_size_and_rebuilt_otherwise() {
+        let cache = ShimmerCharCache {
+            text: gpui::SharedString::from("Orchestrating…"),
+            font_size: gpui::px(13.),
+            chars: Vec::new(),
+        };
+        // Same text + size → HIT: prepaint reuses the layout (no per-frame
+        // SharedString allocation), which is the whole point of P8.
+        assert!(
+            cache.matches(&gpui::SharedString::from("Orchestrating…"), gpui::px(13.)),
+            "identical text + size must reuse the cached layout"
+        );
+        // A changed label → MISS (the band still sweeps the SAME label every
+        // frame, so this only fires on a real text change, e.g. busy→landed).
+        assert!(
+            !cache.matches(&gpui::SharedString::from("Thinking…"), gpui::px(13.)),
+            "a different label must rebuild the layout"
+        );
+        // A changed size → MISS (x-advances depend on font size).
+        assert!(
+            !cache.matches(&gpui::SharedString::from("Orchestrating…"), gpui::px(15.)),
+            "a different font size must rebuild the layout"
+        );
     }
 }
