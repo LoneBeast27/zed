@@ -4,15 +4,19 @@
 //! usage island rest-%, the usage panel pool %, the task-board run count +
 //! "N live", the tasks-island "N subagents" count.
 //!
-//! **Per-digit vs whole-number (the conscious divergence, decided here):**
-//! the web rolls PER DIGIT — only the changed digits slide, aligned from the
-//! ones place. Per-digit is *cheap* in gpui too: tabular-nums gives every
-//! digit a fixed advance, so a changed cell is a fixed-width sub-box that can
-//! clip + paint its old/new glyph at a vertical offset without disturbing its
-//! neighbours. We therefore port the web's per-digit roll faithfully rather
-//! than a whole-number slide. Non-digit characters (".", "s", "%", " ") and
-//! any cell whose shape changed (different digit count) render bare and swap
-//! instantly — exactly `roll.js`'s `needRebuild` / `setSep` branches.
+//! **Genuinely per-digit (the conscious divergence, decided here):** the web
+//! rolls PER DIGIT — `roll.js:41` `if (before === ch) return;` leaves an
+//! unchanged digit untouched, and `:39` `setSep` swaps a separator with no
+//! transform; ONLY a changed digit's stack slides (`:84-88`
+//! `translateY(0)`→`translateY(-1em)`). Per-digit is *cheap* in gpui too:
+//! tabular-nums gives every digit a fixed advance, so a changed cell is a
+//! fixed-width sub-box that can clip + paint its old/new glyph at a vertical
+//! offset without disturbing its neighbours. The paint here mirrors that
+//! exactly: unchanged digits and separators are painted ONCE at rest (dy=0,
+//! the `static_glyphs` group) and never move; only the changed digits' glyphs
+//! ride the slide (the `incoming`/`outgoing` groups). Any cell whose shape
+//! changed (different digit count) takes the `needRebuild` branch — the new
+//! value appears settled with no roll (`roll.js:28-33`).
 //!
 //! **Identity & the pump.** This is a stateless paint helper, not a
 //! timer-owning element: the caller owns one [`RollValue`] in its view state
@@ -44,9 +48,21 @@ pub const ROLL_MS: Duration = Duration::from_millis(200);
 
 /// Tracks one live counter's rolling state: the displayed string plus a
 /// 0→1 roll-progress scalar that slides changed digits old-up / new-in.
-/// `set` records a value change and re-bases the progress from the
-/// interpolated current value (a mid-roll change is continuous, never a
-/// snap — the [`AnimatedValue`] retarget law, §8.7a).
+///
+/// **Mid-roll continuity (the honest contract):** a single 0→1 progress
+/// scalar drives ALL changed digits in lockstep, exactly like `roll.js`'s one
+/// `requestAnimationFrame` per `rollNumber` call. When a NEW value arrives
+/// while a roll is still in flight, [`set`](Self::set) re-bases the slide to
+/// roll-start (progress 0) with the CURRENTLY-DISPLAYED value as the new
+/// outgoing — the same restart-from-0 the web performs (`roll.js:79-89`:
+/// `transition="none"; transform=translateY(0)` then re-climbs, with the
+/// prior *target* as `before`). The in-flight blend is NOT carried across the
+/// re-aim — that would need per-column progress, which diverges from the
+/// web's single-clock roll and (per the design-check) produces a WORSE
+/// changed-digit jump (incoming→outgoing role flip = a full 1em) than the
+/// 0.5em a clean restart costs. Board counters tick ≈1Hz, far longer than the
+/// 200ms roll, so this mid-flight path is rarely reached; the snap is
+/// minimised by reusing the rendered value as the new outgoing.
 #[derive(Debug, Clone)]
 pub struct RollValue {
     /// The string currently on screen (the digits the NEW value rolls in).
@@ -77,9 +93,25 @@ impl RollValue {
         if value == self.current {
             return false;
         }
-        // The digits leaving are whatever is rendered RIGHT NOW: if a prior
-        // roll is still mid-flight we freeze its visible blend as the new
-        // `previous` so the slide is continuous (no opposite-endpoint snap).
+        // A digit-COUNT / shape change takes the web's `needRebuild` branch
+        // (`roll.js:28-33`): the new value appears SETTLED with no roll — no
+        // glyph rolls out, and (the P2 fix) the new line does NOT slide in
+        // from +1em either. `cells()` already settles every cell on a shape
+        // change; settling progress at 1 makes `enter_dy = 0` so the rebuilt
+        // value is painted at rest. The container width morphs on its own
+        // SPATIAL clock (the usage island), independent of this content swap.
+        if !same_shape(&value, &self.current) {
+            self.current = value;
+            self.previous = self.current.clone();
+            self.progress = AnimatedValue::settled(1., EFFECTS, ROLL_MS);
+            return true;
+        }
+        // Same shape: the changed digits roll. The outgoing digits are
+        // whatever is rendered RIGHT NOW (the value being rolled in). If a
+        // prior roll is still mid-flight, this RE-BASES the slide to roll-
+        // start (progress 0) with the current value as outgoing — the same
+        // restart the web does (`roll.js:79-89`); the in-flight blend is not
+        // carried (see the type doc for why per-column continuity is rejected).
         self.previous = std::mem::replace(&mut self.current, value);
         self.progress.jump(0.);
         self.progress.retarget(1.);
@@ -171,6 +203,47 @@ pub fn cells(current: &str, previous: &str) -> Vec<Cell> {
         .collect()
 }
 
+/// Where a cell's NEW glyph paints during a roll — the pure routing the
+/// per-digit paint follows (extracted so the "only changed digits move" law is
+/// unit-testable WITHOUT a `Window`). `Static` glyphs are painted once at rest
+/// and never move; a `Rolling` digit slides its new glyph in and its `from`
+/// glyph out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CellMotion {
+    /// Painted at rest (dy=0), never moves: unchanged digit, separator, or any
+    /// cell once the roll has settled / on a shape rebuild.
+    Static(char),
+    /// A changed digit mid-roll: `to` enters from +1em, `from` leaves to −1em.
+    Rolling { from: char, to: char },
+}
+
+/// Classify a cell for paint given the current roll progress. Once settled
+/// (`progress >= 1.`) EVERY cell is `Static` — so a finished roll, and the
+/// `needRebuild` shape-change case (all cells `from: None`), paint one bare
+/// row at rest (no slide, no phantom entrance). This is the single source of
+/// truth the prepaint loop and the tests share.
+pub fn cell_motion(cell: Cell, progress: f32) -> CellMotion {
+    match cell {
+        Cell::Digit { from: Some(from), to } if progress < 1. => CellMotion::Rolling { from, to },
+        Cell::Digit { to, .. } => CellMotion::Static(to),
+        Cell::Sep(ch) => CellMotion::Static(ch),
+    }
+}
+
+/// Vertical offset of a CHANGED digit's NEW (entering) glyph at `progress`:
+/// +1 line-height at roll-start (just below the row), 0 at rest
+/// (`roll.js`: the stack's lower glyph rises into view).
+pub fn enter_dy(line_height: Pixels, progress: f32) -> Pixels {
+    line_height * (1. - progress)
+}
+
+/// Vertical offset (above the row, so the paint subtracts it) of a CHANGED
+/// digit's OLD (leaving) glyph at `progress`: 0 at roll-start, +1 line-height
+/// at rest (slid up and out — `roll.js`: the stack's upper glyph rises away).
+pub fn leave_dy(line_height: Pixels, progress: f32) -> Pixels {
+    line_height * progress
+}
+
 /// The roll element: a small custom element painting, per changed digit, the
 /// old glyph and the new glyph offset vertically and clipped to one line so
 /// the old slides up and out while the new slides in (the §0 "two offset text
@@ -186,12 +259,22 @@ pub struct NumericRoll {
     color: Hsla,
 }
 
-/// Shaped runs prepared in prepaint and handed to paint: the settled line,
-/// plus per-cell (x-offset, outgoing glyph) for digits mid-roll.
+/// Shaped runs prepared in prepaint and handed to paint, grouped by motion so
+/// only the changed digits ever move (the genuine per-digit roll):
+/// - `static_glyphs`: every NON-rolling new glyph — unchanged digits and all
+///   separators (and, when settled / on a shape rebuild, EVERY glyph). Painted
+///   once at rest (dy=0); these never slide (`roll.js:39,41`).
+/// - `incoming`: each CHANGED digit's NEW glyph — slides in from +1em
+///   (`enter_dy`) to rest as the roll completes.
+/// - `outgoing`: each CHANGED digit's OLD glyph — slides from rest up and out
+///   to −1em (`leave_dy`).
 pub struct RollPrepaint {
-    line: ShapedLine,
     line_height: Pixels,
-    /// (x within bounds, outgoing shaped glyph) for each digit still rolling.
+    /// (x within bounds, shaped glyph) for each non-rolling new glyph.
+    static_glyphs: Vec<(Pixels, ShapedLine)>,
+    /// (x within bounds, shaped NEW glyph) for each changed digit, entering.
+    incoming: Vec<(Pixels, ShapedLine)>,
+    /// (x within bounds, shaped OLD glyph) for each changed digit, leaving.
     outgoing: Vec<(Pixels, ShapedLine)>,
 }
 
@@ -262,26 +345,41 @@ impl Element for NumericRoll {
         window: &mut Window,
         _cx: &mut App,
     ) -> RollPrepaint {
+        // The full target line gives every cell its exact x-advance
+        // (`x_for_index` over byte offsets — tabular-nums keeps every digit
+        // box fixed-width, so a per-cell paint lands precisely where the
+        // shaped line places it and never disturbs a neighbour).
         let (line, _) = self.run(&self.current, window);
         let line_height = window.line_height();
-        // Only build outgoing glyphs while a roll is in flight; settled
-        // counters paint one bare line (zero extra shaping, §8 idle cost).
+        let mut static_glyphs = Vec::new();
+        let mut incoming = Vec::new();
         let mut outgoing = Vec::new();
-        if self.progress < 1. {
-            // One pass: classify cells, then place each rolling digit's
-            // outgoing glyph at its exact x-advance in the current line
-            // (`x_for_index` over byte offsets — tabular-nums keeps every
-            // digit box fixed-width, so the slide never disturbs neighbours).
-            let cells = cells(&self.current, &self.previous);
-            for ((byte, _), cell) in self.current.char_indices().zip(cells) {
-                if let Cell::Digit { from: Some(from), .. } = cell {
-                    let x = line.x_for_index(byte);
-                    let (glyph, _) = self.run(&from.to_string(), window);
-                    outgoing.push((x, glyph));
+        // One pass: classify each cell via the shared `cell_motion` law, then
+        // route its glyph(s) to a motion group at the cell's x-advance.
+        // Settled counters (progress >= 1, or a shape rebuild whose cells are
+        // all `from: None`) classify EVERY cell `Static`, so they paint one
+        // bare row at rest — zero slide, zero phantom entrance (§8 idle; P1/P2).
+        let cells = cells(&self.current, &self.previous);
+        for ((byte, _), cell) in self.current.char_indices().zip(cells) {
+            let x = line.x_for_index(byte);
+            match cell_motion(cell, self.progress) {
+                // A changed digit, mid-roll: its NEW glyph enters from +1em
+                // and its OLD glyph leaves to −1em — the only moving cells.
+                CellMotion::Rolling { from, to } => {
+                    let (new_glyph, _) = self.run(&to.to_string(), window);
+                    incoming.push((x, new_glyph));
+                    let (old_glyph, _) = self.run(&from.to_string(), window);
+                    outgoing.push((x, old_glyph));
+                }
+                // Unchanged digit, separator, or any cell once settled: paint
+                // the new glyph once at rest (`roll.js:39,41` leave it put).
+                CellMotion::Static(ch) => {
+                    let (glyph, _) = self.run(&ch.to_string(), window);
+                    static_glyphs.push((x, glyph));
                 }
             }
         }
-        RollPrepaint { line, line_height, outgoing }
+        RollPrepaint { line_height, static_glyphs, incoming, outgoing }
     }
 
     fn paint(
@@ -294,32 +392,44 @@ impl Element for NumericRoll {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let RollPrepaint { line, line_height, outgoing } = prepaint;
+        let RollPrepaint { line_height, static_glyphs, incoming, outgoing } = prepaint;
         let origin = bounds.origin;
         let lh = *line_height;
         // Clip everything to one line height: the old glyph leaving above
         // and the new glyph entering are both masked to this single row (the
         // web's `.roll-digit { overflow: hidden; height: 1em }`).
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-            // The settled line carries every NEW glyph (digits + seps). It
-            // slides UP from +1em as the roll completes: at progress 0 it sits
-            // one line below (entering), at 1 it rests at origin.
-            let enter_dy = lh * (1. - self.progress);
-            line.paint(
-                point(origin.x, origin.y + enter_dy),
-                lh,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            )
-            .ok();
-            // Each outgoing OLD digit slides from rest (0) up and out (−1em).
-            let leave_dy = lh * self.progress;
+            // Unchanged digits + separators (and, when settled, every glyph)
+            // are painted ONCE at rest and NEVER move — the genuine per-digit
+            // roll: a neighbour of a rolling digit does not slide with it
+            // (`roll.js:39,41`). At progress 1 `incoming`/`outgoing` are
+            // empty, so this is the entire bare line at zero cost.
+            for (x, glyph) in static_glyphs.iter() {
+                glyph
+                    .paint(point(origin.x + *x, origin.y), lh, TextAlign::Left, None, window, cx)
+                    .ok();
+            }
+            // Each CHANGED digit's NEW glyph enters from +1em: at progress 0 it
+            // sits one line below (entering), at 1 it rests at origin.
+            let enter = enter_dy(lh, self.progress);
+            for (x, glyph) in incoming.iter() {
+                glyph
+                    .paint(
+                        point(origin.x + *x, origin.y + enter),
+                        lh,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    )
+                    .ok();
+            }
+            // Each CHANGED digit's OLD glyph slides from rest (0) up and out (−1em).
+            let leave = leave_dy(lh, self.progress);
             for (x, glyph) in outgoing.iter() {
                 glyph
                     .paint(
-                        point(origin.x + *x, origin.y - leave_dy),
+                        point(origin.x + *x, origin.y - leave),
                         lh,
                         TextAlign::Left,
                         None,
