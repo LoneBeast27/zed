@@ -12,6 +12,7 @@ pub mod bridge;
 mod buffer_codegen;
 mod canonical;
 mod completion_provider;
+pub mod constellation;
 pub mod workspace_mode_switcher;
 mod workspace_modes;
 mod config_options;
@@ -649,6 +650,19 @@ pub fn init(
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 workspace.toggle_panel_focus::<symphony_panel::SymphonyPanel>(window, cx);
+            },
+        );
+
+        // §10 — the constellation panel (subagent lifecycle board), a
+        // right-dock panel beside the orchestrator conversation.
+        let constellation = cx.new(|cx| constellation::ConstellationPanel::new(cx));
+        workspace.add_panel(constellation, window, cx);
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &constellation::ToggleFocus,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                workspace.toggle_panel_focus::<constellation::ConstellationPanel>(window, cx);
             },
         );
 
