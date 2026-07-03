@@ -240,7 +240,7 @@ fn conv_tree(
         .mb(px(TREE_MB))
         .child(settled_canvas)
         .children(drawing_edges)
-        .child(root_node(conv_id, cache, panel.clone(), cx))
+        .child(root_node(conv_id, cache, panel, cx))
         .children(nodes)
         .into_any_element()
 }
@@ -340,7 +340,7 @@ fn graph_node(
         .collect();
     let phrase = status_phrase(&run.status, run.elapsed_s);
 
-    let click_panel = panel.clone();
+    let click_panel = panel;
     let click_run_id = run_id.clone();
     let node = h_flex()
         .id(ElementId::Name(format!("gnode-{run_id}").into()))

@@ -179,11 +179,8 @@ fn render_worked_for(
         })
         .when(!open, |this| this.border_1().rounded_full())
         .cursor_pointer()
-        .on_hover(cx.listener({
-            let summary_id = summary_id.clone();
-            move |this, hovered: &bool, _, cx| {
-                this.set_fade(summary_id.clone(), *hovered, STATE_FADE, cx);
-            }
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            this.set_fade(summary_id.clone(), *hovered, STATE_FADE, cx);
         }))
         .on_click(cx.listener(move |this, _, _, cx| this.toggle_worked(ix, cx)))
         .child(

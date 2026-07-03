@@ -159,7 +159,7 @@ fn inbox_row(
 
     let on_click_panel = panel.clone();
     let click_run_id = run_id.clone();
-    let hover_panel = panel.clone();
+    let hover_panel = panel;
     let hover_run_id = run_id.clone();
     let row = h_flex()
         .id(ElementId::Name(run_id.clone()))
