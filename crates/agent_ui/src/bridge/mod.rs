@@ -33,7 +33,8 @@ pub use adversary::{
 };
 pub use client::{BRIDGE_BASE_URL, fetch_json, post_json};
 pub use protocol::{
-    BridgeEvent, PlanSnapshot, PlanSubtask, PoolRow, RunRow, ScrapeMeta, TranscriptMessage,
-    TranscriptRun, TranscriptSnapshot, UnlinkedRun, UsageMeta,
+    BridgeEvent, ChannelRow, ConversationRow, OverlapRow, PlanSnapshot, PlanSubtask, PoolRow,
+    ProjectRow, RunRow, RunTokens, ScrapeMeta, TranscriptMessage, TranscriptRun,
+    TranscriptSnapshot, UnlinkedRun, UsageMeta,
 };
 pub use store::{BridgeStore, PlanWatch, Transport, TranscriptWatch, global_store, init};

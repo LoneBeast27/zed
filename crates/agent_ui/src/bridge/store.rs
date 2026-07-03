@@ -13,8 +13,8 @@ use super::client::{
     connection_loop, fetch_and_apply_transcript, plan_poll_loop, transcript_poll_loop,
 };
 use super::protocol::{
-    BridgeEvent, PlanSnapshot, PoolRow, ProjectRow, RunRow, TranscriptSnapshot, UsageMeta,
-    pools_from_object, usage_meta_from_object,
+    BridgeEvent, ChannelRow, ConversationRow, PlanSnapshot, PoolRow, ProjectRow, RunRow,
+    TranscriptSnapshot, UsageMeta, pools_from_object, usage_meta_from_object,
 };
 
 /// Local elapsed-tick cadence while any run is `running`.
@@ -57,6 +57,9 @@ pub struct BridgeStore {
     /// the first `plan` event / `/plan` poll. Fed by SSE when connected and by
     /// the watch-gated `/plan` poll in the polling-fallback window.
     pub plan: Option<PlanSnapshot>,
+    /// Boost-channel rows (T2, the constellation's sibling edges) — fed by
+    /// the SSE `channels` event and the constellation's supplemental poll.
+    pub channels: Vec<ChannelRow>,
     /// `GET /projects` rows — fetched lazily by the transcript poll when the
     /// crumb can't resolve the conversation's project name yet.
     projects: Vec<ProjectRow>,
@@ -97,6 +100,7 @@ impl Default for BridgeStore {
             transcript: None,
             transcript_conv: None,
             plan: None,
+            channels: Vec::new(),
             projects: Vec::new(),
             board_received_at: Instant::now(),
             last_event_at: None,
@@ -161,7 +165,7 @@ impl BridgeStore {
         self.last_event_at.map(|at| at.elapsed())
     }
 
-    pub(super) fn apply_event(&mut self, event: BridgeEvent, cx: &mut gpui::Context<Self>) {
+    pub(crate) fn apply_event(&mut self, event: BridgeEvent, cx: &mut gpui::Context<Self>) {
         let mut changed = !self.connected;
         self.connected = true;
         self.last_event_at = Some(Instant::now());
@@ -205,11 +209,25 @@ impl BridgeStore {
                     changed = true;
                 }
             }
+            BridgeEvent::Channels { channels } => {
+                if self.channels != channels {
+                    self.channels = channels;
+                    changed = true;
+                }
+            }
             BridgeEvent::Unknown => {}
         }
         if changed {
             cx.notify();
         }
+    }
+
+    /// All conversation rows across projects (the constellation's root ctx
+    /// source — the web's `state.projects.flatMap(p => p.conversations)`).
+    pub fn conversations(&self) -> impl Iterator<Item = &ConversationRow> {
+        self.projects
+            .iter()
+            .flat_map(|project| project.conversations.iter())
     }
 
     /// Registers a transcript consumer and (re)starts the poll task on the
@@ -311,7 +329,7 @@ impl BridgeStore {
         }
     }
 
-    pub(super) fn apply_projects(&mut self, projects: Vec<ProjectRow>, cx: &mut gpui::Context<Self>) {
+    pub(crate) fn apply_projects(&mut self, projects: Vec<ProjectRow>, cx: &mut gpui::Context<Self>) {
         if self.projects != projects {
             self.projects = projects;
             cx.notify();

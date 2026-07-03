@@ -7,6 +7,18 @@
 
 use serde::Deserialize;
 
+/// Token counters riding a board run row (`orchestrator/runtable.py`
+/// `tokens.of_run + ingest`). Only the two the constellation consumes:
+/// `weighted` sizes the dot (T4 area-proportional mass), `ingest` is the
+/// receipt the root gains on the gobble.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+pub struct RunTokens {
+    #[serde(default)]
+    pub weighted: f64,
+    #[serde(default)]
+    pub ingest: f64,
+}
+
 /// One run row from `GET /board` or an SSE `board` event.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct RunRow {
@@ -24,6 +36,55 @@ pub struct RunRow {
     pub agent: String,
     #[serde(default)]
     pub chip: Option<String>,
+    /// TEAMS §6 role ("designer"/"implementation"/…) — the constellation's
+    /// compact node tag prefers it over the vendor name.
+    #[serde(default)]
+    pub archetype: Option<String>,
+    /// Token mass (T4) — `None` on an older bridge; the dot stays floor-size.
+    #[serde(default)]
+    pub tokens: Option<RunTokens>,
+}
+
+/// One boost-channel row from `GET /channels` / the SSE `channels` event
+/// (TEAMS §4/T2 — the Kiali-grammar sibling↔sibling edge). Liberal like the
+/// rest of the protocol.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct ChannelRow {
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default)]
+    pub conv: String,
+    /// Endpoint run ids.
+    #[serde(default)]
+    pub a: String,
+    #[serde(default)]
+    pub b: String,
+    /// `working` / `awaiting_*` / a terminal state (`converged`, `expired`,
+    /// `exhausted`, `killed`, `peer_died`).
+    #[serde(default)]
+    pub state: String,
+    /// Relayed batch count — one particle rides the edge per increment.
+    #[serde(default)]
+    pub k: u64,
+    #[serde(default)]
+    pub max_batches: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Which endpoint sent the last batch (particle direction).
+    #[serde(default)]
+    pub last_from: Option<String>,
+}
+
+/// One overlap venn row from `GET /channels` (`overlap` array, T3) — the
+/// auto-arrange link weight between two runs' work products.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct OverlapRow {
+    #[serde(default)]
+    pub a: String,
+    #[serde(default)]
+    pub b: String,
+    #[serde(default)]
+    pub score: f64,
 }
 
 /// One subtask of a persisted plan, as served by `GET /plan` / the SSE
@@ -124,6 +185,12 @@ pub enum BridgeEvent {
         #[serde(flatten)]
         plan: PlanSnapshot,
     },
+    /// Boost-channel rows (T2), pushed when any channel's state or batch
+    /// count changes — the constellation's edge tints + particle triggers.
+    Channels {
+        #[serde(default)]
+        channels: Vec<ChannelRow>,
+    },
     /// Forward compat: unknown event types deserialize (and are dropped by
     /// the client) instead of erroring the stream.
     #[serde(other)]
@@ -195,6 +262,13 @@ pub struct ConversationRow {
     pub updated: f64,
     #[serde(default)]
     pub busy: bool,
+    /// The orchestrator's live context occupancy (T1, chars/4 estimate) —
+    /// sizes the constellation root. `None` on an older bridge.
+    #[serde(default)]
+    pub ctx_tokens: Option<f64>,
+    /// Heartbeat self-compaction count — an increment is the root's exhale.
+    #[serde(default)]
+    pub compactions: u64,
 }
 
 /// One project row from `GET /projects` — the crumb resolves a
@@ -417,6 +491,71 @@ mod tests {
         let event: BridgeEvent =
             serde_json::from_str(r#"{"type": "transcript", "lines": []}"#).unwrap();
         assert!(matches!(event, BridgeEvent::Unknown));
+    }
+
+    #[test]
+    fn board_row_token_mass_parses_and_defaults() {
+        // Fixture truth: runtable.py board rows (tokens.of_run + ingest),
+        // 2026-07-04. Full token object with extra keys tolerated.
+        let row: RunRow = serde_json::from_str(
+            r#"{"run_id": "r-1", "agent": "claude", "archetype": "designer",
+                "tokens": {"fresh_in": 700, "out": 100, "cache_read": 2000,
+                           "weighted": 1234.5, "ingest": 420}}"#,
+        )
+        .unwrap();
+        assert_eq!(row.archetype.as_deref(), Some("designer"));
+        let tokens = row.tokens.unwrap();
+        assert_eq!(tokens.weighted, 1234.5);
+        assert_eq!(tokens.ingest, 420.0);
+        // Older bridge: both absent → None / floor-size dot.
+        let row: RunRow = serde_json::from_str(r#"{"run_id": "r-2"}"#).unwrap();
+        assert_eq!(row.tokens, None);
+        assert_eq!(row.archetype, None);
+    }
+
+    #[test]
+    fn channels_event_tag_deserializes() {
+        // Fixture truth: the SSE `channels` frame shape (serve.py emit +
+        // orchestrator/channels.py view), 2026-07-04.
+        let event: BridgeEvent = serde_json::from_str(
+            r#"{"type": "channels", "channels": [
+                {"channel_id": "ch-1", "conv": "c-9", "a": "r-1", "b": "r-2",
+                 "state": "working", "k": 3, "max_batches": 5,
+                 "token_budget": 8000, "tokens_spent": 2400,
+                 "reason": "unify keyframe spec", "last_from": "r-1"}
+            ]}"#,
+        )
+        .unwrap();
+        let BridgeEvent::Channels { channels } = event else {
+            panic!("expected Channels, got {event:?}");
+        };
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].channel_id, "ch-1");
+        assert_eq!(channels[0].state, "working");
+        assert_eq!(channels[0].k, 3);
+        assert_eq!(channels[0].max_batches, 5);
+        assert_eq!(channels[0].last_from.as_deref(), Some("r-1"));
+        // Empty frame tolerated.
+        let event: BridgeEvent = serde_json::from_str(r#"{"type": "channels"}"#).unwrap();
+        let BridgeEvent::Channels { channels } = event else {
+            panic!("expected Channels");
+        };
+        assert!(channels.is_empty());
+    }
+
+    #[test]
+    fn conversation_ctx_tokens_parse_and_default() {
+        // Fixture truth: live GET /projects conversations, 2026-07-04.
+        let row: ConversationRow = serde_json::from_str(
+            r#"{"id": "c-1", "title": "t", "ctx_tokens": 914, "compactions": 2}"#,
+        )
+        .unwrap();
+        assert_eq!(row.ctx_tokens, Some(914.0));
+        assert_eq!(row.compactions, 2);
+        // Older bridge: fields absent → None/0 (the legacy fed fallback).
+        let row: ConversationRow = serde_json::from_str(r#"{"id": "c-2"}"#).unwrap();
+        assert_eq!(row.ctx_tokens, None);
+        assert_eq!(row.compactions, 0);
     }
 
     #[test]
