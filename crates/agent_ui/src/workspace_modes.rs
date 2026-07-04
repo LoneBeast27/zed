@@ -67,8 +67,9 @@ fn default_true() -> bool {
 }
 
 /// Parse every `*.json` (excluding `_*.json`) in `dir` as a `WorkspaceMode`.
-/// Returns modes sorted by pinned position: `Top` modes first, then unpinned
-/// alphabetical, then `Bottom` modes last.
+/// Returns modes sorted by declared Ctrl+Alt default keybinding first, then by
+/// pinned position: `Top` modes first, then unpinned alphabetical, then
+/// `Bottom` modes last.
 ///
 /// Files that fail to parse log a warning and are skipped — partial success
 /// rather than total failure, so a single malformed mode doesn't break the
@@ -132,8 +133,9 @@ pub fn load_modes_from_dir(dir: &Path) -> Vec<WorkspaceMode> {
     modes
 }
 
-/// Sort modes for activity-bar display order: pinned top first (alphabetical
-/// within the group), then unpinned alphabetical, then pinned bottom last.
+/// Sort modes for activity-bar display order: declared Ctrl+Alt keybinding
+/// order first, then pinned top first (alphabetical within the group), then
+/// unpinned alphabetical, then pinned bottom last.
 fn sort_modes(modes: &mut [WorkspaceMode]) {
     use std::cmp::Ordering;
     modes.sort_by(|a, b| {
@@ -142,11 +144,23 @@ fn sort_modes(modes: &mut [WorkspaceMode]) {
             None => 1,
             Some(PinnedPosition::Bottom) => 2,
         };
-        match bucket(a).cmp(&bucket(b)) {
-            Ordering::Equal => a.id.cmp(&b.id),
+        match default_keybinding_number(a).cmp(&default_keybinding_number(b)) {
+            Ordering::Equal => match bucket(a).cmp(&bucket(b)) {
+                Ordering::Equal => a.id.cmp(&b.id),
+                other => other,
+            },
             other => other,
         }
     });
+}
+
+fn default_keybinding_number(mode: &WorkspaceMode) -> Option<u8> {
+    let binding = mode.default_keybinding.as_deref()?.to_ascii_lowercase();
+    let mut parts = binding.split(['+', '-']);
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("ctrl"), Some("alt"), Some(number), None) => number.parse().ok(),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -168,6 +182,12 @@ mod tests {
         }
     }
 
+    fn make_keybound_mode(id: &str, default_keybinding: &str) -> WorkspaceMode {
+        let mut mode = make_mode(id, None);
+        mode.default_keybinding = Some(default_keybinding.into());
+        mode
+    }
+
     #[test]
     fn sort_respects_pinned_position() {
         let mut modes = vec![
@@ -180,6 +200,38 @@ mod tests {
         sort_modes(&mut modes);
         let ids: Vec<&str> = modes.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["alpha", "beta", "gamma", "settings", "zeta"]);
+    }
+
+    #[test]
+    fn sort_matches_declared_default_keybinding_positions() {
+        let mut modes = vec![
+            make_keybound_mode("orchestrator", "Ctrl+Alt+1"),
+            make_keybound_mode("adversary", "Ctrl+Alt+5"),
+            make_keybound_mode("symphony", "Ctrl+Alt+3"),
+            make_keybound_mode("taskboard", "Ctrl+Alt+2"),
+            make_keybound_mode("usage", "Ctrl+Alt+4"),
+            make_keybound_mode("settings", "Ctrl+Alt+6"),
+        ];
+        sort_modes(&mut modes);
+
+        let ids: Vec<&str> = modes.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "orchestrator",
+                "taskboard",
+                "symphony",
+                "usage",
+                "adversary",
+                "settings"
+            ]
+        );
+        for (index, mode) in modes.iter().enumerate() {
+            assert_eq!(
+                mode.default_keybinding.as_deref(),
+                Some(format!("Ctrl+Alt+{}", index + 1).as_str())
+            );
+        }
     }
 
     #[test]
