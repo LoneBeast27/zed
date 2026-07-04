@@ -1,5 +1,6 @@
 mod activity_bar;
 pub mod adversary_panel;
+mod adversary_panel_demo;
 pub mod agent_accents;
 mod agent_configuration;
 pub mod agent_connection_store;
@@ -40,9 +41,11 @@ mod profile_selector;
 mod resource_banner;
 pub mod settings_status_panel;
 pub mod symphony_panel;
+mod symphony_panel_demo;
 pub mod task_board;
 mod terminal_codegen;
 pub mod usage_panel;
+mod usage_panel_demo;
 mod usage_panel_meter;
 mod terminal_inline_assistant;
 pub mod terminal_thread_metadata_store;

@@ -46,7 +46,17 @@ pub struct AdversaryPanel {
 
 impl AdversaryPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let jobs = cx.new(|_| AdversaryJobs::default());
+        let jobs = cx.new(|_| {
+            let mut jobs = AdversaryJobs::default();
+            // Agentic-demo gate: seed a staged completed broadcast so the
+            // three-column + synthesis surface reviews without a live volley
+            // (crate::adversary_panel_demo). `sync_from_jobs` (below) builds
+            // the DoneView from this phase on the first observer tick.
+            if crate::bridge::is_agentic_demo() {
+                jobs.phase = crate::adversary_panel_demo::demo_phase();
+            }
+            jobs
+        });
         let _jobs_subscription =
             cx.observe(&jobs, |this: &mut Self, _, cx| this.sync_from_jobs(cx));
         let editor = cx.new(|cx| {
@@ -60,12 +70,22 @@ impl AdversaryPanel {
             editor.set_show_indent_guides(false, cx);
             editor
         });
+        // Build the initial done view from the jobs' phase (the demo seed sets
+        // a Done phase; the live path leaves it Idle). The observer only fires
+        // on later notifies, so a seeded phase must be materialized here.
+        let seed_phase = jobs.read(cx).phase.clone();
+        let done = match &seed_phase {
+            AdversaryPhase::Done(result) | AdversaryPhase::Cancelled(result) => {
+                Some(build_done_view(result, cx))
+            }
+            _ => None,
+        };
         Self {
             focus_handle: cx.focus_handle(),
             jobs,
             editor,
-            done: None,
-            last_phase: AdversaryPhase::Idle,
+            done,
+            last_phase: seed_phase,
             watch: None,
             fades: StateFades::new(),
             _jobs_subscription,

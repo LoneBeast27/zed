@@ -23,10 +23,11 @@
 //! - [`edges`] — boost-channel runtime (particles, retract).
 //! - draw — element/canvas builders (pure read of sim outputs).
 //! - feed — the supplemental visibility-gated poll (SSE digest gaps).
-//! - demo — the staged design scenario (`ZED_CONSTELLATION_DEMO=1`).
+//! - demo — the staged design scenario (shared agentic-demo gate; also the
+//!   board's demo-board source, so it is `pub`).
 
 mod advance;
-mod demo;
+pub mod demo;
 mod draw;
 mod draw_node;
 pub mod edges;

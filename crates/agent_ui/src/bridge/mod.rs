@@ -21,6 +21,7 @@
 
 pub mod adversary;
 pub mod client;
+pub mod demo;
 pub mod protocol;
 pub mod sse;
 pub mod store;
@@ -32,9 +33,10 @@ pub use adversary::{
     VENDOR_COLUMNS, parse_synthesis_sections,
 };
 pub use client::{BRIDGE_BASE_URL, fetch_json, post_json};
+pub use demo::is_agentic_demo;
 pub use protocol::{
     BridgeEvent, ChannelRow, ConversationRow, OverlapRow, PlanSnapshot, PlanSubtask, PoolRow,
     ProjectRow, RunRow, RunTokens, ScrapeMeta, TranscriptMessage, TranscriptRun,
-    TranscriptSnapshot, UnlinkedRun, UsageMeta,
+    TranscriptSnapshot, UnlinkedRun, UsageMeta, VendorLiveness,
 };
 pub use store::{BridgeStore, PlanWatch, Transport, TranscriptWatch, global_store, init};

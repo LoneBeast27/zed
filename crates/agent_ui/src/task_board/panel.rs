@@ -329,11 +329,19 @@ impl TaskBoardPanel {
 
 impl Render for TaskBoardPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let store = self.store.read(cx);
-        let connected = store.connected;
-        // Locally-ticked elapsed (the store's 1s ticker drives re-renders
-        // while any run is live; the server frame re-bases the offset).
-        let board = store.ticked_board();
+        // Agentic-demo gate: stage the constellation's parallel-converge team
+        // (reusing its `demo_board` — one shared scenario, no board-local
+        // duplication) at a fixed representative `t` where the full team is
+        // present INCLUDING the failed researcher, so the inbox's failure
+        // grammar renders. A static snapshot (no fake ticking) honors the
+        // "no timers beyond existing frame pumps" law. Falls through to the
+        // live store when the gate is off.
+        let (connected, board) = if crate::bridge::is_agentic_demo() {
+            (true, crate::constellation::demo::demo_board(30.))
+        } else {
+            let store = self.store.read(cx);
+            (store.connected, store.ticked_board())
+        };
         if connected != self.was_connected {
             self.was_connected = connected;
             self.connected_fade.bump();

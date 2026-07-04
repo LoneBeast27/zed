@@ -312,7 +312,15 @@ impl SymphonyPanel {
 
 impl Render for SymphonyPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let plan = self.store.read(cx).plan.clone();
+        // Agentic-demo gate: stage a two-wave plan so the score reviews
+        // without a live plan on the bridge (crate::symphony_panel_demo — this
+        // surface's own demo module). Falls through to the live store's plan
+        // when the gate is off.
+        let plan = if crate::bridge::is_agentic_demo() {
+            Some(crate::symphony_panel_demo::demo_plan())
+        } else {
+            self.store.read(cx).plan.clone()
+        };
         let body: AnyElement = match plan.filter(PlanSnapshot::is_present) {
             None => empty_state(
                 IconName::AudioOn,
