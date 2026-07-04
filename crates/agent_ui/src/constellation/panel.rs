@@ -185,9 +185,17 @@ impl ConstellationPanel {
                 });
             self.demo_drawer_run = Some(run_id);
             self.demo_drawer_pushed_s = Some(t as u64);
-            cx.new(|cx| run_detail::RunDrawer::local(detail, cx))
+            cx.new(|cx| {
+                let mut drawer = run_detail::RunDrawer::local(detail, cx);
+                drawer.embed();
+                drawer
+            })
         } else {
-            cx.new(|cx| run_detail::RunDrawer::new(run_id, cx))
+            cx.new(|cx| {
+                let mut drawer = run_detail::RunDrawer::new(run_id, cx);
+                drawer.embed();
+                drawer
+            })
         };
         cx.subscribe(&drawer, |this, _, _: &run_detail::DismissDrawer, cx| {
             this.drawer = None;
@@ -383,7 +391,17 @@ impl Render for ConstellationPanel {
             )
             .child(self.render_header(has_nodes, cx))
             .child(div().relative().flex_1().min_h_0().child(body))
-            .children(self.drawer.clone())
+            // Unified surface (PARITY_SPEC amendment 2026-07-04): the agent
+            // detail is a section BELOW the graph on the same background —
+            // no overlay, no scrim, no seam. Graph keeps the larger share.
+            .children(self.drawer.clone().map(|drawer| {
+                div()
+                    .id("constellation-detail")
+                    .flex_none()
+                    .h(relative(0.45))
+                    .min_h_0()
+                    .child(drawer)
+            }))
     }
 }
 

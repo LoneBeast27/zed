@@ -117,6 +117,11 @@ pub struct RunDrawer {
     /// Locally-fed drawer ([`Self::local`]): no bridge behind it, so the
     /// abort affordance (a bridge POST) is meaningless and hidden.
     pub(super) local: bool,
+    /// Embedded placement (PARITY_SPEC amendment 2026-07-04): rendered as a
+    /// section BELOW the constellation graph on the SAME surface — no scrim,
+    /// no absolute sheet, no slide, no border seam. Internal anatomy (head,
+    /// worked strip, tabs, body) is identical to the slide-over.
+    embedded: bool,
     pub(super) tab: DrawerTab,
     /// The previously active tab — the 150ms tab crossfade eases both the
     /// leaving and the arriving tab (web `.drawer-tabs button` transition).
@@ -245,6 +250,7 @@ impl RunDrawer {
             detail: None,
             load_failed: None,
             local,
+            embedded: false,
             tab: DrawerTab::Summary,
             prev_tab: DrawerTab::Summary,
             tab_fade: StateFade::default(),
@@ -338,13 +344,24 @@ impl RunDrawer {
         cx.notify();
     }
 
+    /// Mark this drawer as embedded below the constellation graph
+    /// (PARITY_SPEC amendment 2026-07-04 — unified surface).
+    pub fn embed(&mut self) {
+        self.embedded = true;
+    }
+
     /// Begin the close: run the exit slide, then tell the panel to drop us.
+    /// Embedded placement has no slide — the panel drops us immediately.
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         if self.closing {
             return;
         }
         self.closing = true;
         cx.notify();
+        if self.embedded {
+            cx.emit(DismissDrawer);
+            return;
+        }
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SLIDE).await;
             this.update(cx, |_, cx| cx.emit(DismissDrawer)).ok();
@@ -391,6 +408,29 @@ impl Render for RunDrawer {
             self.needs_focus = false;
             window.focus(&self.focus_handle, cx);
         }
+
+        // Embedded placement (PARITY_SPEC amendment 2026-07-04): a section
+        // below the constellation graph on the SAME surface — the parent's
+        // background shows through (no fill, no scrim, no slide, no border
+        // seam). Identical internal anatomy.
+        if self.embedded {
+            return v_flex()
+                .key_context("RunDrawer")
+                .track_focus(&self.focus_handle)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.dismiss(cx);
+                    }
+                }))
+                .size_full()
+                .min_h_0()
+                .child(self.render_head(cx))
+                .children(self.render_worked(cx))
+                .child(self.render_tabs(cx))
+                .child(self.render_body(window, cx))
+                .into_any_element();
+        }
+
         let colors = cx.theme().colors();
         let closing = self.closing;
 
@@ -476,6 +516,7 @@ impl Render for RunDrawer {
             .child(measure)
             .child(scrim)
             .child(sheet)
+            .into_any_element()
     }
 }
 
