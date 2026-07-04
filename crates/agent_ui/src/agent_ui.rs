@@ -49,6 +49,7 @@ mod usage_panel_demo;
 mod usage_panel_groups;
 mod usage_panel_meter;
 mod usage_panel_render;
+pub mod vault_browser;
 mod terminal_inline_assistant;
 pub mod terminal_thread_metadata_store;
 #[cfg(any(test, feature = "test-support"))]
@@ -705,6 +706,23 @@ pub fn init(
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 workspace.toggle_panel_focus::<constellation::ConstellationPanel>(window, cx);
+            },
+        );
+
+        // Amendment 2026-07-04 (4) item 4 — the OKF vault browser: a stock-style
+        // LEFT-DOCK panel (user-toggleable, NOT mode-driven; modes never touch
+        // the left dock). Activation priority 21 (the fork's next free slot
+        // above the 14-20 band). Reads the local vault filesystem directly.
+        let weak_workspace_vault = cx.weak_entity();
+        let vault_browser =
+            cx.new(|cx| vault_browser::VaultBrowserPanel::new(weak_workspace_vault, window, cx));
+        workspace.add_panel(vault_browser, window, cx);
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &vault_browser::ToggleFocus,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                workspace.toggle_panel_focus::<vault_browser::VaultBrowserPanel>(window, cx);
             },
         );
 
