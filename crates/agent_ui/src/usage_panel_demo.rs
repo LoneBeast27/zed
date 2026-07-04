@@ -8,21 +8,32 @@
 
 use crate::bridge::{PoolRow, ScrapeMeta, UsageMeta, VendorLiveness};
 
-/// Staged five-pool set: a warn pool (claude 5h), a crit pool (antigravity),
-/// an ok pool (codex), an unknown/unmetered pool (a scraped-but-stale claude
-/// weekly), and the gemini free RPD carrying the new call-count + 429 fields.
+/// Staged six-pool set spanning the four vendor clusters (Amendment
+/// 2026-07-04 (4) item 1): the CLAUDE cluster carries all three pools —
+/// 5h (warn), weekly all-models (ok), weekly Sonnet (unknown/stale, degrades
+/// never vanishes) — deliberately out of 5h-first order so the grouping's
+/// intra-cluster sort is exercised; codex (ok + a 429); antigravity (crit);
+/// gemini (0% used, carrying the new call-count fields + a liveness header).
 pub fn demo_pools() -> Vec<PoolRow> {
     vec![
+        // Claude weekly buckets appear BEFORE 5h on the wire → the grouping
+        // must reorder them so 5h (the session pool) leads its cluster.
         PoolRow {
-            name: "claude_5h".into(),
-            headroom_pct: Some(18.), // 82% used → warn band
-            window: Some("5h".into()),
+            name: "claude_weekly".into(),
+            headroom_pct: Some(97.), // 3% used → ok band
+            window: Some("week".into()),
             ..Default::default()
         },
         PoolRow {
-            name: "claude_weekly".into(),
+            name: "claude_weekly_sonnet".into(),
             headroom_pct: None, // unknown/stale → degrades, never vanishes
             window: Some("week".into()),
+            ..Default::default()
+        },
+        PoolRow {
+            name: "claude_5h".into(),
+            headroom_pct: Some(18.), // 82% used → warn band (worst in cluster)
+            window: Some("5h".into()),
             ..Default::default()
         },
         PoolRow {
@@ -104,7 +115,8 @@ mod tests {
         assert_eq!(tone("claude_5h"), Tone::Warn);
         assert_eq!(tone("antigravity_weekly"), Tone::Crit);
         assert_eq!(tone("codex_plan"), Tone::Ok);
-        assert_eq!(tone("claude_weekly"), Tone::Unknown);
+        assert_eq!(tone("claude_weekly"), Tone::Ok);
+        assert_eq!(tone("claude_weekly_sonnet"), Tone::Unknown);
         // The new fields surface on the gemini pool.
         let gemini = pools.iter().find(|p| p.name == "gemini_free_rpd").unwrap();
         assert_eq!(gemini.brain_calls_in_window, Some(3));

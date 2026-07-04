@@ -17,15 +17,19 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, Entity, FocusHandle, Focusable,
     FontWeight, SharedString, Subscription, Window, actions,
 };
-use settings::Settings as _;
-use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
-use crate::agent_accents::{STATUS_BLOCKED, STATUS_ERROR, tone_for_used, used_pct};
+use crate::agent_accents::STATUS_BLOCKED;
 use crate::bridge::{self, BridgeStore, PoolRow, UsageMeta};
 use crate::task_board::motion::{EFFECTS, RollValue, StateFade};
-use crate::task_board::style::{SURFACE_1, tabular_nums};
-use crate::usage_panel_meter::{MeterState, render_meter};
+use crate::usage_panel_groups::group_pools;
+use crate::usage_panel_meter::MeterState;
+use crate::usage_panel_render::render_vendor_cluster;
+
+// The `${used}%` formatter moved to [`crate::usage_panel_render`] with the
+// vendor-grouping render split; re-exported here so the usage island's
+// existing `use crate::usage_panel::fmt_pct` keeps resolving.
+pub(crate) use crate::usage_panel_render::fmt_pct;
 
 actions!(
     usage_panel,
@@ -34,18 +38,6 @@ actions!(
         ToggleFocus
     ]
 );
-
-/// `POOL_LABELS` from usage.js — display names for the known pools;
-/// unknown pools fall back to their raw key.
-fn pool_label(name: &str) -> &str {
-    match name {
-        "claude_sdk_credit" => "Claude SDK credit",
-        "codex_plan" => "Codex plan",
-        "antigravity_weekly" => "Antigravity weekly",
-        "gemini_free_rpd" => "Gemini free RPD",
-        other => other,
-    }
-}
 
 pub struct UsagePanel {
     focus_handle: FocusHandle,
@@ -133,73 +125,6 @@ impl UsagePanel {
             })
     }
 
-    /// The per-vendor liveness strip (2026-07-04 `liveness` map): "is <vendor>
-    /// alive RIGHT NOW", so the reader can see a KNOWN-dead vendor before a
-    /// call fails. One chip per vendor — a tone dot (green alive / amber
-    /// rate_limited / red down) + name + age. Rendered only when the bridge
-    /// surfaces liveness (empty → no strip, never a blank row).
-    fn render_liveness(&self, meta: &UsageMeta, cx: &App) -> Option<Div> {
-        if meta.liveness.is_empty() {
-            return None;
-        }
-        let colors = cx.theme().colors();
-        let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
-        let chips: Vec<AnyElement> = meta
-            .liveness
-            .iter()
-            .map(|vendor| {
-                let (dot, label_color) = liveness_tone(&vendor.state);
-                let age = vendor
-                    .age_s
-                    .map(|age| format!("  ·  {}", crate::task_board::style::rel(age)))
-                    .unwrap_or_default();
-                h_flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.))
-                    .px(px(9.))
-                    .py(px(4.))
-                    .rounded(px(8.))
-                    .bg(SURFACE_1)
-                    .child(
-                        div()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(dot)
-                            .flex_none(),
-                    )
-                    .child(
-                        div()
-                            .font_family(mono.clone())
-                            .text_size(px(12.))
-                            .text_color(label_color)
-                            .child(SharedString::from(format!(
-                                "{} {}{age}",
-                                vendor.vendor, liveness_word(&vendor.state)
-                            ))),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-        Some(
-            h_flex()
-                .flex_none()
-                .flex_wrap()
-                .gap(px(8.))
-                .px(px(28.))
-                .py(px(12.))
-                .border_b_1()
-                .border_color(colors.border)
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(colors.text_placeholder)
-                        .child("Vendor liveness"),
-                )
-                .children(chips),
-        )
-    }
-
     /// The scrape-staleness banner — shown only while `_scraped.stale`;
     /// scraped pools degrade to last-known values beneath it (§4.4).
     fn render_stale_banner(&self, meta: &UsageMeta) -> Option<Div> {
@@ -222,214 +147,6 @@ impl UsagePanel {
         )
     }
 
-    /// One `.pool-card` (panels.css:49-68): name above a full-width meter,
-    /// the used-% + window `.pool-row` beneath, and the mono
-    /// reset/staleness `.pool-stale` line.
-    fn render_pool_card(&mut self, pool: &PoolRow, meta: &UsageMeta, cx: &App) -> AnyElement {
-        let colors = cx.theme().colors();
-        let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
-        let used = used_pct(pool.headroom_pct);
-        let state = self
-            .meters
-            .entry(pool.name.clone())
-            .or_insert_with(|| MeterState::new(tone_for_used(used)));
-        state.update(used);
-        let meter = render_meter(state, &pool.name);
-        let window_label = pool.window.clone().unwrap_or_default();
-
-        // `.pool-pct` 500 13px --text tabular; the unknown case takes the
-        // `.meter-unknown` treatment instead (12px mono italic --text-3). The
-        // % rolls its changed digits (web `rollNumber`) in lockstep with the
-        // meter fill; " used" and "%" are seps. The roll state is keyed by
-        // pool name so it survives store ticks (§5.6).
-        let pct_cell = match used {
-            Some(used) => {
-                let roll = self
-                    .pct_rolls
-                    .entry(pool.name.clone())
-                    .or_insert_with(|| RollValue::new(String::new()));
-                roll.set(format!("{}% used", fmt_pct(used)));
-                div().text_size(px(13.)).child(roll.element(
-                    ElementId::Name(format!("pool-pct-{}", pool.name).into()),
-                    px(13.),
-                    FontWeight::MEDIUM,
-                    colors.text,
-                ))
-            }
-            None => div()
-                .text_size(px(12.))
-                .font_family(mono.clone())
-                .italic()
-                .text_color(colors.text_placeholder)
-                .child("unknown / stale"),
-        };
-
-        // `.pool-stale` — always mono 11px --text-3 (the web keeps text-3
-        // even while stale; the stale BANNER carries the warning tint).
-        let status_line = match meta.scraped.as_ref() {
-            Some(scrape) if scrape.stale => format!(
-                "scraped {}h ago (stale)",
-                scrape.age_h.map(fmt_pct).unwrap_or_else(|| "?".into())
-            ),
-            Some(scrape) => match &scrape.reset_phrase {
-                Some(phrase) => format!("resets {phrase}"),
-                None => "self-metered".to_string(),
-            },
-            None => "self-metered".to_string(),
-        };
-
-        v_flex()
-            // The `.pool-grid` cell: auto-fill minmax(240px, 1fr) emulated
-            // as wrap + grow from a 240px basis.
-            .flex_grow()
-            .flex_basis(px(240.))
-            .rounded(px(12.))
-            .bg(SURFACE_1)
-            .border_1()
-            .border_color(colors.border)
-            .px(px(16.))
-            .py(px(15.))
-            .child(
-                // `.pool-name` 500 14px --text, 12px below.
-                div()
-                    .mb(px(12.))
-                    .text_size(px(14.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors.text)
-                    .truncate()
-                    .child(SharedString::from(pool_label(&pool.name).to_string())),
-            )
-            .child(meter)
-            .child(
-                // `.pool-row`: baseline-aligned pct vs cap, 10px below the
-                // meter.
-                h_flex()
-                    .mt(px(10.))
-                    .items_baseline()
-                    .justify_between()
-                    .gap(px(8.))
-                    .child(pct_cell)
-                    .child(
-                        // `.pool-cap` 400 12px mono --text-3 tabular.
-                        div()
-                            .text_size(px(12.))
-                            .font_family(mono.clone())
-                            .font_features(tabular_nums())
-                            .text_color(colors.text_placeholder)
-                            .truncate()
-                            .child(SharedString::from(window_label)),
-                    ),
-            )
-            .child(
-                div()
-                    .mt(px(8.))
-                    .text_size(px(11.))
-                    .font_family(mono.clone())
-                    .text_color(colors.text_placeholder)
-                    .child(SharedString::from(status_line)),
-            )
-            // Call-count breakdown (2026-07-04 fields): real orchestrator
-            // brain calls vs liveness/keepalive pings, so the pool's genuine
-            // burn stays legible next to the ping-hack traffic. Rendered only
-            // when the bridge surfaces either count for this pool.
-            .children(self.render_pool_calls(pool, &mono, cx))
-            // `vendor_429_observed` — the vendor returned a rate-limit 429 in
-            // this window. A red marker: the pool hit a real vendor ceiling.
-            .when(pool.vendor_429_observed, |this| {
-                this.child(
-                    h_flex()
-                        .mt(px(6.))
-                        .items_center()
-                        .gap(px(6.))
-                        .child(
-                            div()
-                                .size(px(6.))
-                                .rounded_full()
-                                .bg(gpui::Hsla::from(STATUS_ERROR))
-                                .flex_none(),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .font_family(mono.clone())
-                                .text_color(STATUS_ERROR)
-                                .child("429 observed"),
-                        ),
-                )
-            })
-            .into_any_element()
-    }
-
-    /// The per-pool call-count line ("N brain · M ping"): real brain calls
-    /// separated from liveness/keepalive pings (2026-07-04). `None` when the
-    /// bridge surfaces neither count for the pool (older bridge / pool without
-    /// the routine ping hack), so no empty line renders.
-    fn render_pool_calls(
-        &self,
-        pool: &PoolRow,
-        mono: &gpui::SharedString,
-        cx: &App,
-    ) -> Option<Div> {
-        let brain = pool.brain_calls_in_window;
-        let ping = pool.ping_calls_in_window;
-        if brain.is_none() && ping.is_none() {
-            return None;
-        }
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(brain) = brain {
-            parts.push(format!("{brain} brain"));
-        }
-        if let Some(ping) = ping {
-            parts.push(format!("{ping} ping"));
-        }
-        let colors = cx.theme().colors();
-        Some(
-            div()
-                .mt(px(4.))
-                .text_size(px(11.))
-                .font_family(mono.clone())
-                .font_features(tabular_nums())
-                .text_color(colors.text_placeholder)
-                .child(SharedString::from(parts.join("  ·  "))),
-        )
-    }
-
-}
-
-/// The tone (status dot color + label color) for a vendor liveness state.
-/// alive → green, rate_limited → amber, down/anything-error → red, unknown →
-/// idle grey. Word and color agree (the P1 rule).
-fn liveness_tone(state: &str) -> (gpui::Hsla, gpui::Hsla) {
-    let color = match state {
-        "alive" | "ok" | "up" => crate::agent_accents::STATUS_RUNNING,
-        "rate_limited" | "limited" | "throttled" => STATUS_BLOCKED,
-        "down" | "dead" | "error" | "unreachable" => STATUS_ERROR,
-        _ => crate::agent_accents::STATUS_IDLE,
-    };
-    (color.into(), color.into())
-}
-
-/// The display word for a vendor liveness state (raw states pass through so a
-/// future state is visible rather than swallowed).
-fn liveness_word(state: &str) -> &str {
-    match state {
-        "alive" => "alive",
-        "rate_limited" => "rate-limited",
-        "down" => "down",
-        "" => "unknown",
-        other => other,
-    }
-}
-
-/// JS-style number formatting: integers print bare ("82"), fractions keep
-/// one decimal ("99.5") — matches the web's template-literal output.
-/// Shared with the usage island (same `${used}%` rendering).
-pub(crate) fn fmt_pct(value: f64) -> String {
-    if (value - value.round()).abs() < 0.05 {
-        format!("{}", value.round() as i64)
-    } else {
-        format!("{value:.1}")
-    }
 }
 
 impl Render for UsagePanel {
@@ -468,12 +185,27 @@ impl Render for UsagePanel {
             )
             .into_any_element()
         } else {
-            let cards: Vec<AnyElement> = pools
+            // Fold the flat pool rows into vendor clusters ONCE per frame
+            // (Amendment 2026-07-04 (4) item 1; I/O-first — a render-side fold
+            // over the already-typed payload, no new fetch, no per-pool
+            // re-derivation). One card per vendor, stacked top-to-bottom.
+            let groups = group_pools(&pools, &meta);
+            let clusters: Vec<AnyElement> = groups
                 .iter()
-                .map(|pool| self.render_pool_card(pool, &meta, cx))
+                .map(|group| {
+                    render_vendor_cluster(
+                        group,
+                        &meta,
+                        &mut self.meters,
+                        &mut self.pct_rolls,
+                        cx,
+                    )
+                })
                 .collect();
-            // `.usage-scroll` padding 20/28/32 wrapping the `.pool-grid`
-            // (wrap + 14px gaps ≈ auto-fill minmax(240px, 1fr)).
+            // `.usage-scroll` padding 20/28/32; the clusters live in a bounded,
+            // centered column (the surface-centering discipline — usage's grid
+            // is now a vendor stack, so it reads as a centered column like the
+            // other converted surfaces).
             div()
                 .id("usage-pools")
                 .flex_1()
@@ -482,7 +214,15 @@ impl Render for UsagePanel {
                 .px(px(28.))
                 .pt(px(20.))
                 .pb(px(32.))
-                .child(h_flex().flex_wrap().gap(px(14.)).children(cards))
+                .child(
+                    h_flex().w_full().justify_center().child(
+                        v_flex()
+                            .w_full()
+                            .max_w(px(720.))
+                            .gap(px(16.))
+                            .children(clusters),
+                    ),
+                )
                 .into_any_element()
         };
 
@@ -523,7 +263,6 @@ impl Render for UsagePanel {
             .size_full()
             .bg(colors.panel_background)
             .child(self.render_header(&meta, cx))
-            .children(self.render_liveness(&meta, cx))
             .children(self.render_stale_banner(&meta))
             .child(body_container)
     }
@@ -546,27 +285,4 @@ impl crate::mode_item::ModeSurface for UsagePanel {
     fn fallback_tab_icon() -> IconName {
         IconName::Sliders
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pool_labels_match_usage_js() {
-        assert_eq!(pool_label("claude_sdk_credit"), "Claude SDK credit");
-        assert_eq!(pool_label("codex_plan"), "Codex plan");
-        assert_eq!(pool_label("antigravity_weekly"), "Antigravity weekly");
-        assert_eq!(pool_label("gemini_free_rpd"), "Gemini free RPD");
-        assert_eq!(pool_label("future_pool"), "future_pool");
-    }
-
-    #[test]
-    fn fmt_pct_prints_like_js() {
-        assert_eq!(fmt_pct(82.0), "82");
-        assert_eq!(fmt_pct(99.5), "99.5");
-        assert_eq!(fmt_pct(0.0), "0");
-        assert_eq!(fmt_pct(100.0), "100");
-    }
-
 }
