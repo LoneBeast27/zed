@@ -11,9 +11,9 @@
 //! `plan` event, where each subtask carries its linked run's rolled-up status
 //! (pending/running/done/failed/killed). The cards check off as their runs
 //! progress. The store feeds the plan over SSE when connected; a watch-gated
-//! `/plan` poll (held only while the dock shows the panel —
-//! [`Panel::set_active`], the [`PlanWatch`] lifetime law) covers the
-//! polling-fallback window.
+//! `/plan` poll (held only while the center tab shows the panel —
+//! `ModeSurface::set_surface_active`, the [`PlanWatch`] lifetime law) covers
+//! the polling-fallback window.
 //!
 //! The bridge OWNS the wave derivation (`bridge/state.py` `plan_view` →
 //! `orchestrator/plans.py` `to_waves`) and is the single source of truth: the
@@ -24,11 +24,10 @@
 //! the B1 drift trap — and was deleted in the fix pass.)
 
 use gpui::{
-    Action, Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, SharedString, Subscription, Window, actions,
+    Animation, AnimationExt as _, AnyElement, App, Context, Entity, FocusHandle, Focusable,
+    FontWeight, SharedString, Subscription, Window, actions,
 };
 use ui::prelude::*;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::agent_accents::ACCENT;
 use crate::bridge::{self, BridgeStore, PlanSnapshot, PlanSubtask, PlanWatch, UnlinkedRun};
@@ -52,13 +51,13 @@ const CARD_SPRING_IN: Duration = Duration::from_millis(260);
 
 pub struct SymphonyPanel {
     focus_handle: FocusHandle,
-    position: DockPosition,
     /// The shared bridge store — its [`BridgeStore::plan`] is the panel's
     /// truth source (fed by SSE / the watch-gated `/plan` poll). Observed for
     /// `cx.notify()` so check-off updates repaint.
     store: Entity<BridgeStore>,
-    /// Held only while the dock shows the panel ([`Panel::set_active`]) — its
-    /// presence keeps the `/plan` poll alive (the SSE-fallback path).
+    /// Held only while the center tab shows the panel
+    /// (`ModeSurface::set_surface_active`) — its presence keeps the `/plan`
+    /// poll alive (the SSE-fallback path).
     plan_watch: Option<PlanWatch>,
     _store_subscription: Subscription,
 }
@@ -69,7 +68,6 @@ impl SymphonyPanel {
         let _store_subscription = cx.observe(&store, |_, _, cx| cx.notify());
         Self {
             focus_handle: cx.focus_handle(),
-            position: DockPosition::Left,
             store,
             plan_watch: None,
             _store_subscription,
@@ -352,34 +350,20 @@ impl Focusable for SymphonyPanel {
     }
 }
 
-impl EventEmitter<PanelEvent> for SymphonyPanel {}
-
-impl Panel for SymphonyPanel {
-    fn persistent_name() -> &'static str {
-        "SymphonyPanel"
+impl crate::mode_item::ModeSurface for SymphonyPanel {
+    // Center-pane surface (Amendment 2026-07-04 (2)) — the dock `Panel`
+    // era is retired.
+    fn fallback_tab_title() -> SharedString {
+        "Symphony".into()
     }
 
-    fn panel_key() -> &'static str {
-        "SymphonyPanel"
+    fn fallback_tab_icon() -> IconName {
+        IconName::AudioOn
     }
 
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        self.position
-    }
-
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
-    }
-
-    fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
-        // Runtime-only, mirroring the task board (Z1).
-        self.position = position;
-        cx.notify();
-    }
-
-    fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
+    fn set_surface_active(&mut self, active: bool, cx: &mut Context<Self>) {
         // The native route mount/unmount — the `/plan` poll (the SSE-fallback
-        // path) lives exactly as long as the dock shows the panel
+        // path) lives exactly as long as the center tab shows the panel
         // (PlanWatch / TranscriptWatch pattern). SSE feeds the plan directly
         // when connected; the watch covers the polling-fallback window.
         if active {
@@ -389,25 +373,5 @@ impl Panel for SymphonyPanel {
         } else {
             self.plan_watch = None;
         }
-    }
-
-    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(560.)
-    }
-
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        Some(IconName::AudioOn)
-    }
-
-    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Symphony")
-    }
-
-    fn toggle_action(&self) -> Box<dyn Action> {
-        Box::new(ToggleFocus)
-    }
-
-    fn activation_priority(&self) -> u32 {
-        19
     }
 }

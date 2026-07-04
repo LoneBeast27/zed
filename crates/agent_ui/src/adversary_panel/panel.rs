@@ -1,15 +1,14 @@
-//! The adversary panel's lifecycle + composer deck: the `Panel` impl with
-//! the watch-gated job-poll lifetime, the `.adv-composer` (editor + the
-//! always-visible broadcast circle), the panel head, and the error state.
-//! Result rendering lives in [`super::columns`].
+//! The adversary panel's lifecycle + composer deck: the center-surface
+//! lifecycle with the watch-gated job-poll lifetime, the `.adv-composer`
+//! (editor + the always-visible broadcast circle), the panel head, and the
+//! error state. Result rendering lives in [`super::columns`].
 
 use gpui::{
-    Action, App, AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    SharedString, Subscription, Window, actions, relative,
+    App, AnyElement, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
+    Subscription, Window, actions, relative,
 };
 use settings::Settings as _;
 use ui::prelude::*;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::agent_accents::ACCENT_FILL;
 use crate::bridge::{AdversaryJobs, AdversaryPhase, AdversaryWatch};
@@ -33,14 +32,13 @@ actions!(
 
 pub struct AdversaryPanel {
     focus_handle: FocusHandle,
-    position: DockPosition,
     pub(super) jobs: Entity<AdversaryJobs>,
     editor: Entity<editor::Editor>,
     pub(super) done: Option<DoneView>,
     /// Change gate for the jobs observer.
     pub(super) last_phase: AdversaryPhase,
-    /// Held only while the dock shows this panel — its presence keeps the
-    /// job poll alive ([`Panel::set_active`]).
+    /// Held only while the center tab shows this panel — its presence keeps
+    /// the job poll alive (`ModeSurface::set_surface_active`).
     watch: Option<AdversaryWatch>,
     fades: StateFades,
     _jobs_subscription: Subscription,
@@ -64,7 +62,6 @@ impl AdversaryPanel {
         });
         Self {
             focus_handle: cx.focus_handle(),
-            position: DockPosition::Left,
             jobs,
             editor,
             done: None,
@@ -312,34 +309,20 @@ impl Focusable for AdversaryPanel {
     }
 }
 
-impl EventEmitter<PanelEvent> for AdversaryPanel {}
-
-impl Panel for AdversaryPanel {
-    fn persistent_name() -> &'static str {
-        "AdversaryPanel"
+impl crate::mode_item::ModeSurface for AdversaryPanel {
+    // Center-pane surface (Amendment 2026-07-04 (2)) — the dock `Panel`
+    // era is retired.
+    fn fallback_tab_title() -> SharedString {
+        "Adversary".into()
     }
 
-    fn panel_key() -> &'static str {
-        "AdversaryPanel"
+    fn fallback_tab_icon() -> IconName {
+        IconName::UserGroup
     }
 
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        self.position
-    }
-
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
-    }
-
-    fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
-        // Runtime-only, mirroring the task board (Z1).
-        self.position = position;
-        cx.notify();
-    }
-
-    fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
+    fn set_surface_active(&mut self, active: bool, cx: &mut Context<Self>) {
         // The native route mount/unmount — the job poll lives exactly as
-        // long as the dock shows the panel (TranscriptWatch pattern).
+        // long as the center tab shows the panel (TranscriptWatch pattern).
         if active {
             if self.watch.is_none() {
                 self.watch = Some(self.jobs.update(cx, |jobs, cx| jobs.watch(cx)));
@@ -347,25 +330,5 @@ impl Panel for AdversaryPanel {
         } else {
             self.watch = None;
         }
-    }
-
-    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(560.)
-    }
-
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        Some(IconName::UserGroup)
-    }
-
-    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Adversary")
-    }
-
-    fn toggle_action(&self) -> Box<dyn Action> {
-        Box::new(ToggleFocus)
-    }
-
-    fn activation_priority(&self) -> u32 {
-        18
     }
 }

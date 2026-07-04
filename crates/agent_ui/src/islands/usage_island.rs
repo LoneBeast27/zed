@@ -32,7 +32,7 @@ use crate::task_board::motion::{
     AnimatedColor, AnimatedValue, EFFECTS, RollValue, SPATIAL, StateFade,
 };
 use crate::task_board::style::HAIRLINE_HI;
-use crate::usage_panel::{UsagePanel, fmt_pct};
+use crate::usage_panel::fmt_pct;
 
 use super::island_faces::{Face, build_face, measure, short_pool};
 use super::state::{IslandMachine, IslandState, TimerCmd};
@@ -153,8 +153,8 @@ impl UsageIsland {
     }
 
     /// Expanded-card row click → contract + route to the usage mode (the
-    /// native `location.hash = "#/usage"`; falls back to focusing the
-    /// panel when no `usage` mode is installed).
+    /// native `location.hash = "#/usage"`; falls back to opening the usage
+    /// center tab directly when no `usage` mode is installed).
     fn row_clicked(&mut self, _pool: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         let cmd = self.machine.row_clicked();
         self.apply_cmd(cmd, cx);
@@ -162,8 +162,15 @@ impl UsageIsland {
             .update(cx, |workspace, cx| {
                 if !crate::workspace_mode_switcher::switch_to_mode_id(
                     "usage", workspace, window, cx,
-                ) {
-                    workspace.focus_panel::<UsagePanel>(window, cx);
+                ) && let Some(surfaces) = crate::mode_item::workspace_surfaces(workspace, cx)
+                {
+                    crate::mode_item::open_center_item(
+                        &surfaces.usage,
+                        None,
+                        workspace,
+                        window,
+                        cx,
+                    );
                 }
             })
             .ok();

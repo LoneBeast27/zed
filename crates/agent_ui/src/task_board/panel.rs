@@ -6,13 +6,12 @@
 //! elapsed ticker while a run is live (the §5 worked-for ticker).
 
 use gpui::{
-    Action, Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, Hsla, SharedString, Subscription, Window, actions,
+    Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, Hsla, SharedString, Subscription, Window, actions,
 };
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::agent_accents::STATUS_RUNNING;
 use crate::bridge::{self, BridgeStore};
@@ -49,7 +48,6 @@ pub struct TaskBoardPanel {
     focus_handle: FocusHandle,
     store: Entity<BridgeStore>,
     view: BoardView,
-    position: DockPosition,
     /// The graph's `seenRuns` (run id → first sight + per-run spawn
     /// deadline), driving fresh-node spawn + edge draw-in exactly once.
     graph_seen: std::collections::HashMap<SharedString, super::graph::GraphSeen>,
@@ -98,7 +96,6 @@ impl TaskBoardPanel {
             focus_handle: cx.focus_handle(),
             store,
             view: BoardView::Graph,
-            position: DockPosition::Left,
             graph_seen: std::collections::HashMap::new(),
             inbox_seen: std::collections::HashMap::new(),
             graph_scroll: gpui::ScrollHandle::new(),
@@ -448,50 +445,18 @@ impl Focusable for TaskBoardPanel {
     }
 }
 
-impl EventEmitter<PanelEvent> for TaskBoardPanel {}
 impl EventEmitter<TaskBoardEvent> for TaskBoardPanel {}
 
-impl Panel for TaskBoardPanel {
-    fn persistent_name() -> &'static str {
-        "TaskBoardPanel"
+impl crate::mode_item::ModeSurface for TaskBoardPanel {
+    // Center-pane surface (Amendment 2026-07-04 (2)) — the dock `Panel`
+    // era is retired. Push-fed via the shared store (the only timer is the
+    // store's own 1s live ticker), so the default `set_surface_active`
+    // no-op is correct.
+    fn fallback_tab_title() -> SharedString {
+        "Task board".into()
     }
 
-    fn panel_key() -> &'static str {
-        "TaskBoardPanel"
-    }
-
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        self.position
-    }
-
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
-    }
-
-    fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
-        // Runtime-only for Z1 — no settings persistence (the M2 switcher
-        // opens panels in the dock they live in).
-        self.position = position;
-        cx.notify();
-    }
-
-    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(420.)
-    }
-
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        Some(IconName::ListTodo)
-    }
-
-    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Task Board")
-    }
-
-    fn toggle_action(&self) -> Box<dyn Action> {
-        Box::new(ToggleFocus)
-    }
-
-    fn activation_priority(&self) -> u32 {
-        15
+    fn fallback_tab_icon() -> IconName {
+        IconName::ListTodo
     }
 }

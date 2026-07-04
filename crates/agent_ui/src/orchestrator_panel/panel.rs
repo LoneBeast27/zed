@@ -1,27 +1,25 @@
-//! The Orchestrator chat workspace panel (PARITY_SPEC §4.1): crumb header
-//! over the virtualized transcript (greeting when empty), with the composer
-//! deck beneath (Z3 Task 3). Holds the shared `Entity<BridgeStore>` and —
-//! only while the dock shows it — a [`TranscriptWatch`]: the watch is
-//! acquired on [`Panel::set_active`]`(true)` and dropped on `(false)`, so
-//! the `/transcript` poll runs only while the panel is actually visible
-//! (Lightness: panel *visibility* gates the poll — the entity itself is
-//! eagerly built at workspace init and would otherwise hold the poll open
-//! for the whole workspace lifetime; the web's `unmountChat` clears its
-//! interval on route exit the same way).
+//! The Orchestrator chat surface (PARITY_SPEC §4.1): crumb header over the
+//! virtualized transcript (greeting when empty), with the composer deck
+//! beneath (Z3 Task 3). Holds the shared `Entity<BridgeStore>` and — only
+//! while the center tab shows it — a [`TranscriptWatch`]: the watch is
+//! acquired on `ModeSurface::set_surface_active(true)` and dropped on
+//! `(false)`, so the `/transcript` poll runs only while the surface is
+//! actually visible (Lightness: *visibility* gates the poll — the entity
+//! itself is eagerly built at workspace init and would otherwise hold the
+//! poll open for the whole workspace lifetime; the web's `unmountChat`
+//! clears its interval on route exit the same way).
 
 use std::time::Duration;
 
 use gpui::{
-    Action, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    SharedString, Subscription, Task, WeakEntity, Window, actions, list,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, SharedString, Subscription, Task,
+    WeakEntity, Window, actions, list,
 };
 use ui::prelude::*;
 use workspace::Workspace;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::bridge::{self, BridgeStore, TranscriptSnapshot, TranscriptWatch};
 use crate::islands::TasksIsland;
-use crate::task_board::TaskBoardPanel;
 use crate::task_board::motion::StateFades;
 
 use super::composer::Composer;
@@ -47,7 +45,6 @@ pub struct OrchestratorPanel {
     focus_handle: FocusHandle,
     pub(super) store: Entity<BridgeStore>,
     workspace: WeakEntity<Workspace>,
-    position: DockPosition,
     pub(super) transcript: TranscriptView,
     pub(super) composer: Composer,
     /// The composer-anchored running-tasks island (§4.9) — `pub(crate)` so
@@ -67,8 +64,9 @@ pub struct OrchestratorPanel {
     /// "hovers are gentle fades" class, read per frame and pumped by ONE
     /// `request_animation_frame` in [`Render::render`].
     pub(crate) fades: StateFades,
-    /// Held only while the dock shows this panel ([`Panel::set_active`]) —
-    /// the RAII guard whose presence keeps the `/transcript` poll alive.
+    /// Held only while the center tab shows this panel
+    /// (`ModeSurface::set_surface_active`) — the RAII guard whose presence
+    /// keeps the `/transcript` poll alive.
     transcript_watch: Option<TranscriptWatch>,
     _store_subscription: Subscription,
 }
@@ -86,7 +84,6 @@ impl OrchestratorPanel {
             focus_handle: cx.focus_handle(),
             store,
             workspace,
-            position: DockPosition::Left,
             transcript: TranscriptView::new(),
             composer: Composer::new(window, cx),
             tasks_island: TasksIsland::new(cx),
@@ -99,12 +96,11 @@ impl OrchestratorPanel {
         }
     }
 
-    /// The dock's visibility signal drives the poll lifetime: acquire the
-    /// watch when the panel becomes the visible panel of an open dock, drop
-    /// it when the dock closes or another panel takes the slot. Acquiring
-    /// on the 0→1 watcher transition (re)starts the poll loop, whose first
-    /// iteration fetches immediately — re-activation is also the fresh
-    /// fetch.
+    /// The center tab's visibility signal drives the poll lifetime: acquire
+    /// the watch when the tab becomes the pane's visible item, drop it when
+    /// another tab takes the pane or the tab closes. Acquiring on the 0→1
+    /// watcher transition (re)starts the poll loop, whose first iteration
+    /// fetches immediately — re-activation is also the fresh fetch.
     fn set_poll_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if active {
             if self.transcript_watch.is_none() {
@@ -186,9 +182,10 @@ impl OrchestratorPanel {
         cx.notify();
     }
 
-    /// Step-row / island-row click → route to the task board and open that
-    /// run's drawer (the Z2 toast's pattern — emits `TaskBoardEvent::OpenRun`
-    /// inside). `pub(crate)`: the tasks island's rows route here too.
+    /// Step-row / island-row click → route to the task board (taskboard
+    /// mode / center tab) and open that run's drawer (the Z2 toast's
+    /// pattern — emits `TaskBoardEvent::OpenRun` inside). `pub(crate)`: the
+    /// tasks island's rows route here too.
     pub(crate) fn open_run(
         &mut self,
         run_id: SharedString,
@@ -197,10 +194,7 @@ impl OrchestratorPanel {
     ) {
         self.workspace
             .update(cx, |workspace, cx| {
-                workspace.focus_panel::<TaskBoardPanel>(window, cx);
-                if let Some(panel) = workspace.panel::<TaskBoardPanel>(cx) {
-                    panel.update(cx, |panel, cx| panel.open_run(run_id.clone(), cx));
-                }
+                crate::mode_item::open_task_board_run(run_id, workspace, window, cx);
             })
             .ok();
     }
@@ -337,55 +331,21 @@ impl Focusable for OrchestratorPanel {
     }
 }
 
-impl EventEmitter<PanelEvent> for OrchestratorPanel {}
-
-impl Panel for OrchestratorPanel {
-    fn persistent_name() -> &'static str {
-        "OrchestratorPanel"
+impl crate::mode_item::ModeSurface for OrchestratorPanel {
+    // Center-pane surface (Amendment 2026-07-04 (2)) — the dock `Panel`
+    // era is retired.
+    fn fallback_tab_title() -> SharedString {
+        "Orchestrator".into()
     }
 
-    fn panel_key() -> &'static str {
-        "OrchestratorPanel"
+    fn fallback_tab_icon() -> IconName {
+        IconName::Chat
     }
 
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        self.position
-    }
-
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
-    }
-
-    fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
-        // Runtime-only, mirroring the task board (Z1).
-        self.position = position;
-        cx.notify();
-    }
-
-    fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
-        // The dock invokes this on open/close and panel switches
-        // (dock.rs `set_open` / `activate_panel`) — the native equivalent
-        // of the web's route mount/unmount, gating the `/transcript` poll.
+    fn set_surface_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        // The center item host invokes this on tab activation/deactivation
+        // (`mode_item.rs`) — the native equivalent of the web's route
+        // mount/unmount, gating the `/transcript` poll.
         self.set_poll_active(active, cx);
-    }
-
-    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(520.)
-    }
-
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        Some(IconName::ZedAgent)
-    }
-
-    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Orchestrator")
-    }
-
-    fn toggle_action(&self) -> Box<dyn Action> {
-        Box::new(ToggleFocus)
-    }
-
-    fn activation_priority(&self) -> u32 {
-        14
     }
 }

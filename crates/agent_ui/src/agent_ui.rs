@@ -31,6 +31,7 @@ mod language_model_selector;
 mod mention_set;
 mod message_editor;
 mod mode_icons;
+pub mod mode_item;
 mod mode_selector;
 mod model_selector;
 pub mod orchestrator_panel;
@@ -609,53 +610,88 @@ pub fn init(
             weak_workspace,
             cx,
         );
-        workspace.set_activity_bar_item(Some(bar.into()), window, cx);
+        workspace.set_activity_bar_item(Some(bar.clone().into()), window, cx);
 
-        // Z1 — the task board panel, mounted so the `taskboard` mode's
-        // layout (and `apply_mode_layout`'s persistent-name lookup) can
-        // open it. Registered only alongside workspace modes: stock Zed
-        // stays untouched when the flag is off.
-        let task_board = cx.new(|cx| task_board::TaskBoardPanel::new(cx));
-        workspace.add_panel(task_board, window, cx);
-        workspace.register_action(
-            |workspace: &mut Workspace,
-             _: &task_board::ToggleFocus,
-             window: &mut Window,
-             cx: &mut Context<Workspace>| {
-                workspace.toggle_panel_focus::<task_board::TaskBoardPanel>(window, cx);
-            },
-        );
-
-        // Z3 — the orchestrator chat panel, mounted so the `orchestrator`
-        // mode's layout can open it (same registration shape as the board).
+        // Amendment 2026-07-04 (2): the six mode primary surfaces live in
+        // the CENTER pane as workspace items (`mode_item::ModeItem`), not
+        // in docks. The view entities are built once per workspace here
+        // (push-fed stores stay warm from init, as in the dock era) and
+        // stashed on the activity bar — mode switches and the islands
+        // open/activate them idempotently. Built only alongside workspace
+        // modes: stock Zed stays untouched when the flag is off.
         let panel_workspace = cx.weak_entity();
-        let orchestrator =
-            cx.new(|cx| orchestrator_panel::OrchestratorPanel::new(panel_workspace, window, cx));
-        workspace.add_panel(orchestrator, window, cx);
-        workspace.register_action(
-            |workspace: &mut Workspace,
-             _: &orchestrator_panel::ToggleFocus,
-             window: &mut Window,
-             cx: &mut Context<Workspace>| {
-                workspace.toggle_panel_focus::<orchestrator_panel::OrchestratorPanel>(window, cx);
-            },
-        );
+        let surfaces = mode_item::ModeSurfaces {
+            orchestrator: cx
+                .new(|cx| orchestrator_panel::OrchestratorPanel::new(panel_workspace, window, cx)),
+            task_board: cx.new(|cx| task_board::TaskBoardPanel::new(cx)),
+            symphony: cx.new(|cx| symphony_panel::SymphonyPanel::new(cx)),
+            adversary: cx.new(|cx| adversary_panel::AdversaryPanel::new(window, cx)),
+            usage: cx.new(|cx| usage_panel::UsagePanel::new(cx)),
+            settings_status: cx.new(|cx| settings_status_panel::SettingsStatusPanel::new(cx)),
+        };
+        bar.update(cx, |bar, _| bar.set_surfaces(surfaces.clone()));
 
-        // Z4 — the symphony panel, mounted so the `symphony` mode's
-        // layout can open it.
-        let symphony = cx.new(|cx| symphony_panel::SymphonyPanel::new(cx));
-        workspace.add_panel(symphony, window, cx);
-        workspace.register_action(
-            |workspace: &mut Workspace,
-             _: &symphony_panel::ToggleFocus,
-             window: &mut Window,
-             cx: &mut Context<Workspace>| {
-                workspace.toggle_panel_focus::<symphony_panel::SymphonyPanel>(window, cx);
-            },
-        );
+        // The per-surface focus actions now open/activate the center item
+        // (tab chrome falls back to the surface defaults when invoked
+        // outside a mode switch, e.g. from the command palette).
+        workspace.register_action({
+            let surface = surfaces.task_board.clone();
+            move |workspace: &mut Workspace,
+                  _: &task_board::ToggleFocus,
+                  window: &mut Window,
+                  cx: &mut Context<Workspace>| {
+                mode_item::open_center_item(&surface, None, workspace, window, cx);
+            }
+        });
+        workspace.register_action({
+            let surface = surfaces.orchestrator.clone();
+            move |workspace: &mut Workspace,
+                  _: &orchestrator_panel::ToggleFocus,
+                  window: &mut Window,
+                  cx: &mut Context<Workspace>| {
+                mode_item::open_center_item(&surface, None, workspace, window, cx);
+            }
+        });
+        workspace.register_action({
+            let surface = surfaces.symphony.clone();
+            move |workspace: &mut Workspace,
+                  _: &symphony_panel::ToggleFocus,
+                  window: &mut Window,
+                  cx: &mut Context<Workspace>| {
+                mode_item::open_center_item(&surface, None, workspace, window, cx);
+            }
+        });
+        workspace.register_action({
+            let surface = surfaces.adversary.clone();
+            move |workspace: &mut Workspace,
+                  _: &adversary_panel::ToggleFocus,
+                  window: &mut Window,
+                  cx: &mut Context<Workspace>| {
+                mode_item::open_center_item(&surface, None, workspace, window, cx);
+            }
+        });
+        workspace.register_action({
+            let surface = surfaces.settings_status.clone();
+            move |workspace: &mut Workspace,
+                  _: &settings_status_panel::ToggleFocus,
+                  window: &mut Window,
+                  cx: &mut Context<Workspace>| {
+                mode_item::open_center_item(&surface, None, workspace, window, cx);
+            }
+        });
+        workspace.register_action({
+            let surface = surfaces.usage.clone();
+            move |workspace: &mut Workspace,
+                  _: &usage_panel::ToggleFocus,
+                  window: &mut Window,
+                  cx: &mut Context<Workspace>| {
+                mode_item::open_center_item(&surface, None, workspace, window, cx);
+            }
+        });
 
-        // §10 — the constellation panel (subagent lifecycle board), a
-        // right-dock panel beside the orchestrator conversation.
+        // §10 — the constellation panel (subagent lifecycle board) stays a
+        // DOCK panel: the right dock beside the orchestrator conversation
+        // (the amendment keeps the right dock for the constellation).
         let constellation = cx.new(|cx| constellation::ConstellationPanel::new(cx));
         workspace.add_panel(constellation, window, cx);
         workspace.register_action(
@@ -664,46 +700,6 @@ pub fn init(
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 workspace.toggle_panel_focus::<constellation::ConstellationPanel>(window, cx);
-            },
-        );
-
-        // Z4 — the adversary panel, mounted so the `adversary` mode's
-        // layout can open it (same registration shape as the board).
-        let adversary = cx.new(|cx| adversary_panel::AdversaryPanel::new(window, cx));
-        workspace.add_panel(adversary, window, cx);
-        workspace.register_action(
-            |workspace: &mut Workspace,
-             _: &adversary_panel::ToggleFocus,
-             window: &mut Window,
-             cx: &mut Context<Workspace>| {
-                workspace.toggle_panel_focus::<adversary_panel::AdversaryPanel>(window, cx);
-            },
-        );
-
-        // Z4 — the settings status panel (read-only, §4.6), mounted so the
-        // `settings` mode's layout can open it.
-        let settings_status = cx.new(|cx| settings_status_panel::SettingsStatusPanel::new(cx));
-        workspace.add_panel(settings_status, window, cx);
-        workspace.register_action(
-            |workspace: &mut Workspace,
-             _: &settings_status_panel::ToggleFocus,
-             window: &mut Window,
-             cx: &mut Context<Workspace>| {
-                workspace
-                    .toggle_panel_focus::<settings_status_panel::SettingsStatusPanel>(window, cx);
-            },
-        );
-
-        // Z2 — the usage panel, mounted the same way so the `usage` mode's
-        // layout can open it.
-        let usage = cx.new(|cx| usage_panel::UsagePanel::new(cx));
-        workspace.add_panel(usage, window, cx);
-        workspace.register_action(
-            |workspace: &mut Workspace,
-             _: &usage_panel::ToggleFocus,
-             window: &mut Window,
-             cx: &mut Context<Workspace>| {
-                workspace.toggle_panel_focus::<usage_panel::UsagePanel>(window, cx);
             },
         );
 

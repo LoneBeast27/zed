@@ -21,7 +21,6 @@ use ui::prelude::*;
 use workspace::Workspace;
 
 use crate::bridge::{self, BridgeStore};
-use crate::task_board::TaskBoardPanel;
 use crate::task_board::motion::{AnimatedValue, DECEL, EFFECTS, MotionCurve};
 
 use super::notif_card::{
@@ -212,8 +211,9 @@ impl NotifStack {
         }
     }
 
-    /// Body click → route to the board and open that run's drawer (the
-    /// native `location.hash = "#/board"; openDrawer(runId)`), then retract.
+    /// Body click → route to the board (taskboard mode / center tab) and
+    /// open that run's drawer (the native `location.hash = "#/board";
+    /// openDrawer(runId)`), then retract.
     pub(super) fn clicked(&mut self, id: &SharedString, window: &mut Window, cx: &mut Context<Self>) {
         let Some(toast) = self.toasts.iter().find(|toast| toast.id == *id) else {
             return;
@@ -224,11 +224,8 @@ impl NotifStack {
         if let Some(run_id) = toast.run_id.clone() {
             self.workspace
                 .update(cx, |workspace, cx| {
-                    workspace.focus_panel::<TaskBoardPanel>(window, cx);
-                    if let Some(panel) = workspace.panel::<TaskBoardPanel>(cx) {
-                        // Emits TaskBoardEvent::OpenRun + opens the drawer.
-                        panel.update(cx, |panel, cx| panel.open_run(run_id.clone(), cx));
-                    }
+                    // Emits TaskBoardEvent::OpenRun + opens the drawer.
+                    crate::mode_item::open_task_board_run(run_id, workspace, window, cx);
                 })
                 .ok();
         }

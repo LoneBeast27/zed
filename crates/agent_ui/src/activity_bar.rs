@@ -30,6 +30,7 @@ use workspace::Workspace;
 
 use crate::agent_accents::rgba_hex;
 use crate::mode_icons::icon_name_for;
+use crate::mode_item::ModeSurfaces;
 use crate::task_board::motion::{AnimatedValue, CHROME_OMEGA, STATE_FADE, StateFades, mix};
 use crate::task_board::style::SURFACE_1;
 use crate::workspace_mode_switcher;
@@ -109,6 +110,12 @@ pub struct ActivityBar {
     /// notify) — bottom-capsule item positions resolve against last frame's
     /// height, the drawer's width-measure idiom.
     bar_height: Option<Pixels>,
+    /// The six center-surface entities (Amendment 2026-07-04 (2)) — the bar
+    /// is the mode system's per-workspace anchor, so the switcher and the
+    /// islands reach the surfaces through it
+    /// ([`crate::mode_item::workspace_surfaces`]). `None` until the
+    /// workspace-modes init installs them (and in bar-only unit tests).
+    surfaces: Option<ModeSurfaces>,
 }
 
 impl ActivityBar {
@@ -130,11 +137,21 @@ impl ActivityBar {
             squircle_y: AnimatedValue::spring(0.0, CHROME_OMEGA),
             squircle_placed: false,
             bar_height: None,
+            surfaces: None,
         }
     }
 
     pub fn modes(&self) -> &[WorkspaceMode] {
         &self.modes
+    }
+
+    /// Install the center-surface registry (workspace-modes init).
+    pub fn set_surfaces(&mut self, surfaces: ModeSurfaces) {
+        self.surfaces = Some(surfaces);
+    }
+
+    pub fn surfaces(&self) -> Option<&ModeSurfaces> {
+        self.surfaces.as_ref()
     }
 
     pub fn active_mode_id(&self) -> &str {

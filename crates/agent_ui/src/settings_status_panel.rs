@@ -7,20 +7,19 @@
 //! Sections: bridge connection (connected / transport / last-frame age from
 //! the [`BridgeStore`]), usage scrape freshness (`_scraped`), the active
 //! brain (from the transcript snapshot — a TranscriptWatch is held only
-//! while the dock shows the panel), the workspace-modes flag state, and the
-//! theme/fonts in effect. The only timer is a 1s age-label roll, alive only
-//! while the panel is visible (the §5 worked-for ticker class).
+//! while the center tab shows the panel), the workspace-modes flag state,
+//! and the theme/fonts in effect. The only timer is a 1s age-label roll,
+//! alive only while the panel is visible (the §5 worked-for ticker class).
 
 use std::time::Duration;
 
 use gpui::{
-    Action, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    SharedString, Subscription, Task, Window, actions,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString,
+    Subscription, Task, Window, actions,
 };
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::agent_accents::{STATUS_BLOCKED, STATUS_ERROR, STATUS_RUNNING};
 use crate::bridge::{self, BRIDGE_BASE_URL, BridgeStore, Transport, TranscriptWatch, UsageMeta};
@@ -65,10 +64,10 @@ pub fn freshness_line(meta: &UsageMeta) -> String {
 
 pub struct SettingsStatusPanel {
     focus_handle: FocusHandle,
-    position: DockPosition,
     store: Entity<BridgeStore>,
-    /// Held only while the dock shows this panel — keeps the `/transcript`
-    /// poll (the brain's source) alive, the orchestrator-panel pattern.
+    /// Held only while the center tab shows this panel — keeps the
+    /// `/transcript` poll (the brain's source) alive, the orchestrator-panel
+    /// pattern.
     transcript_watch: Option<TranscriptWatch>,
     /// 1s repaint for the age labels — `Some` only while visible.
     ticker: Option<Task<()>>,
@@ -84,7 +83,6 @@ impl SettingsStatusPanel {
         let _store_subscription = cx.observe(&store, |_, _, cx| cx.notify());
         Self {
             focus_handle: cx.focus_handle(),
-            position: DockPosition::Left,
             store,
             transcript_watch: None,
             ticker: None,
@@ -427,55 +425,21 @@ impl Focusable for SettingsStatusPanel {
     }
 }
 
-impl EventEmitter<PanelEvent> for SettingsStatusPanel {}
-
-impl Panel for SettingsStatusPanel {
-    fn persistent_name() -> &'static str {
-        "SettingsStatusPanel"
+impl crate::mode_item::ModeSurface for SettingsStatusPanel {
+    // Center-pane surface (Amendment 2026-07-04 (2)) — the dock `Panel`
+    // era is retired.
+    fn fallback_tab_title() -> SharedString {
+        "Settings".into()
     }
 
-    fn panel_key() -> &'static str {
-        "SettingsStatusPanel"
+    fn fallback_tab_icon() -> IconName {
+        IconName::Settings
     }
 
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        self.position
-    }
-
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
-    }
-
-    fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
-        // Runtime-only, mirroring the task board (Z1).
-        self.position = position;
-        cx.notify();
-    }
-
-    fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
+    fn set_surface_active(&mut self, active: bool, cx: &mut Context<Self>) {
         // Visibility gates BOTH live feeds: the transcript watch (brain) and
         // the 1s age-label ticker.
         self.set_live(active, cx);
-    }
-
-    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(560.)
-    }
-
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        Some(IconName::Settings)
-    }
-
-    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Settings status")
-    }
-
-    fn toggle_action(&self) -> Box<dyn Action> {
-        Box::new(ToggleFocus)
-    }
-
-    fn activation_priority(&self) -> u32 {
-        20
     }
 }
 

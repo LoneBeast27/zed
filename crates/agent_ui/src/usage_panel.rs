@@ -14,13 +14,12 @@
 use std::collections::HashMap;
 
 use gpui::{
-    Action, Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, SharedString, Subscription, Window, actions,
+    Animation, AnimationExt as _, AnyElement, App, Context, Entity, FocusHandle, Focusable,
+    FontWeight, SharedString, Subscription, Window, actions,
 };
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::agent_accents::{STATUS_BLOCKED, tone_for_used, used_pct};
 use crate::bridge::{self, BridgeStore, PoolRow, UsageMeta};
@@ -51,7 +50,6 @@ fn pool_label(name: &str) -> &str {
 pub struct UsagePanel {
     focus_handle: FocusHandle,
     store: Entity<BridgeStore>,
-    position: DockPosition,
     /// Pool name → meter fill/tone animation state (persists across store
     /// ticks so fills morph in place — §5.6 keyed reconciliation).
     meters: HashMap<String, MeterState>,
@@ -85,7 +83,6 @@ impl UsagePanel {
         Self {
             focus_handle: cx.focus_handle(),
             store,
-            position: DockPosition::Left,
             meters: HashMap::new(),
             pct_rolls: HashMap::new(),
             was_connected: false,
@@ -371,49 +368,16 @@ impl Focusable for UsagePanel {
     }
 }
 
-impl EventEmitter<PanelEvent> for UsagePanel {}
-
-impl Panel for UsagePanel {
-    fn persistent_name() -> &'static str {
-        "UsagePanel"
+impl crate::mode_item::ModeSurface for UsagePanel {
+    // Center-pane surface (Amendment 2026-07-04 (2)) — the dock `Panel`
+    // era is retired. Push-fed via the shared store; no visibility-gated
+    // watch, so the default `set_surface_active` no-op is correct.
+    fn fallback_tab_title() -> SharedString {
+        "Usage".into()
     }
 
-    fn panel_key() -> &'static str {
-        "UsagePanel"
-    }
-
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        self.position
-    }
-
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
-    }
-
-    fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
-        // Runtime-only, mirroring the task board (Z1).
-        self.position = position;
-        cx.notify();
-    }
-
-    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(480.)
-    }
-
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        Some(IconName::SignalHigh)
-    }
-
-    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Usage")
-    }
-
-    fn toggle_action(&self) -> Box<dyn Action> {
-        Box::new(ToggleFocus)
-    }
-
-    fn activation_priority(&self) -> u32 {
-        17
+    fn fallback_tab_icon() -> IconName {
+        IconName::Sliders
     }
 }
 

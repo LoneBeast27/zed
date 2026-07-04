@@ -44,7 +44,12 @@ pub enum PinnedPosition {
     Bottom,
 }
 
-/// Per-dock layout spec inside a mode definition.
+/// Per-surface layout spec inside a mode definition. Keys (Amendment
+/// 2026-07-04 (2)): `center` (the mode's primary surface, opened as a
+/// center-pane workspace item — `size_px`/`fill` ignored, full-bleed),
+/// `right_dock` / `bottom_dock` (dock panels, e.g. the constellation).
+/// `left_dock` is legacy: a spec naming a center surface is promoted to
+/// `center`; modes otherwise leave the left dock under user control.
 #[derive(Debug, Deserialize, Clone)]
 pub struct LayoutSpec {
     #[serde(default)]
@@ -203,6 +208,33 @@ mod tests {
         assert!(layout.visible);
         // open_url defaults to None when absent.
         assert_eq!(mode.open_url, None);
+    }
+
+    #[test]
+    fn parses_center_primary_layout() {
+        // Amendment 2026-07-04 (2): the shipped mode files now put their
+        // primary under `center` (+ optional right_dock, e.g. the
+        // orchestrator's constellation).
+        let json = r#"{
+            "schema_version": 1,
+            "id": "orchestrator",
+            "display_name": "Orchestrator",
+            "description": "The orchestrator conversation",
+            "icon": "Chat",
+            "accent_color_hex": "d97757",
+            "layout": {
+                "center": { "panel": "orchestrator" },
+                "right_dock": { "panel": "constellation", "size_px": 480 }
+            }
+        }"#;
+        let mode: WorkspaceMode = serde_json::from_str(json).unwrap();
+        let center = mode.layout.get("center").unwrap();
+        assert_eq!(center.panel.as_deref(), Some("orchestrator"));
+        assert!(center.visible);
+        assert_eq!(
+            mode.layout.get("right_dock").unwrap().size_px,
+            Some(480)
+        );
     }
 
     #[test]
