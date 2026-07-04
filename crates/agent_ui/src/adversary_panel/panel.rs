@@ -298,7 +298,14 @@ impl Render for AdversaryPanel {
             .bg(colors.panel_background)
             .child(self.render_header(cx))
             .child(
-                // `.adv-scroll`: 20/28/32 padding.
+                // `.adv-scroll`: 20/28/32 padding. The content column is
+                // CENTERED (Amendment 2026-07-04 (4) item 3, user ruling:
+                // "adversary is not in the middle") — the surface is full-bleed
+                // in the center pane now, so its max-width column (composer +
+                // banner + result columns + synthesis, each already `w_full`
+                // with its own max-width) centers horizontally, mirroring the
+                // orchestrator surface. `items_center` was `items_start`, a
+                // residue of the 560px left-dock era.
                 v_flex()
                     .id("adv-scroll")
                     .flex_1()
@@ -307,7 +314,7 @@ impl Render for AdversaryPanel {
                     .px(px(28.))
                     .pt(px(20.))
                     .pb(px(32.))
-                    .items_start()
+                    .items_center()
                     .child(composer)
                     .children(aborted_banner)
                     .children(columns)

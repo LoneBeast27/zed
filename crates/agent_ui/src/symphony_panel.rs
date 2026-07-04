@@ -395,7 +395,14 @@ impl Render for SymphonyPanel {
                 .px(px(28.))
                 .pt(px(20.))
                 .pb(px(32.))
-                .items_start()
+                // CENTERED score column (Amendment 2026-07-04 (4) item 3
+                // discipline): the 920px `.score` is a bounded column and
+                // centers in the full-bleed pane; the wave BANDS stay full-
+                // width WITHIN that column (the ruling's "may legitimately be
+                // full-width" is honored — bands fill their column, the column
+                // just no longer hugs the left). `items_center` was
+                // `items_start` (left-dock residue).
+                .items_center()
                 .child(self.render_score(&plan, cx))
                 .into_any_element(),
         };

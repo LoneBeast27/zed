@@ -399,7 +399,11 @@ impl Render for SettingsStatusPanel {
             .child(
                 // `.settings-content`: 22/28/32 padding (the web's left nav
                 // is web-form-era chrome — the native panel is the status
-                // stack alone, per the §4.6 ruling).
+                // stack alone, per the §4.6 ruling). The card column is
+                // CENTERED (Amendment 2026-07-04 (4) item 3 discipline) — the
+                // 720px `.setting-card` stack is a bounded column that wants
+                // the center of the full-bleed pane, not the left edge.
+                // `items_center` was `items_start` (left-dock residue).
                 v_flex()
                     .id("settings-scroll")
                     .flex_1()
@@ -408,7 +412,7 @@ impl Render for SettingsStatusPanel {
                     .px(px(28.))
                     .pt(px(22.))
                     .pb(px(32.))
-                    .items_start()
+                    .items_center()
                     .children(cards),
             );
         // The §8.7a frame pump for the jump-link hover crossfades.
