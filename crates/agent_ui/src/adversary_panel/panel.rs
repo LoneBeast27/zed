@@ -298,14 +298,11 @@ impl Render for AdversaryPanel {
             .bg(colors.panel_background)
             .child(self.render_header(cx))
             .child(
-                // `.adv-scroll`: 20/28/32 padding. The content column is
-                // CENTERED (Amendment 2026-07-04 (4) item 3, user ruling:
-                // "adversary is not in the middle") — the surface is full-bleed
-                // in the center pane now, so its max-width column (composer +
-                // banner + result columns + synthesis, each already `w_full`
-                // with its own max-width) centers horizontally, mirroring the
-                // orchestrator surface. `items_center` was `items_start`, a
-                // residue of the 560px left-dock era.
+                // `.adv-scroll`: results area, CENTERED column (Amendment
+                // 2026-07-04 (4) item 3). Composer is NOT here — user ruling
+                // (live review, "adversary still on top instead of bottom"):
+                // the composer pins to the pane FOOT like the orchestrator;
+                // results/banner/synthesis scroll above it.
                 v_flex()
                     .id("adv-scroll")
                     .flex_1()
@@ -313,13 +310,24 @@ impl Render for AdversaryPanel {
                     .overflow_y_scroll()
                     .px(px(28.))
                     .pt(px(20.))
-                    .pb(px(32.))
+                    .pb(px(12.))
                     .items_center()
-                    .child(composer)
                     .children(aborted_banner)
                     .children(columns)
                     .children(error)
                     .children(synthesis),
+            )
+            .child(
+                // Composer deck pinned at the bottom (orchestrator anatomy),
+                // centered in the full-bleed pane.
+                v_flex()
+                    .flex_none()
+                    .w_full()
+                    .items_center()
+                    .px(px(28.))
+                    .pt(px(8.))
+                    .pb(px(32.))
+                    .child(composer),
             );
         // The §8.7a frame pump: focus crossfade reads `current()` per frame.
         if self.fades.any_animating() {
