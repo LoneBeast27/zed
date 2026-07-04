@@ -259,8 +259,17 @@ impl ActivityBar {
                         );
                         return;
                     };
-                    workspace.update(cx, |workspace, cx| {
-                        workspace_mode_switcher::switch_to_mode(&mode, workspace, window, cx);
+                    // DEFERRED: this listener runs inside the ActivityBar's
+                    // own update, and switch_to_mode reads the bar (surfaces
+                    // registry lives on it) — synchronous dispatch panics
+                    // with a re-entrant read in a real window (symphony
+                    // click crash 2026-07-04; same class as the t9 launch
+                    // crash). Aim the squircle immediately (set_active
+                    // above), apply the layout one cycle later.
+                    window.defer(cx, move |window, cx| {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace_mode_switcher::switch_to_mode(&mode, workspace, window, cx);
+                        });
                     });
                 }),
             )
