@@ -12,10 +12,12 @@
 use crate::agent_accents::{Tone, tone_for_used, used_pct};
 use crate::bridge::{PoolRow, UsageMeta, VendorLiveness};
 
-/// Canonical vendor ordering for the clusters (the ruling's order:
-/// claude, codex, gemini, agy). Unknown vendors sort after these, in first-
-/// seen (wire) order, so a new vendor surfaces instead of vanishing.
-const VENDOR_ORDER: [&str; 4] = ["claude", "codex", "gemini", "agy"];
+/// Canonical vendor ordering for the clusters. Amendment (4b): gemini and
+/// antigravity bundle under ONE "google" cluster (same vendor family; the
+/// comms doc already treats gemini as the Google-side fallback during agy
+/// lockout). Unknown vendors sort after these, in first-seen (wire) order,
+/// so a new vendor surfaces instead of vanishing.
+const VENDOR_ORDER: [&str; 3] = ["claude", "codex", "google"];
 
 /// Within the claude cluster the 5h (session) pool leads, then the weekly
 /// buckets. Pools not named here keep their wire order after the ranked ones.
@@ -24,6 +26,10 @@ fn pool_rank(name: &str) -> u8 {
         "claude_5h" => 0,
         "claude_weekly" => 1,
         "claude_weekly_sonnet" => 2,
+        // Google cluster: agy (a main system) leads, the gemini heartbeat
+        // pool trails (Amendment (4b): plumbing, not a main system).
+        "antigravity_weekly" => 3,
+        "gemini_free_rpd" => 4,
         _ => u8::MAX,
     }
 }
@@ -36,8 +42,9 @@ pub fn vendor_of(pool_name: &str) -> &str {
     match pool_name {
         n if n.starts_with("claude") => "claude",
         n if n.starts_with("codex") => "codex",
-        n if n.starts_with("gemini") => "gemini",
-        n if n.starts_with("antigravity") => "agy",
+        // Amendment (4b): both Google-family systems cluster as one vendor.
+        n if n.starts_with("gemini") => "google",
+        n if n.starts_with("antigravity") => "google",
         n => n.split('_').next().unwrap_or(n),
     }
 }
@@ -47,8 +54,7 @@ pub fn vendor_label(vendor: &str) -> &str {
     match vendor {
         "claude" => "Claude",
         "codex" => "Codex",
-        "gemini" => "Gemini",
-        "agy" => "Antigravity",
+        "google" => "Google",
         other => other,
     }
 }
@@ -131,7 +137,15 @@ pub fn group_pools<'a>(pools: &'a [PoolRow], meta: &'a UsageMeta) -> Vec<VendorG
 }
 
 /// Match a vendor's liveness entry (by vendor name) from the usage meta.
+/// The "google" cluster (Amendment (4b)) matches EITHER family member's
+/// liveness — agy first (the main system), else gemini (whose pings are the
+/// ones that exist today).
 fn liveness_for<'a>(vendor: &str, meta: &'a UsageMeta) -> Option<&'a VendorLiveness> {
+    if vendor == "google" {
+        return ["agy", "gemini"]
+            .iter()
+            .find_map(|v| meta.liveness.iter().find(|entry| entry.vendor == *v));
+    }
     meta.liveness.iter().find(|entry| entry.vendor == vendor)
 }
 
@@ -162,27 +176,33 @@ mod tests {
         assert_eq!(vendor_of("claude_5h"), "claude");
         assert_eq!(vendor_of("claude_weekly_sonnet"), "claude");
         assert_eq!(vendor_of("codex_plan"), "codex");
-        assert_eq!(vendor_of("gemini_free_rpd"), "gemini");
-        assert_eq!(vendor_of("antigravity_weekly"), "agy");
+        // Amendment (4b): both Google-family systems map to ONE vendor.
+        assert_eq!(vendor_of("gemini_free_rpd"), "google");
+        assert_eq!(vendor_of("antigravity_weekly"), "google");
         // Unknown pool derives its vendor from the first segment, honestly.
         assert_eq!(vendor_of("mistral_daily"), "mistral");
         assert_eq!(vendor_of("solo"), "solo");
     }
 
     #[test]
-    fn clusters_order_is_claude_codex_gemini_agy() {
-        // Deliberately shuffled input; agy pool appears first on the wire.
+    fn clusters_order_is_claude_codex_google() {
+        // Deliberately shuffled input; google pools appear first on the wire
+        // AND split by a claude pool — they still land in ONE google cluster
+        // (Amendment (4b)), agy leading, the gemini heartbeat trailing.
         let pools = vec![
-            pool("antigravity_weekly", Some(100.)),
             pool("gemini_free_rpd", Some(99.)),
             pool("claude_weekly", Some(97.)),
             pool("codex_plan", Some(100.)),
+            pool("antigravity_weekly", Some(100.)),
             pool("claude_5h", Some(100.)),
         ];
         let meta = meta_with_liveness(vec![]);
         let groups = group_pools(&pools, &meta);
         let vendors: Vec<&str> = groups.iter().map(|g| g.vendor).collect();
-        assert_eq!(vendors, ["claude", "codex", "gemini", "agy"]);
+        assert_eq!(vendors, ["claude", "codex", "google"]);
+        let google = groups.iter().find(|g| g.vendor == "google").unwrap();
+        let names: Vec<&str> = google.pools.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["antigravity_weekly", "gemini_free_rpd"]);
     }
 
     #[test]
@@ -220,6 +240,9 @@ mod tests {
 
     #[test]
     fn liveness_matches_by_vendor_name() {
+        // The google cluster (Amendment (4b)) matches EITHER family member's
+        // liveness — today only gemini pings exist, and they must surface on
+        // the google header.
         let pools = vec![pool("gemini_free_rpd", Some(99.)), pool("claude_5h", Some(100.))];
         let meta = meta_with_liveness(vec![VendorLiveness {
             vendor: "gemini".into(),
@@ -227,8 +250,8 @@ mod tests {
             ..Default::default()
         }]);
         let groups = group_pools(&pools, &meta);
-        let gemini = groups.iter().find(|g| g.vendor == "gemini").unwrap();
-        assert_eq!(gemini.liveness.map(|l| l.state.as_str()), Some("alive"));
+        let google = groups.iter().find(|g| g.vendor == "google").unwrap();
+        assert_eq!(google.liveness.map(|l| l.state.as_str()), Some("alive"));
         let claude = groups.iter().find(|g| g.vendor == "claude").unwrap();
         assert!(claude.liveness.is_none());
     }

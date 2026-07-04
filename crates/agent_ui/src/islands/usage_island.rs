@@ -78,6 +78,10 @@ struct PoolView {
 /// at-a-glance session figure.
 const SESSION_POOL: &str = "claude_5h";
 
+/// Pools with NO pill representation (Amendment 2026-07-04 (4b)): the gemini
+/// heartbeat pool is plumbing, not a main system — panel-only.
+const PILL_HIDDEN_POOLS: [&str; 1] = ["gemini_free_rpd"];
+
 /// The pill's Rest % text: the [`SESSION_POOL`]'s used-% (formatted "NN%").
 /// `None` when the session pool is absent or unmetered, so the pill degrades
 /// to dots-only rather than borrowing a different pool's number — the metric
@@ -305,11 +309,21 @@ impl UsageIsland {
     fn desired_face(&self) -> Face {
         match self.machine.state() {
             IslandState::Rest => {
-                let dots = self.pools.iter().take(5).map(|pool| pool.tone).collect();
+                // Amendment (4b): the gemini heartbeat pool gets NO pill
+                // representation ("not really a main system we use") — its
+                // numbers live only inside the panel's Google cluster. The
+                // dot row spans the MAIN pools; data stays available to the
+                // notify/held faces (a pool-critical alert is not a pill).
+                let dots = self
+                    .pools
+                    .iter()
+                    .filter(|pool| !PILL_HIDDEN_POOLS.contains(&pool.name.as_str()))
+                    .take(5)
+                    .map(|pool| pool.tone)
+                    .collect();
                 // The pill's % is the SESSION metric (Amendment 2026-07-04 (4)
                 // item 2, user ruling: "that's the useful one for pill") — the
-                // claude 5h window, NOT the tightest pool. The dot row still
-                // spans every pool; the vendor detail lives in the panel.
+                // claude 5h window, NOT the tightest pool.
                 let pct = session_pct(&self.pools);
                 Face::Rest { dots, pct }
             }
