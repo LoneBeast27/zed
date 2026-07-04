@@ -27,12 +27,15 @@ fn slide_travel_is_sheet_width_terms_at_every_panel_width() {
 
 #[test]
 fn run_detail_deserializes_liberally() {
+    // Fixture truth: the live `GET /run/<id>` carries `session_id`
+    // (2026-07-04, curl http://127.0.0.1:4530/run/<id>).
     let detail: RunDetail = serde_json::from_str(
         r#"{
             "run_id": "r-9", "agent": "claude", "status": "running",
             "elapsed_s": 12.5, "task": "do the thing",
             "chip": "claude · code-heavy · 92%",
             "usage": {"tokens": 1234, "cost": null},
+            "session_id": "6b363c45-6fad-4b24-bb33-7e32b94969a1",
             "events": [
                 {"kind": "spawn", "payload": {"a": 1}},
                 {"kind": "log", "payload": "line"}
@@ -47,10 +50,15 @@ fn run_detail_deserializes_liberally() {
     assert_eq!(detail.events[0].kind, "spawn");
     assert_eq!(detail.text, None);
     assert_eq!(detail.error, None);
+    assert_eq!(
+        detail.session_id.as_deref(),
+        Some("6b363c45-6fad-4b24-bb33-7e32b94969a1")
+    );
 
-    // Minimal payload also parses.
+    // Minimal payload also parses — session_id absent → None.
     let minimal: RunDetail = serde_json::from_str("{}").unwrap();
     assert_eq!(minimal.events.len(), 0);
+    assert_eq!(minimal.session_id, None);
 }
 
 #[test]

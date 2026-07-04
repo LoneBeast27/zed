@@ -79,6 +79,11 @@ pub struct RunDetail {
     pub text: Option<String>,
     #[serde(default)]
     pub usage: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The worker's agent-session id (`GET /run/<id>` `session_id`, 2026-07-04)
+    /// — the drawer head surfaces it so a run is traceable back to its worker
+    /// session. `None` on an older bridge / a run without a session.
+    #[serde(default)]
+    pub session_id: Option<String>,
     #[serde(default)]
     pub events: Vec<RunEvent>,
 }

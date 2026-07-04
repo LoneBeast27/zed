@@ -22,6 +22,7 @@ fn freshness_degrades_visibly_never_vanishes() {
             age_min: Some(12.0),
             reset_phrase: Some("14:32".to_string()),
         }),
+        ..Default::default()
     };
     assert_eq!(freshness_line(&fresh), "scraped 12m ago");
     let stale = UsageMeta {
@@ -32,6 +33,7 @@ fn freshness_degrades_visibly_never_vanishes() {
             age_min: None,
             reset_phrase: None,
         }),
+        ..Default::default()
     };
     assert_eq!(freshness_line(&stale), "stale — scraped 36.2h ago");
 }

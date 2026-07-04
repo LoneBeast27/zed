@@ -21,7 +21,7 @@ use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
-use crate::agent_accents::{STATUS_BLOCKED, tone_for_used, used_pct};
+use crate::agent_accents::{STATUS_BLOCKED, STATUS_ERROR, tone_for_used, used_pct};
 use crate::bridge::{self, BridgeStore, PoolRow, UsageMeta};
 use crate::task_board::motion::{EFFECTS, RollValue, StateFade};
 use crate::task_board::style::{SURFACE_1, tabular_nums};
@@ -131,6 +131,73 @@ impl UsagePanel {
                         .child(SharedString::from(sub)),
                 )
             })
+    }
+
+    /// The per-vendor liveness strip (2026-07-04 `liveness` map): "is <vendor>
+    /// alive RIGHT NOW", so the reader can see a KNOWN-dead vendor before a
+    /// call fails. One chip per vendor — a tone dot (green alive / amber
+    /// rate_limited / red down) + name + age. Rendered only when the bridge
+    /// surfaces liveness (empty → no strip, never a blank row).
+    fn render_liveness(&self, meta: &UsageMeta, cx: &App) -> Option<Div> {
+        if meta.liveness.is_empty() {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
+        let chips: Vec<AnyElement> = meta
+            .liveness
+            .iter()
+            .map(|vendor| {
+                let (dot, label_color) = liveness_tone(&vendor.state);
+                let age = vendor
+                    .age_s
+                    .map(|age| format!("  ·  {}", crate::task_board::style::rel(age)))
+                    .unwrap_or_default();
+                h_flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(9.))
+                    .py(px(4.))
+                    .rounded(px(8.))
+                    .bg(SURFACE_1)
+                    .child(
+                        div()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(dot)
+                            .flex_none(),
+                    )
+                    .child(
+                        div()
+                            .font_family(mono.clone())
+                            .text_size(px(12.))
+                            .text_color(label_color)
+                            .child(SharedString::from(format!(
+                                "{} {}{age}",
+                                vendor.vendor, liveness_word(&vendor.state)
+                            ))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            h_flex()
+                .flex_none()
+                .flex_wrap()
+                .gap(px(8.))
+                .px(px(28.))
+                .py(px(12.))
+                .border_b_1()
+                .border_color(colors.border)
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(colors.text_placeholder)
+                        .child("Vendor liveness"),
+                )
+                .children(chips),
+        )
     }
 
     /// The scrape-staleness banner — shown only while `_scraped.stale`;
@@ -257,13 +324,101 @@ impl UsagePanel {
                 div()
                     .mt(px(8.))
                     .text_size(px(11.))
-                    .font_family(mono)
+                    .font_family(mono.clone())
                     .text_color(colors.text_placeholder)
                     .child(SharedString::from(status_line)),
             )
+            // Call-count breakdown (2026-07-04 fields): real orchestrator
+            // brain calls vs liveness/keepalive pings, so the pool's genuine
+            // burn stays legible next to the ping-hack traffic. Rendered only
+            // when the bridge surfaces either count for this pool.
+            .children(self.render_pool_calls(pool, &mono, cx))
+            // `vendor_429_observed` — the vendor returned a rate-limit 429 in
+            // this window. A red marker: the pool hit a real vendor ceiling.
+            .when(pool.vendor_429_observed, |this| {
+                this.child(
+                    h_flex()
+                        .mt(px(6.))
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .size(px(6.))
+                                .rounded_full()
+                                .bg(gpui::Hsla::from(STATUS_ERROR))
+                                .flex_none(),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .font_family(mono.clone())
+                                .text_color(STATUS_ERROR)
+                                .child("429 observed"),
+                        ),
+                )
+            })
             .into_any_element()
     }
 
+    /// The per-pool call-count line ("N brain · M ping"): real brain calls
+    /// separated from liveness/keepalive pings (2026-07-04). `None` when the
+    /// bridge surfaces neither count for the pool (older bridge / pool without
+    /// the routine ping hack), so no empty line renders.
+    fn render_pool_calls(
+        &self,
+        pool: &PoolRow,
+        mono: &gpui::SharedString,
+        cx: &App,
+    ) -> Option<Div> {
+        let brain = pool.brain_calls_in_window;
+        let ping = pool.ping_calls_in_window;
+        if brain.is_none() && ping.is_none() {
+            return None;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(brain) = brain {
+            parts.push(format!("{brain} brain"));
+        }
+        if let Some(ping) = ping {
+            parts.push(format!("{ping} ping"));
+        }
+        let colors = cx.theme().colors();
+        Some(
+            div()
+                .mt(px(4.))
+                .text_size(px(11.))
+                .font_family(mono.clone())
+                .font_features(tabular_nums())
+                .text_color(colors.text_placeholder)
+                .child(SharedString::from(parts.join("  ·  "))),
+        )
+    }
+
+}
+
+/// The tone (status dot color + label color) for a vendor liveness state.
+/// alive → green, rate_limited → amber, down/anything-error → red, unknown →
+/// idle grey. Word and color agree (the P1 rule).
+fn liveness_tone(state: &str) -> (gpui::Hsla, gpui::Hsla) {
+    let color = match state {
+        "alive" | "ok" | "up" => crate::agent_accents::STATUS_RUNNING,
+        "rate_limited" | "limited" | "throttled" => STATUS_BLOCKED,
+        "down" | "dead" | "error" | "unreachable" => STATUS_ERROR,
+        _ => crate::agent_accents::STATUS_IDLE,
+    };
+    (color.into(), color.into())
+}
+
+/// The display word for a vendor liveness state (raw states pass through so a
+/// future state is visible rather than swallowed).
+fn liveness_word(state: &str) -> &str {
+    match state {
+        "alive" => "alive",
+        "rate_limited" => "rate-limited",
+        "down" => "down",
+        "" => "unknown",
+        other => other,
+    }
 }
 
 /// JS-style number formatting: integers print bare ("82"), fractions keep
@@ -279,10 +434,21 @@ pub(crate) fn fmt_pct(value: f64) -> String {
 
 impl Render for UsagePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let store = self.store.read(cx);
-        let connected = store.connected;
-        let pools = store.usage.clone();
-        let meta = store.usage_meta.clone();
+        // Agentic-demo gate: stage believable pools + liveness so the whole
+        // usage surface reviews without a live bridge. `connected = true` so
+        // the demo never greys itself out. Falls through to the live store
+        // when the gate is off. (crate::usage_panel_demo — this surface's own
+        // demo module, decoded once per frame, no timers.)
+        let (connected, pools, meta) = if crate::bridge::is_agentic_demo() {
+            (
+                true,
+                crate::usage_panel_demo::demo_pools(),
+                crate::usage_panel_demo::demo_meta(),
+            )
+        } else {
+            let store = self.store.read(cx);
+            (store.connected, store.usage.clone(), store.usage_meta.clone())
+        };
         if connected != self.was_connected {
             self.was_connected = connected;
             self.connected_fade.bump();
@@ -357,6 +523,7 @@ impl Render for UsagePanel {
             .size_full()
             .bg(colors.panel_background)
             .child(self.render_header(&meta, cx))
+            .children(self.render_liveness(&meta, cx))
             .children(self.render_stale_banner(&meta))
             .child(body_container)
     }

@@ -160,6 +160,18 @@ pub struct PoolRow {
     pub name: String,
     pub headroom_pct: Option<f64>,
     pub window: Option<String>,
+    /// `brain_calls_in_window` — real orchestrator brain calls counted in the
+    /// pool's window (distinct from liveness/keepalive pings). `None` when the
+    /// bridge doesn't surface it for this pool (2026-07-04 field).
+    pub brain_calls_in_window: Option<u64>,
+    /// `ping_calls_in_window` — liveness/keepalive pings counted in the window
+    /// (the routine ping-hack traffic; separated from real brain calls so the
+    /// pool's real burn stays legible). `None` when absent.
+    pub ping_calls_in_window: Option<u64>,
+    /// `vendor_429_observed` — the vendor returned a 429 (rate-limit) inside
+    /// the window. `false`/absent = clean; `true` marks the pool as having hit
+    /// a real vendor ceiling (2026-07-04 field).
+    pub vendor_429_observed: bool,
 }
 
 /// A typed event off the `/sse` stream. The bridge writes the discriminant
@@ -297,14 +309,37 @@ pub struct ScrapeMeta {
     pub reset_phrase: Option<String>,
 }
 
+/// One vendor's liveness state off the usage `liveness` map (2026-07-04):
+/// `is <vendor> alive RIGHT NOW`, so the local-brain-OUT chain can fail fast
+/// on a KNOWN-dead vendor instead of timing out. Fed by the routine
+/// liveness-ping hacks (h20/h21).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VendorLiveness {
+    pub vendor: String,
+    /// `state` — "alive" / "rate_limited" / "down" (unknown strings pass
+    /// through; the panel maps them to tones liberally).
+    pub state: String,
+    /// `last_status` — the last probe's raw verdict ("ok" / an error string).
+    pub last_status: Option<String>,
+    /// `age_s` — seconds since the probe that produced this state.
+    pub age_s: Option<f64>,
+    /// `verified_by` — which vendor ran the cross-check probe (h21), if any.
+    pub verified_by: Option<String>,
+    /// `latency_ms` — the probe round-trip.
+    pub latency_ms: Option<f64>,
+}
+
 /// The `_`-prefixed metadata keys that ride next to the pools in every
-/// usage payload.
+/// usage payload, plus the top-level `liveness` map.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UsageMeta {
     /// `_source` — "self-metering + vendor-page scrape".
     pub source: Option<String>,
     /// `_scraped` — present only when a vendor-page scrape feeds the pools.
     pub scraped: Option<ScrapeMeta>,
+    /// `liveness` — per-vendor alive/rate-limited/down state (2026-07-04),
+    /// in wire order. Empty when the bridge doesn't surface it.
+    pub liveness: Vec<VendorLiveness>,
 }
 
 impl UsageMeta {
@@ -340,7 +375,41 @@ pub fn usage_meta_from_object(object: &serde_json::Map<String, serde_json::Value
                 },
             }
         });
-    UsageMeta { source, scraped }
+    let liveness = liveness_from_object(object);
+    UsageMeta {
+        source,
+        scraped,
+        liveness,
+    }
+}
+
+/// Extract the per-vendor liveness rows from the usage object's `liveness`
+/// map (wire order, `preserve_order`). Missing/odd-shaped entries degrade to
+/// defaults rather than erroring — the liberal-protocol rule.
+fn liveness_from_object(object: &serde_json::Map<String, serde_json::Value>) -> Vec<VendorLiveness> {
+    let Some(map) = object.get("liveness").and_then(|value| value.as_object()) else {
+        return Vec::new();
+    };
+    map.iter()
+        .map(|(vendor, entry)| VendorLiveness {
+            vendor: vendor.clone(),
+            state: entry
+                .get("state")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            last_status: entry
+                .get("last_status")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            age_s: entry.get("age_s").and_then(serde_json::Value::as_f64),
+            verified_by: entry
+                .get("verified_by")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            latency_ms: entry.get("latency_ms").and_then(serde_json::Value::as_f64),
+        })
+        .collect()
 }
 
 /// `resetPhrase()` from usage-island.js — the first non-empty
@@ -374,6 +443,12 @@ pub fn pools_from_object(object: &serde_json::Map<String, serde_json::Value>) ->
         if name.starts_with('_') {
             continue; // bridge metadata keys
         }
+        // `liveness` is a top-level usage map key (not a pool) — it carries the
+        // per-vendor alive/rate-limited/down state and rides UsageMeta, not the
+        // pool rows. Skip it here so it never renders as a phantom pool card.
+        if name == "liveness" {
+            continue;
+        }
         rows.push(PoolRow {
             name: name.clone(),
             headroom_pct: entry.get("headroom_pct").and_then(|v| v.as_f64()),
@@ -381,6 +456,16 @@ pub fn pools_from_object(object: &serde_json::Map<String, serde_json::Value>) ->
                 .get("window")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            brain_calls_in_window: entry
+                .get("brain_calls_in_window")
+                .and_then(serde_json::Value::as_u64),
+            ping_calls_in_window: entry
+                .get("ping_calls_in_window")
+                .and_then(serde_json::Value::as_u64),
+            vendor_429_observed: entry
+                .get("vendor_429_observed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
         });
     }
     rows
@@ -644,6 +729,67 @@ mod tests {
         let scraped = meta.scraped.unwrap();
         assert_eq!(scraped.age_min, Some(12.0));
         assert_eq!(scraped.reset_phrase.as_deref(), Some("14:32"));
+    }
+
+    #[test]
+    fn pool_row_parses_2026_07_04_call_counts_and_429() {
+        // Fixture truth: the live /usage gemini_free_rpd pool, 2026-07-04.
+        let event: BridgeEvent = serde_json::from_str(
+            r#"{"type": "usage",
+                "gemini_free_rpd": {"headroom_pct": 100, "window": "day",
+                    "brain_calls_in_window": 3, "ping_calls_in_window": 2,
+                    "vendor_429_observed": false},
+                "codex_plan": {"headroom_pct": 99, "vendor_429_observed": true},
+                "claude_5h": {"headroom_pct": 78}}"#,
+        )
+        .unwrap();
+        let BridgeEvent::Usage { fields } = event else {
+            panic!("expected Usage");
+        };
+        let pools = pools_from_object(&fields);
+        let gemini = pools.iter().find(|p| p.name == "gemini_free_rpd").unwrap();
+        assert_eq!(gemini.brain_calls_in_window, Some(3));
+        assert_eq!(gemini.ping_calls_in_window, Some(2));
+        assert!(!gemini.vendor_429_observed);
+        let codex = pools.iter().find(|p| p.name == "codex_plan").unwrap();
+        assert!(codex.vendor_429_observed, "codex saw a 429");
+        // Older bridge / pool without the fields → None / false.
+        let claude = pools.iter().find(|p| p.name == "claude_5h").unwrap();
+        assert_eq!(claude.brain_calls_in_window, None);
+        assert_eq!(claude.ping_calls_in_window, None);
+        assert!(!claude.vendor_429_observed);
+    }
+
+    #[test]
+    fn liveness_map_is_not_a_pool_and_parses_into_meta() {
+        // Fixture truth: the live /usage `liveness` map, 2026-07-04.
+        let object = usage_object(
+            r#"{
+                "claude_5h": {"headroom_pct": 78},
+                "liveness": {
+                    "gemini": {"state": "alive", "last_status": "ok",
+                        "age_s": 836.5, "verified_by": "codex",
+                        "latency_ms": 1760.2}
+                }
+            }"#,
+        );
+        // `liveness` must NOT render as a phantom pool card.
+        let pools = pools_from_object(&object);
+        assert_eq!(pools.len(), 1);
+        assert_eq!(pools[0].name, "claude_5h");
+        // It rides UsageMeta instead.
+        let meta = usage_meta_from_object(&object);
+        assert_eq!(meta.liveness.len(), 1);
+        let gemini = &meta.liveness[0];
+        assert_eq!(gemini.vendor, "gemini");
+        assert_eq!(gemini.state, "alive");
+        assert_eq!(gemini.last_status.as_deref(), Some("ok"));
+        assert_eq!(gemini.age_s, Some(836.5));
+        assert_eq!(gemini.verified_by.as_deref(), Some("codex"));
+        assert_eq!(gemini.latency_ms, Some(1760.2));
+        // Absent liveness → empty vec, not an error.
+        let bare = usage_meta_from_object(&usage_object(r#"{"claude_5h": {}}"#));
+        assert!(bare.liveness.is_empty());
     }
 
     #[test]

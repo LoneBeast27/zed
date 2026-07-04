@@ -74,11 +74,18 @@ pub fn ago_now(ts: f64) -> String {
 
 /// `statusLabel()` from board.js — pill text (unknown statuses fall back to
 /// the raw status string, like the web).
+///
+/// P1 (word/color agreement, matching `plan_status_label`): `failed` reads
+/// "Failed" in RED, NOT the old web board.js "Blocked" (which paired an amber
+/// word with `color_for_status`'s red pill — the glanceable-correctness
+/// mismatch the Atlas failure grammar forbids). A genuinely blocked-on-you
+/// run would read the amber "Blocked" bucket; the bridge produces no such
+/// inbox status today, so it maps through the `other` passthrough.
 pub fn status_label(status: &str) -> String {
     match status {
         "running" => "Running".to_string(),
         "completed" => "Done".to_string(),
-        "failed" => "Blocked".to_string(),
+        "failed" => "Failed".to_string(),
         "killed" => "Killed".to_string(),
         "pending" | "idle" => "Idle".to_string(),
         other => other.to_string(),
@@ -92,7 +99,8 @@ pub fn status_phrase(status: &str, elapsed_s: f64) -> String {
     match status {
         "running" => format!("Working… · {t}"),
         "completed" => format!("Done · {t}"),
-        "failed" => format!("Blocked · {t}"),
+        // P1: red status → red word ("Failed"), never the amber "Blocked".
+        "failed" => format!("Failed · {t}"),
         "killed" => "Killed".to_string(),
         "pending" | "idle" => "Queued".to_string(),
         other => other.to_string(),
@@ -395,16 +403,30 @@ mod tests {
     fn status_vocabulary_matches_board_js() {
         assert_eq!(status_label("running"), "Running");
         assert_eq!(status_label("completed"), "Done");
-        assert_eq!(status_label("failed"), "Blocked");
+        // P1: failed reads "Failed" in RED (matches color_for_status), NOT
+        // the old amber-worded "Blocked" web bug.
+        assert_eq!(status_label("failed"), "Failed");
         assert_eq!(status_label("killed"), "Killed");
         assert_eq!(status_label("pending"), "Idle");
         assert_eq!(status_label("idle"), "Idle");
 
         assert_eq!(status_phrase("running", 34.0), "Working… · 34s");
         assert_eq!(status_phrase("completed", 300.0), "Done · 5m");
-        assert_eq!(status_phrase("failed", 10.0), "Blocked · 10s");
+        assert_eq!(status_phrase("failed", 10.0), "Failed · 10s");
         assert_eq!(status_phrase("killed", 10.0), "Killed");
         assert_eq!(status_phrase("pending", 0.0), "Queued");
+    }
+
+    #[test]
+    fn inbox_status_word_agrees_with_color_bucket() {
+        // P1 for the INBOX vocabulary (mirrors the symphony guard): a red pill
+        // must never read an amber word. This pins the failed→"Blocked"
+        // regression out of `status_label`/`status_phrase` too.
+        use crate::agent_accents::{STATUS_ERROR, color_for_status};
+        assert_eq!(status_label("failed"), "Failed");
+        assert_eq!(color_for_status("failed"), STATUS_ERROR.into());
+        assert_eq!(status_label("killed"), "Killed");
+        assert_eq!(color_for_status("killed"), STATUS_ERROR.into());
     }
 
     #[test]

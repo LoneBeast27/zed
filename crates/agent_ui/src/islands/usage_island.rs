@@ -182,14 +182,25 @@ impl UsageIsland {
     /// ticks, so repaint only when the usage data or the machine state
     /// actually changed (§8 idle cost).
     fn sync_from_store(&mut self, cx: &mut Context<Self>) {
-        let store = self.store.read(cx);
-        let reset_phrase = store
-            .usage_meta
+        // Agentic-demo gate: the corner island is the §4.8 proving ground and
+        // is visible on EVERY route, so it stages the same pools + reset phrase
+        // as the usage panel (crate::usage_panel_demo) — one shared demo
+        // source, no island-local duplication. Falls through to the live store
+        // when the gate is off.
+        let (usage, usage_meta) = if crate::bridge::is_agentic_demo() {
+            (
+                crate::usage_panel_demo::demo_pools(),
+                crate::usage_panel_demo::demo_meta(),
+            )
+        } else {
+            let store = self.store.read(cx);
+            (store.usage.clone(), store.usage_meta.clone())
+        };
+        let reset_phrase = usage_meta
             .scraped
             .as_ref()
             .and_then(|scrape| scrape.reset_phrase.clone());
-        let pools: Vec<PoolView> = store
-            .usage
+        let pools: Vec<PoolView> = usage
             .iter()
             .map(|pool| {
                 let used = used_pct(pool.headroom_pct);

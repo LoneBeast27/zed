@@ -117,7 +117,7 @@ impl RunDrawer {
                 .child(
                     div()
                         .mt(px(3.))
-                        .font_family(mono)
+                        .font_family(mono.clone())
                         .text_size(px(12.5))
                         .text_color(colors.text_placeholder)
                         .truncate()
@@ -128,6 +128,25 @@ impl RunDrawer {
                             "{agent} · {reason} · {}",
                             rel(detail.elapsed_s)
                         ))),
+                )
+                // The worker's agent-session id (2026-07-04) — a second mono
+                // line, present only when the bridge carries one. Traces a run
+                // back to its worker session. Prefixed "session" so the raw
+                // uuid isn't mistaken for the run id above.
+                .children(
+                    detail
+                        .session_id
+                        .as_deref()
+                        .filter(|id| !id.trim().is_empty())
+                        .map(|id| {
+                            div()
+                                .mt(px(2.))
+                                .font_family(mono)
+                                .text_size(px(11.))
+                                .text_color(colors.text_placeholder.opacity(0.75))
+                                .truncate()
+                                .child(SharedString::from(format!("session {id}")))
+                        }),
                 ),
         )
         // Raw lowercase status — the web drawer's vocabulary

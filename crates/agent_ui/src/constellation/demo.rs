@@ -1,8 +1,9 @@
 //! Staged demo scenario (board-demo.js, exact script) — NOT a product
 //! surface: a scripted parallel-converge team so the constellation's
-//! choreography can be verified without live runs. Active when the panel is
-//! built with `ZED_CONSTELLATION_DEMO=1` in the environment (the native
-//! `?demo=1`). Zero bridge involvement.
+//! choreography can be verified without live runs. Active under the shared
+//! agentic-demo gate ([`crate::bridge::is_agentic_demo`]): the canonical
+//! `ZED_AGENTIC_DEMO=1` or the legacy `ZED_CONSTELLATION_DEMO=1` alias (this
+//! panel's original var). Zero bridge involvement.
 
 use crate::bridge::{ChannelRow, ConversationRow, OverlapRow, RunRow, RunTokens};
 use crate::task_board::run_detail::{RunDetail, RunEvent};
@@ -95,9 +96,11 @@ const SCRIPT: [Staged; 6] = [
     },
 ];
 
-/// Whether demo mode is on (`ZED_CONSTELLATION_DEMO=1`).
+/// Whether demo mode is on. Delegates to the shared agentic-demo gate — the
+/// canonical `ZED_AGENTIC_DEMO=1` OR the legacy `ZED_CONSTELLATION_DEMO=1`
+/// alias (this panel's original var) stages the constellation.
 pub fn is_demo() -> bool {
-    std::env::var("ZED_CONSTELLATION_DEMO").is_ok_and(|v| !v.is_empty() && v != "0")
+    crate::bridge::is_agentic_demo()
 }
 
 /// The staged board at `t` seconds since panel build.
@@ -207,6 +210,10 @@ pub fn demo_run_detail(run_id: &str, t: f64) -> Option<RunDetail> {
         error,
         text,
         usage: Some(usage),
+        // A stable staged session id per run so the drawer head's session
+        // line renders in demo mode (the field the bridge path fills from
+        // `GET /run/<id>`).
+        session_id: Some(format!("demo-session-{}", s.run_id)),
         events,
     })
 }

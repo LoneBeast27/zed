@@ -19,7 +19,7 @@ use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
-use crate::agent_accents::{STATUS_BLOCKED, STATUS_DONE};
+use crate::agent_accents::{STATUS_BLOCKED, STATUS_DONE, STATUS_ERROR};
 use crate::bridge::RunRow;
 
 use super::motion::{EFFECTS, STATE_FADE, mix};
@@ -124,9 +124,25 @@ fn inbox_row(
     let when = SharedString::from(rel(run.elapsed_s));
     let status = run.status.as_str();
 
-    // Badge slot: bell when blocked, blue done-dot when completed.
+    // Badge slot (the Atlas dot grammar — each state its own mark):
+    // - completed → blue done-dot,
+    // - failed/killed → a RED stilled hard ring (an unfilled ring in the
+    //   error color: the failure signature, distinct from the amber bell,
+    //   which means blocked-on-YOU, and from the filled blue done-dot),
+    // - a genuinely blocked-on-you run keeps the amber bell (no inbox status
+    //   rolls up to it today, but the branch stays honest for when one does).
     let badge: Option<AnyElement> = match status {
         "failed" | "killed" => Some(
+            // Stilled hard ring: a 2px red ring, hollow centre — the run is
+            // over and it FAILED (Atlas grammar `stilled hard ring = failed`).
+            div()
+                .size(px(9.))
+                .rounded_full()
+                .border_2()
+                .border_color(STATUS_ERROR)
+                .into_any_element(),
+        ),
+        "blocked" => Some(
             Icon::new(IconName::Bell)
                 // 16px (board.css:66 `.badge.bell .ms`) = IconSize::Medium.
                 .size(IconSize::Medium)
