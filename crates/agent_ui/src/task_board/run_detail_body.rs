@@ -67,20 +67,52 @@ fn body_markdown_style(kind: BodyMarkdown, window: &Window, cx: &App) -> Markdow
 
 /// Renders the active tab's body content. `log_rows` arrive pre-stringified
 /// from `RunDrawer::set_detail` (once per poll tick, never per frame).
+///
+/// `load_failed` is the drawer's resolved first-fetch failure: when set (and
+/// nothing ever loaded) every tab renders the honest error state — the
+/// "Loading…" placeholder is BOUNDED, never eternal.
 pub(super) fn render_body(
     tab: DrawerTab,
     detail: Option<&RunDetail>,
+    load_failed: Option<&SharedString>,
     task_md: Option<&Entity<Markdown>>,
     result_md: Option<&Entity<Markdown>>,
     log_rows: &[(SharedString, SharedString)],
     window: &Window,
     cx: &App,
 ) -> AnyElement {
+    if detail.is_none()
+        && let Some(message) = load_failed
+    {
+        return load_error(message.clone(), cx);
+    }
     match tab {
         DrawerTab::Summary => render_summary(detail, task_md, window, cx),
         DrawerTab::Result => render_result(detail, result_md, window, cx),
         DrawerTab::Logs => render_logs(log_rows, cx),
     }
+}
+
+/// The resolved fetch-failure state (404 / unreachable bridge): plain honest
+/// copy, no spinner, no placeholder fields.
+fn load_error(message: SharedString, cx: &App) -> AnyElement {
+    let colors = cx.theme().colors();
+    v_flex()
+        .gap(px(6.))
+        .child(
+            div()
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(colors.text_muted)
+                .child(message),
+        )
+        .child(
+            div()
+                .text_size(px(12.5))
+                .text_color(colors.text_placeholder)
+                .child("The bridge has no record of this run — it may have been reaped, or the bridge is offline."),
+        )
+        .into_any_element()
 }
 
 /// `.field`: uppercase 11px key over the value.

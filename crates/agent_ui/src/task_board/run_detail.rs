@@ -1,9 +1,12 @@
 //! The run drawer (PARITY_SPEC §4.2, Codex anatomy / web `drawer.js`):
-//! right slide-over with head (vendor swatch · title · status pill · close),
-//! worked-for strip, flat text tabs Summary | Result | Logs, body fetched
-//! from `GET /run/<id>` (tail-polled 1s while running). Esc or scrim-click
-//! closes; entrance/exit slide on the decel curve with a concurrent scrim
-//! crossfade (§4.9 spatial/effects split).
+//! right slide-over with head (vendor swatch · TASK TITLE · status pill ·
+//! close), worked-for strip, flat text tabs Summary | Result | Logs. Two
+//! feeds: [`RunDrawer::new`] fetches `GET /run/<id>` (tail-polled 1s while
+//! running; a first fetch that 404s/errors resolves to an honest error state
+//! after a BOUNDED wait — never eternal "Loading…"), and [`RunDrawer::local`]
+//! is pushed from a local store (the constellation demo) with zero bridge
+//! I/O. Esc or scrim-click closes; entrance/exit slide on the decel curve
+//! with a concurrent scrim crossfade (§4.9 spatial/effects split).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +31,12 @@ const LOG_POLL: Duration = Duration::from_secs(1);
 /// on a transient fetch error (web drawer.js skips the tick and the interval
 /// retries); it just slows down until the bridge answers again.
 const LOG_POLL_ERROR_CAP: Duration = Duration::from_secs(5);
+/// How many consecutive first-fetch failures before the drawer resolves to
+/// an honest error state instead of "Loading…" (bounded: with the 1s-per-
+/// failure backoff this is ~6s worst case; a 404 fails fast on the first
+/// response). Applies only while NO detail has ever loaded — once data is
+/// on screen, transient bridge errors keep the last detail and keep tailing.
+const FIRST_FETCH_ATTEMPTS: u32 = 3;
 /// Slide-over duration (web: transform .4s decel).
 const SLIDE: Duration = Duration::from_millis(400);
 /// Scrim crossfade (web: opacity .22s effects).
@@ -60,6 +69,10 @@ pub struct RunDetail {
     pub task: Option<String>,
     #[serde(default)]
     pub chip: Option<String>,
+    /// TEAMS §6 role ("designer"/"tester"/…) — the title's fallback when the
+    /// run has no task title (never the literal "agent run").
+    #[serde(default)]
+    pub archetype: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
     #[serde(default)]
@@ -93,7 +106,17 @@ pub(super) enum DrawerTab {
 pub struct DismissDrawer;
 
 pub struct RunDrawer {
+    /// The id this drawer was opened for — the honest header while nothing
+    /// has loaded (never a placeholder "agent run").
+    pub(super) run_id: SharedString,
     pub(super) detail: Option<RunDetail>,
+    /// Set when the bounded first fetch gave up (404 / unreachable bridge)
+    /// with no detail ever loaded — the body renders this instead of an
+    /// eternal "Loading…".
+    pub(super) load_failed: Option<SharedString>,
+    /// Locally-fed drawer ([`Self::local`]): no bridge behind it, so the
+    /// abort affordance (a bridge POST) is meaningless and hidden.
+    pub(super) local: bool,
     pub(super) tab: DrawerTab,
     /// The previously active tab — the 150ms tab crossfade eases both the
     /// leaving and the arriving tab (web `.drawer-tabs button` transition).
@@ -127,7 +150,9 @@ pub struct RunDrawer {
 impl RunDrawer {
     pub fn new(run_id: SharedString, cx: &mut Context<Self>) -> Self {
         let http_client: Arc<dyn HttpClient> = cx.http_client();
+        let poll_run_id = run_id.clone();
         let poll = cx.spawn(async move |this, cx| {
+            let run_id = poll_run_id;
             let mut failures: u32 = 0;
             loop {
                 let client = http_client.clone();
@@ -150,18 +175,37 @@ impl RunDrawer {
                         }
                         running
                     }
-                    // Bridge hiccup — keep the last detail and keep tailing;
-                    // continuation follows the last-known status (web
-                    // drawer.js catches, skips the tick, and retries).
-                    Err(_) => {
+                    // Fetch error. If detail is already on screen: keep it
+                    // and keep tailing (web drawer.js catches, skips the
+                    // tick, retries). If NOTHING ever loaded: the wait is
+                    // BOUNDED — a 404 resolves to "not found" immediately,
+                    // anything else after FIRST_FETCH_ATTEMPTS — never an
+                    // eternal "Loading…".
+                    Err(error) => {
                         failures += 1;
-                        match this.update(cx, |this, _| {
-                            this.detail
-                                .as_ref()
-                                .is_none_or(|detail| detail.status == "running")
-                        }) {
-                            Ok(running) => running,
-                            Err(_) => return,
+                        let not_found = error.to_string().contains("returned 404");
+                        let state = this.update(cx, |this, cx| {
+                            if this.detail.is_none()
+                                && (not_found || failures >= FIRST_FETCH_ATTEMPTS)
+                            {
+                                this.load_failed = Some(if not_found {
+                                    "Run not found on bridge.".into()
+                                } else {
+                                    "Bridge unreachable — run detail unavailable.".into()
+                                });
+                                cx.notify();
+                                return None;
+                            }
+                            Some(
+                                this.detail
+                                    .as_ref()
+                                    .is_none_or(|detail| detail.status == "running"),
+                            )
+                        });
+                        match state {
+                            Ok(Some(running)) => running,
+                            Ok(None) => return, // resolved to the error state
+                            Err(_) => return,   // drawer dropped
                         }
                     }
                 };
@@ -174,8 +218,33 @@ impl RunDrawer {
                 cx.background_executor().timer(delay).await;
             }
         });
+        Self::empty(run_id, poll, false, cx)
+    }
+
+    /// A drawer fed from a LOCAL store (the constellation's staged demo —
+    /// synthetic runs that don't exist on the bridge, so a fetch would 404
+    /// into an error state): zero bridge I/O, detail arrives up front and
+    /// the owner pushes refreshes via [`Self::push_local_detail`].
+    pub fn local(detail: RunDetail, cx: &mut Context<Self>) -> Self {
+        let run_id = SharedString::from(detail.run_id.clone());
+        let mut this = Self::empty(run_id, Task::ready(()), true, cx);
+        this.set_detail(detail, cx);
+        this
+    }
+
+    /// Refresh a [`Self::local`] drawer's detail — called by the owner off
+    /// its EXISTING frame pump at ~1s granularity (no timer of its own; the
+    /// elapsed tick rides the owner's animation clock).
+    pub fn push_local_detail(&mut self, detail: RunDetail, cx: &mut Context<Self>) {
+        self.set_detail(detail, cx);
+    }
+
+    fn empty(run_id: SharedString, poll: Task<()>, local: bool, cx: &mut Context<Self>) -> Self {
         Self {
+            run_id,
             detail: None,
+            load_failed: None,
+            local,
             tab: DrawerTab::Summary,
             prev_tab: DrawerTab::Summary,
             tab_fade: StateFade::default(),
@@ -209,7 +278,7 @@ impl RunDrawer {
         let Some(detail) = self.detail.as_ref() else {
             return;
         };
-        if self.aborting || detail.status != "running" || detail.run_id.is_empty() {
+        if self.local || self.aborting || detail.status != "running" || detail.run_id.is_empty() {
             return;
         }
         self.aborting = true;
@@ -304,6 +373,7 @@ impl RunDrawer {
             .child(super::run_detail_body::render_body(
                 self.tab,
                 self.detail.as_ref(),
+                self.load_failed.as_ref(),
                 self.task_md.as_ref(),
                 self.result_md.as_ref(),
                 &self.log_rows,

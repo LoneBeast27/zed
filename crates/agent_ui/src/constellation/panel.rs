@@ -56,6 +56,14 @@ pub struct ConstellationPanel {
     hovered: Option<SharedString>,
     /// The run drawer (task_board's — same drawer, same anatomy).
     drawer: Option<Entity<run_detail::RunDrawer>>,
+    /// In demo mode, the run the open drawer is showing — the render loop
+    /// pushes fresh staged detail into it (demo runs don't exist on the
+    /// bridge; a fetch would 404).
+    demo_drawer_run: Option<SharedString>,
+    /// Whole-second stamp of the last demo push — the drawer refresh rides
+    /// the panel's EXISTING frame pump but only lands once per second (the
+    /// web's 1s drawer tick), not per frame.
+    demo_drawer_pushed_s: Option<u64>,
     /// Stamped every render — the feed poll's visibility gate.
     last_render_at: Instant,
     position: DockPosition,
@@ -83,6 +91,8 @@ impl ConstellationPanel {
             suppress_click: false,
             hovered: None,
             drawer: None,
+            demo_drawer_run: None,
+            demo_drawer_pushed_s: None,
             last_render_at: Instant::now(),
             position: DockPosition::Right,
             scroll: gpui::ScrollHandle::new(),
@@ -158,13 +168,31 @@ impl ConstellationPanel {
 
     /// Node click → run drawer (a drag is not a click). Double-click →
     /// split-view agent feed is a banked next slice (agent-feed.js port).
+    ///
+    /// Demo nodes are synthetic — they don't exist on the bridge, so the
+    /// drawer is fed from the staged store ([`demo::demo_run_detail`])
+    /// instead of fetching (which would 404 into an error state).
     pub(super) fn node_clicked(&mut self, run_id: SharedString, cx: &mut Context<Self>) {
         if std::mem::take(&mut self.suppress_click) {
             return;
         }
-        let drawer = cx.new(|cx| run_detail::RunDrawer::new(run_id, cx));
+        let drawer = if self.demo {
+            let t = self.demo_start.elapsed().as_secs_f64();
+            let detail =
+                demo::demo_run_detail(&run_id, t).unwrap_or_else(|| run_detail::RunDetail {
+                    run_id: run_id.to_string(),
+                    ..Default::default()
+                });
+            self.demo_drawer_run = Some(run_id);
+            self.demo_drawer_pushed_s = Some(t as u64);
+            cx.new(|cx| run_detail::RunDrawer::local(detail, cx))
+        } else {
+            cx.new(|cx| run_detail::RunDrawer::new(run_id, cx))
+        };
         cx.subscribe(&drawer, |this, _, _: &run_detail::DismissDrawer, cx| {
             this.drawer = None;
+            this.demo_drawer_run = None;
+            this.demo_drawer_pushed_s = None;
             cx.notify();
         })
         .detach();
@@ -265,6 +293,23 @@ impl Render for ConstellationPanel {
         self.sim.fold_channels(&channels, now);
         let animating = self.sim.advance(now);
 
+        // Demo drawer refresh: rides THIS render's frame pump (no timer of
+        // its own) but lands only once per whole second — elapsed ticks,
+        // status flips arrive, the staged log grows.
+        if self.demo
+            && let (Some(run_id), Some(drawer)) =
+                (self.demo_drawer_run.clone(), self.drawer.clone())
+        {
+            let t = self.demo_start.elapsed().as_secs_f64();
+            let stamp = t as u64;
+            if self.demo_drawer_pushed_s != Some(stamp) {
+                self.demo_drawer_pushed_s = Some(stamp);
+                if let Some(detail) = demo::demo_run_detail(&run_id, t) {
+                    drawer.update(cx, |drawer, cx| drawer.push_local_detail(detail, cx));
+                }
+            }
+        }
+
         let weak = cx.weak_entity();
         let hovered = self.hovered.clone();
         let has_nodes = self.sim.convs.iter().any(|conv| !conv.nodes.is_empty());
@@ -312,8 +357,10 @@ impl Render for ConstellationPanel {
 
         // Frame pump: a populated constellation breathes (drift) — pump
         // while anything is on stage or a drag is live; an empty panel
-        // schedules nothing (§8 idle cost).
-        if animating || self.drag.is_some() {
+        // schedules nothing (§8 idle cost). An open DEMO drawer also keeps
+        // the pump alive so its 1s elapsed tick can land even if the sim
+        // settles (demo-only cost).
+        if animating || self.drag.is_some() || (self.demo && self.demo_drawer_run.is_some()) {
             window.request_animation_frame();
         }
 

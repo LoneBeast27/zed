@@ -5,6 +5,7 @@
 //! `?demo=1`). Zero bridge involvement.
 
 use crate::bridge::{ChannelRow, ConversationRow, OverlapRow, RunRow, RunTokens};
+use crate::task_board::run_detail::{RunDetail, RunEvent};
 
 struct Staged {
     at: f64,
@@ -128,6 +129,88 @@ pub fn demo_board(t: f64) -> Vec<RunRow> {
         .collect()
 }
 
+/// Progress-note cadence in the staged drawer log (one note per 3s of run
+/// time, capped so a long-open demo can't grow the log unboundedly).
+const NOTE_EVERY: f64 = 3.;
+const NOTE_CAP: usize = 12;
+
+/// The staged run's DRAWER detail at `t` seconds — the same script as
+/// [`demo_board`] plus canned summary/result/log content, so a demo node
+/// click opens a fully-populated drawer with ZERO bridge involvement (the
+/// synthetic runs don't exist on the bridge; fetching them would 404).
+/// Built once per push (the panel's 1s tick), never per frame.
+pub fn demo_run_detail(run_id: &str, t: f64) -> Option<RunDetail> {
+    let s = SCRIPT.iter().find(|s| s.run_id == run_id)?;
+    if t < s.at {
+        return None;
+    }
+    let ended = s.end.is_some_and(|end| t >= end);
+    let status = if ended { s.end_status } else { "running" };
+    // Elapsed freezes at the run's end (the drawer is honest about a done
+    // run's duration; only LIVE runs tick).
+    let elapsed = (s.end.map_or(t, |end| t.min(end)) - s.at).max(0.);
+    let weighted = s.tok0 + s.tok_rate * elapsed;
+
+    let mut usage = serde_json::Map::new();
+    usage.insert("weighted_tokens".into(), (weighted.round() as u64).into());
+    usage.insert("ingest_tps".into(), (s.ingest.round() as u64).into());
+
+    let chip = format!("{} · staged design demo · 100%", s.agent);
+    let mut events = vec![
+        RunEvent {
+            kind: "spawn".into(),
+            payload: serde_json::json!({ "archetype": s.archetype, "agent": s.agent }),
+        },
+        RunEvent {
+            kind: "route".into(),
+            payload: serde_json::json!({ "chip": chip }),
+        },
+    ];
+    let notes = ((elapsed / NOTE_EVERY).floor() as usize).min(NOTE_CAP);
+    for i in 1..=notes {
+        events.push(RunEvent {
+            kind: "note".into(),
+            payload: serde_json::json!(format!(
+                "checkpoint {i} — {} weighted tokens",
+                (s.tok0 + s.tok_rate * NOTE_EVERY * i as f64).round() as u64
+            )),
+        });
+    }
+    let error = (ended && s.end_status == "failed").then(|| {
+        "Staged failure: prior-art sweep hit the scripted dead end (demo scenario).".to_string()
+    });
+    if let Some(message) = &error {
+        events.push(RunEvent {
+            kind: "error".into(),
+            payload: serde_json::json!(message),
+        });
+    }
+    let text = (ended && s.end_status == "completed").then(|| {
+        format!(
+            "## {}\n\nStaged demo result — completed in {:.0}s with {} weighted tokens.\n\n\
+             - keyframe spec handed to designer/tester crosstalk\n\
+             - absorption choreography scoped for implementation",
+            s.task,
+            elapsed,
+            weighted.round() as u64
+        )
+    });
+
+    Some(RunDetail {
+        run_id: s.run_id.into(),
+        agent: s.agent.into(),
+        status: status.into(),
+        elapsed_s: elapsed,
+        task: Some(s.task.into()),
+        chip: Some(chip),
+        archetype: Some(s.archetype.into()),
+        error,
+        text,
+        usage: Some(usage),
+        events,
+    })
+}
+
 // Staged boost channel: designer↔tester crosstalk — opens at 6.5s, one batch
 // every ~3s, converged at k=5 (edge retracts, badge absorbs). States walk
 // the tri-class taxonomy (alive/held/terminal).
@@ -237,6 +320,39 @@ mod tests {
         let done = demo_channels(CH_OPEN + CH_EVERY * 6.)[0].clone();
         assert_eq!(done.state, "converged");
         assert_eq!(done.k, CH_MAX);
+    }
+
+    #[test]
+    fn drawer_detail_speaks_the_full_summary_result_log_anatomy() {
+        // Unknown runs and not-yet-spawned runs yield nothing.
+        assert!(demo_run_detail("nope", 30.).is_none());
+        assert!(demo_run_detail("demo-research", 1.).is_none());
+        // A live run: running status, ticking elapsed, growing log, task
+        // title + archetype for the header, no result yet.
+        let designer = demo_run_detail("demo-designer", 10.).unwrap();
+        assert_eq!(designer.status, "running");
+        assert!((designer.elapsed_s - 8.8).abs() < 1e-6);
+        assert_eq!(
+            designer.task.as_deref(),
+            Some("Designer: keyframe spec from hero recording")
+        );
+        assert_eq!(designer.archetype.as_deref(), Some("designer"));
+        assert!(designer.text.is_none(), "no result while running");
+        assert!(designer.events.len() > 2, "log grows past spawn+route");
+        // Completed plan: FROZEN elapsed + canned markdown result + usage.
+        let plan = demo_run_detail("demo-plan", 30.).unwrap();
+        assert_eq!(plan.status, "completed");
+        assert_eq!(plan.elapsed_s, 9.);
+        assert!(plan.text.as_deref().unwrap().contains("Staged demo result"));
+        assert!(plan.usage.as_ref().unwrap().contains_key("weighted_tokens"));
+        // Failed researcher: canned error in both the field and the log.
+        let research = demo_run_detail("demo-research", 30.).unwrap();
+        assert_eq!(research.status, "failed");
+        assert!(research.error.is_some());
+        assert_eq!(research.events.last().unwrap().kind, "error");
+        // Log growth is capped — a demo left open can't grow unboundedly.
+        let long = demo_run_detail("demo-designer", 3600.).unwrap();
+        assert!(long.events.len() <= 2 + NOTE_CAP + 1);
     }
 
     #[test]

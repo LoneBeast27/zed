@@ -1,9 +1,12 @@
 //! Tests for the run drawer: the sheet-width slide geometry, liberal
-//! `RunDetail` deserialization, and the abort affordance's failure re-arm
-//! (P2). Extracted to a sibling (the `#[path]` idiom) to keep `run_detail.rs`
-//! under the 500-line ceiling — zero behavior change.
+//! `RunDetail` deserialization, the abort affordance's failure re-arm (P2),
+//! the bounded first-fetch failure path (never an eternal "Loading…"), the
+//! local (demo-store) feed path, and the honest title chain. Extracted to a
+//! sibling (the `#[path]` idiom) to keep `run_detail.rs` under the 500-line
+//! ceiling.
 
 use super::*;
+use crate::task_board::run_detail_head::drawer_title;
 
 #[test]
 fn slide_travel_is_sheet_width_terms_at_every_panel_width() {
@@ -48,6 +51,126 @@ fn run_detail_deserializes_liberally() {
     // Minimal payload also parses.
     let minimal: RunDetail = serde_json::from_str("{}").unwrap();
     assert_eq!(minimal.events.len(), 0);
+}
+
+#[test]
+fn drawer_title_prefers_task_then_archetype_then_run_id() {
+    // Task title wins (first non-empty line only).
+    let full = RunDetail {
+        run_id: "r-1".into(),
+        agent: "claude".into(),
+        task: Some("\nImplementation: absorption choreography\ndetails…".into()),
+        archetype: Some("implementation".into()),
+        ..Default::default()
+    };
+    assert_eq!(drawer_title(&full), "Implementation: absorption choreography");
+    // No task → archetype (capitalized).
+    let archetype_only = RunDetail {
+        run_id: "r-2".into(),
+        archetype: Some("researcher".into()),
+        ..Default::default()
+    };
+    assert_eq!(drawer_title(&archetype_only), "Researcher");
+    // Nothing but the id → the id IS the honest label. NEVER "agent run".
+    let bare = RunDetail {
+        run_id: "r-3".into(),
+        agent: "codex".into(),
+        ..Default::default()
+    };
+    assert_eq!(drawer_title(&bare), "r-3");
+}
+
+#[gpui::test]
+async fn first_fetch_404_resolves_to_not_found_not_eternal_loading(
+    cx: &mut gpui::TestAppContext,
+) {
+    use http_client::{FakeHttpClient, Response};
+    // The constellation-demo bug class: the run doesn't exist on the bridge.
+    let http_client = FakeHttpClient::create(move |_request| async move {
+        Ok(Response::builder().status(404).body("nope".into()).unwrap())
+    });
+    cx.update(|cx| cx.set_http_client(http_client));
+
+    let drawer = cx.new(|cx| RunDrawer::new("ghost-run".into(), cx));
+    cx.run_until_parked();
+    drawer.read_with(cx, |d, _| {
+        assert!(d.detail.is_none());
+        assert_eq!(
+            d.load_failed.as_deref(),
+            Some("Run not found on bridge."),
+            "a 404 must fail fast into the honest error state"
+        );
+    });
+}
+
+#[gpui::test]
+async fn first_fetch_gives_up_after_bounded_retries(cx: &mut gpui::TestAppContext) {
+    use http_client::{FakeHttpClient, Response};
+    // Bridge down (500s): the drawer retries with backoff, then resolves to
+    // an error state after FIRST_FETCH_ATTEMPTS — bounded, never infinite.
+    let http_client = FakeHttpClient::create(move |_request| async move {
+        Ok(Response::builder().status(500).body("boom".into()).unwrap())
+    });
+    cx.update(|cx| cx.set_http_client(http_client));
+
+    let drawer = cx.new(|cx| RunDrawer::new("r-1".into(), cx));
+    cx.run_until_parked();
+    // Failure 1 landed; the loop sleeps 2s, fails again (2), sleeps 3s,
+    // fails again (3) → gives up.
+    for _ in 0..FIRST_FETCH_ATTEMPTS {
+        cx.executor().advance_clock(LOG_POLL_ERROR_CAP);
+        cx.run_until_parked();
+    }
+    drawer.read_with(cx, |d, _| {
+        assert!(d.detail.is_none());
+        assert_eq!(
+            d.load_failed.as_deref(),
+            Some("Bridge unreachable — run detail unavailable."),
+            "unreachable bridge must resolve, not spin on Loading…"
+        );
+    });
+}
+
+#[gpui::test]
+fn local_drawer_feeds_from_the_demo_store_without_bridge_io(cx: &mut gpui::TestAppContext) {
+    // No FakeHttpClient installed on purpose: a local drawer must never
+    // touch HTTP — construction with the default (panicking) test client
+    // proves the path is I/O-free.
+    let detail = RunDetail {
+        run_id: "demo-designer".into(),
+        agent: "gemini".into(),
+        status: "running".into(),
+        elapsed_s: 4.0,
+        task: Some("Designer: keyframe spec from hero recording".into()),
+        archetype: Some("designer".into()),
+        ..Default::default()
+    };
+    let drawer = cx.new(|cx| RunDrawer::local(detail, cx));
+    drawer.read_with(cx, |d, _| {
+        let held = d.detail.as_ref().expect("local drawer holds detail immediately");
+        assert_eq!(held.run_id, "demo-designer");
+        assert_eq!(held.status, "running");
+        assert!(d.load_failed.is_none());
+        assert!(d.local, "local drawers hide the abort affordance");
+    });
+    // The owner's frame-pump push updates elapsed/status in place.
+    drawer.update(cx, |d, cx| {
+        d.push_local_detail(
+            RunDetail {
+                run_id: "demo-designer".into(),
+                agent: "gemini".into(),
+                status: "running".into(),
+                elapsed_s: 5.0,
+                task: Some("Designer: keyframe spec from hero recording".into()),
+                archetype: Some("designer".into()),
+                ..Default::default()
+            },
+            cx,
+        );
+    });
+    drawer.read_with(cx, |d, _| {
+        assert_eq!(d.detail.as_ref().unwrap().elapsed_s, 5.0);
+    });
 }
 
 #[gpui::test]

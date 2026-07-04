@@ -12,14 +12,81 @@ use ui::prelude::*;
 use crate::agent_accents::accent_for_agent;
 
 use super::motion::{EFFECTS, STATE_FADE, mix};
-use super::run_detail::{DrawerTab, RunDrawer};
+use super::run_detail::{DrawerTab, RunDetail, RunDrawer};
 use super::style::{raw_status_pill, rel, route_reason, tabular_nums};
+
+/// The drawer's header title (spec §4.2: header = TASK TITLE). Chain: the
+/// run's task title (first line) → archetype → run id. NEVER the literal
+/// "agent run" placeholder — when nothing better exists the run id IS the
+/// honest label.
+pub(super) fn drawer_title(detail: &RunDetail) -> String {
+    if let Some(task) = detail.task.as_deref() {
+        if let Some(line) = task.lines().find(|line| !line.trim().is_empty()) {
+            return line.trim().to_string();
+        }
+    }
+    if let Some(archetype) = detail.archetype.as_deref()
+        && !archetype.trim().is_empty()
+    {
+        let mut chars = archetype.trim().chars();
+        return match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => unreachable!(),
+        };
+    }
+    detail.run_id.clone()
+}
 
 impl RunDrawer {
     pub(super) fn render_head(&self, cx: &mut Context<Self>) -> Div {
+        let head = h_flex()
+            .flex_none()
+            .items_center()
+            .gap(px(11.))
+            .px(px(22.))
+            .pt(px(18.));
+        match self.detail.clone() {
+            Some(detail) => self.render_loaded_head(head, detail, cx),
+            // Nothing loaded yet: an HONEST pending/failed header — run id
+            // as the label, no fake swatch dot, no empty status pill (the
+            // "two grey blobs" anti-state).
+            None => {
+                let colors = cx.theme().colors();
+                let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
+                let meta: SharedString = match &self.load_failed {
+                    Some(message) => message.clone(),
+                    None => "connecting to bridge…".into(),
+                };
+                head.child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(15.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors.text)
+                                .truncate()
+                                .child(self.run_id.clone()),
+                        )
+                        .child(
+                            div()
+                                .mt(px(3.))
+                                .font_family(mono)
+                                .text_size(px(12.5))
+                                .text_color(colors.text_placeholder)
+                                .truncate()
+                                .child(meta),
+                        ),
+                )
+                .child(self.render_close(cx))
+            }
+        }
+    }
+
+    fn render_loaded_head(&self, head: Div, detail: RunDetail, cx: &mut Context<Self>) -> Div {
         let colors = cx.theme().colors();
         let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
-        let detail = self.detail.clone().unwrap_or_default();
         let agent = if detail.agent.is_empty() {
             "agent".to_string()
         } else {
@@ -28,57 +95,56 @@ impl RunDrawer {
         // drawer.js:51-54 `routeReason` — plain second chip segment, NO
         // forced-@agent rewrite (that vocabulary belongs to the inbox chip).
         let reason = route_reason(detail.chip.as_deref());
-        h_flex()
-            .flex_none()
-            .items_center()
-            .gap(px(11.))
-            .px(px(22.))
-            .pt(px(18.))
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(9.))
-                    .rounded_full()
-                    .bg(accent_for_agent(&agent)),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(colors.text)
-                            .child(SharedString::from(format!("{agent} run"))),
-                    )
-                    .child(
-                        div()
-                            .mt(px(3.))
-                            .font_family(mono)
-                            .text_size(px(12.5))
-                            .text_color(colors.text_placeholder)
-                            .truncate()
-                            .child(SharedString::from(format!(
-                                "{agent} · {reason} · {}",
-                                rel(detail.elapsed_s)
-                            ))),
-                    ),
-            )
-            // Raw lowercase status — the web drawer's vocabulary
-            // (drawer.js:37-38), distinct from the inbox's `statusLabel`.
-            .child(raw_status_pill("drawer-pill", &detail.status, cx))
-            // Abort affordance — only while the run is live (POSTs
-            // /run/<id>/abort; the bridge kills the tracked child process).
-            .children(self.render_abort(&detail.status, cx))
-            .child(self.render_close(cx))
+        head.child(
+            div()
+                .flex_none()
+                .size(px(9.))
+                .rounded_full()
+                .bg(accent_for_agent(&agent)),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.text)
+                        .truncate()
+                        .child(SharedString::from(drawer_title(&detail))),
+                )
+                .child(
+                    div()
+                        .mt(px(3.))
+                        .font_family(mono)
+                        .text_size(px(12.5))
+                        .text_color(colors.text_placeholder)
+                        .truncate()
+                        // Elapsed ticks while live: the bridge path re-lands
+                        // detail at 1s; the demo path is pushed off the
+                        // constellation's frame pump at the same cadence.
+                        .child(SharedString::from(format!(
+                            "{agent} · {reason} · {}",
+                            rel(detail.elapsed_s)
+                        ))),
+                ),
+        )
+        // Raw lowercase status — the web drawer's vocabulary
+        // (drawer.js:37-38), distinct from the inbox's `statusLabel`.
+        .child(raw_status_pill("drawer-pill", &detail.status, cx))
+        // Abort affordance — only while the run is live (POSTs
+        // /run/<id>/abort; the bridge kills the tracked child process).
+        .children(self.render_abort(&detail.status, cx))
+        .child(self.render_close(cx))
     }
 
     /// The abort button: a 30×30 Stop-glyph control shown only while the run
     /// is `running`. Click POSTs the abort endpoint; once posted it reads
     /// disabled (placeholder tint) until the tail-poll lands the killed status.
     fn render_abort(&self, status: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if status != "running" {
+        // Local (demo-fed) drawers have no bridge run to kill.
+        if self.local || status != "running" {
             return None;
         }
         let colors = cx.theme().colors();
