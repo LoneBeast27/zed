@@ -32,13 +32,16 @@ pub struct Edge {
     pub kind: EdgeKind,
 }
 
-/// Why two docs are connected — drives edge color/weight.
+/// Why two docs are connected — drives edge color/weight/dash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeKind {
-    /// A `[[wiki]]` or `[md](link.md)` body reference.
+    /// A `[[wiki]]` or `[md](link.md)` body reference. Solid hairline.
     Link,
-    /// A `supersedes:` frontmatter correction edge.
+    /// A `supersedes:` frontmatter correction edge. Dashed + directional.
     Supersedes,
+    /// An `index.md` → typed-doc structural edge. Dimmed (the vault's spine,
+    /// not a semantic link) — drawn faint so real links read over it.
+    Structural,
 }
 
 /// Resolve outbound links + frontmatter relations into edges between the given
@@ -80,13 +83,20 @@ pub fn resolve_edges(docs: &[&VaultDoc]) -> Vec<Edge> {
     let mut edges: Vec<Edge> = Vec::new();
     let mut seen: std::collections::HashSet<(usize, usize, u8)> = std::collections::HashSet::new();
     for (from, doc) in docs.iter().enumerate() {
+        // The reserved `index.md` links to the whole vault — its edges are the
+        // structural spine, drawn dimmed so semantic links read over them.
+        let link_kind = if doc.kind == DocKind::Index {
+            EdgeKind::Structural
+        } else {
+            EdgeKind::Link
+        };
         for link in &doc.links {
             let target = match link {
                 super::parser::LinkTarget::Wiki(t) => t.as_str(),
                 super::parser::LinkTarget::Md(t) => t.as_str(),
             };
             if let Some(to) = resolve(target) {
-                push_edge(&mut edges, &mut seen, from, to, EdgeKind::Link);
+                push_edge(&mut edges, &mut seen, from, to, link_kind);
             }
         }
         for sref in &doc.supersedes {
@@ -126,7 +136,11 @@ fn push_edge(
     if from == to {
         return; // no self-loops
     }
-    let k = if kind == EdgeKind::Link { 0 } else { 1 };
+    let k = match kind {
+        EdgeKind::Link => 0,
+        EdgeKind::Supersedes => 1,
+        EdgeKind::Structural => 2,
+    };
     if seen.insert((from, to, k)) {
         edges.push(Edge { from, to, kind });
     }
@@ -160,7 +174,7 @@ struct Placed<'a> {
 /// type otherwise). Sessions read their vendor accent (`accent_for_agent` is
 /// substring-tolerant, so `claude_code`/`antigravity` resolve directly); runs
 /// read status; other kinds read a type-tonal fill.
-fn node_color(doc: &VaultDoc) -> Hsla {
+pub(super) fn node_color(doc: &VaultDoc) -> Hsla {
     match doc.kind {
         DocKind::Session => accent_for_agent(&doc.vendor),
         DocKind::Run => color_for_status("completed"),
@@ -172,7 +186,7 @@ fn node_color(doc: &VaultDoc) -> Hsla {
 
 /// Node radius by message_count (sessions) or body size, mapped into
 /// [MIN, MAX] on a log scale so a 1959-message session doesn't dwarf a note.
-fn node_size(doc: &VaultDoc) -> f32 {
+pub(super) fn node_size(doc: &VaultDoc) -> f32 {
     let weight = if doc.message_count > 0 {
         doc.message_count as f32
     } else {
@@ -182,11 +196,16 @@ fn node_size(doc: &VaultDoc) -> f32 {
     NODE_SIZE_MIN + (NODE_SIZE_MAX - NODE_SIZE_MIN) * t
 }
 
-/// Build the graph view: project-grouped columns of nodes over a static edge
-/// canvas. Deterministic layout — no physics, no idle frame pump.
+/// Build the graph view (spec §3/§4/§5 semantics). Chooses the physics FIELD
+/// (the v2 upgrade) when the doc count is within [`field::FIELD_MAX_NODES`],
+/// else honestly degrades to the deterministic STATIC layout with a banner
+/// (§4 — no jank at scale). Zero-edge roots render nodes-only with a hint
+/// (§5). The panel owns the advanced [`VaultField`] and passes it in.
 pub fn graph_view(
+    field: &super::field::VaultField,
     docs: &[&VaultDoc],
     scroll: &gpui::ScrollHandle,
+    hovered: Option<&str>,
     panel: WeakEntity<VaultBrowserPanel>,
     cx: &App,
 ) -> gpui::AnyElement {
@@ -201,6 +220,92 @@ pub fn graph_view(
     }
 
     let edges = resolve_edges(docs);
+    let degraded = docs.len() > super::field::FIELD_MAX_NODES;
+    let truncated = docs.iter().filter(|d| d.link_scan_truncated).count();
+
+    // Body: the physics field (in-scale) or the static column fallback.
+    let body = if degraded {
+        static_view(docs, &edges, scroll, panel, cx)
+    } else {
+        super::graph_render::field_view(field, docs, &edges, scroll, hovered, panel, cx)
+    };
+
+    // Overlay the honest banners: a scale-degrade banner (§4) and a
+    // zero-edge / truncation hint (§5). They float top-left over the graph.
+    let mut overlay = v_flex().absolute().top(px(10.)).left(px(12.)).gap(px(6.));
+    if degraded {
+        overlay = overlay.child(banner(
+            IconName::Info,
+            SharedString::from(format!(
+                "field disabled at this scale — static layout ({} docs > {})",
+                docs.len(),
+                super::field::FIELD_MAX_NODES
+            )),
+            cx,
+        ));
+    }
+    if edges.is_empty() {
+        overlay = overlay.child(banner(
+            IconName::Info,
+            "no links yet — [[wikilinks]] in notes create edges".into(),
+            cx,
+        ));
+    }
+    if truncated > 0 {
+        overlay = overlay.child(banner(
+            IconName::Info,
+            SharedString::from(format!(
+                "{truncated} large doc{} scanned partially — some links may be missing",
+                if truncated == 1 { "" } else { "s" }
+            )),
+            cx,
+        ));
+    }
+
+    div()
+        .relative()
+        .size_full()
+        .child(body)
+        .child(overlay)
+        .into_any_element()
+}
+
+/// A small honest banner chip (surface fill, hairline, muted) floated over the
+/// graph — scale-degrade / no-edges / truncation notices.
+fn banner(icon: IconName, text: SharedString, cx: &App) -> gpui::Div {
+    let colors = cx.theme().colors();
+    h_flex()
+        .items_center()
+        .gap(px(6.))
+        .px(px(9.))
+        .py(px(4.))
+        .rounded(px(8.))
+        .bg(super::style::SURFACE_1)
+        .border_1()
+        .border_color(HAIRLINE_HI)
+        .child(
+            Icon::new(icon)
+                .size(ui::IconSize::XSmall)
+                .color(Color::Custom(colors.text_placeholder)),
+        )
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(colors.text_muted)
+                .child(text),
+        )
+}
+
+/// The deterministic STATIC fallback (spec §4 degrade path): project-grouped
+/// columns of nodes over a static edge canvas. No physics, no idle frame pump
+/// — used above the field's node ceiling so a huge root never janks.
+fn static_view(
+    docs: &[&VaultDoc],
+    edges: &[Edge],
+    scroll: &gpui::ScrollHandle,
+    panel: WeakEntity<VaultBrowserPanel>,
+    cx: &App,
+) -> gpui::AnyElement {
     let groups = project_groups(docs);
 
     // Place nodes in project columns (up to N columns, wrapping rows).
@@ -242,6 +347,7 @@ pub fn graph_view(
             let color: Hsla = match edge.kind {
                 EdgeKind::Supersedes => Hsla::from(STATUS_DONE).opacity(0.5),
                 EdgeKind::Link => HAIRLINE_HI.into(),
+                EdgeKind::Structural => Hsla::from(HAIRLINE_HI).opacity(0.35),
             };
             Some((
                 point(px(a.cx_pos), px(a.cy_pos)),
@@ -444,5 +550,25 @@ mod tests {
         // "(unassigned)" sorts before "proj-x".
         assert_eq!(groups[0].0, "(unassigned)");
         assert_eq!(groups[1].0, "proj-x");
+    }
+
+    #[test]
+    fn index_links_are_structural_dimmed_edges() {
+        // The reserved index.md is the vault spine: its links to typed docs
+        // resolve as Structural (dimmed), not semantic Link edges.
+        let mut idx = doc("Vault:index.md", "index.md", "index");
+        idx.kind = DocKind::Index;
+        idx.links.push(LinkTarget::Wiki("a-note".to_string()));
+        let target = doc("a-note", "notes/a.md", "A Note");
+        let docs = [&idx, &target];
+        let edges = resolve_edges(&docs);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].kind, EdgeKind::Structural);
+
+        // A NON-index doc's identical link stays a semantic Link.
+        let mut note = doc("n", "n.md", "N");
+        note.links.push(LinkTarget::Wiki("a-note".to_string()));
+        let docs2 = [&note, &target];
+        assert_eq!(resolve_edges(&docs2)[0].kind, EdgeKind::Link);
     }
 }

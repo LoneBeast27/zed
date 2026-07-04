@@ -18,11 +18,15 @@
 //!                 reads, truncation flag).
 //! - [`parser`]  — the hand-rolled frontmatter + link extractor (fence-skip).
 //! - [`list`]    — the virtualized grouped LIST view.
-//! - [`graph`]   — edge resolution + the static-layout GRAPH view.
+//! - [`field`]   — the shared-physics GRAPH field (Obsidian relaxation over
+//!                 project clusters; the v2 upgrade over the static fallback).
+//! - [`graph`]   — edge resolution + the GRAPH renderer (field or static).
 //! - [`promote`] — staging→vault bundle move (collision-safe) + its UI state.
 //! - [`style`]   — vault chips + age formatting (re-uses task_board tokens).
 
+pub mod field;
 pub mod graph;
+mod graph_render;
 pub mod index;
 pub mod list;
 pub mod panel;

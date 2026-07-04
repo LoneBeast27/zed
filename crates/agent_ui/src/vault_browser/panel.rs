@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use editor::Editor;
 use fs::Fs;
 use gpui::{
-    Action, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
-    Subscription, Task, WeakEntity, Window, actions,
+    Action, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    MouseButton, Pixels, Point, SharedString, Subscription, Task, WeakEntity, Window, actions,
 };
 use ui::prelude::*;
 use workspace::{
@@ -24,6 +24,7 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
 };
 
+use super::field::VaultField;
 use super::index::{VaultIndex, VaultRoot, build_index};
 use super::promote::{self, BundleState, PromoteState};
 
@@ -63,9 +64,32 @@ pub struct VaultBrowserPanel {
     promote: PromoteState,
     /// GRAPH view scroll position.
     graph_scroll: gpui::ScrollHandle,
+    /// Field sim-clock origin (ms are measured from here).
+    field_epoch: Instant,
+    /// The GRAPH view's physics field (shared constellation stepper) — built
+    /// lazily from the active root's docs, advanced once per frame while the
+    /// graph is showing, idle-cost zero once settled.
+    graph_field: VaultField,
+    /// The doc id whose graph hover card is up.
+    graph_hovered: Option<SharedString>,
+    /// An in-flight graph node drag (pointer re-aims the anchor 1:1).
+    graph_drag: Option<GraphDrag>,
+    /// A drag that moved suppresses the click it lands on.
+    graph_suppress_click: bool,
+    /// A pending "reveal in list": a session id to select after the view flips.
+    graph_reveal: Option<SharedString>,
     /// The in-flight index task (kept so it isn't dropped/cancelled).
     _index_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// An in-flight graph node drag: pointer deltas re-aim the field anchor 1:1
+/// (the constellation drag idiom).
+struct GraphDrag {
+    id: SharedString,
+    start_mouse: gpui::Point<Pixels>,
+    start_anchor: (f32, f32),
+    moved: bool,
 }
 
 impl VaultBrowserPanel {
@@ -97,6 +121,12 @@ impl VaultBrowserPanel {
             filter_editor,
             promote: PromoteState::default(),
             graph_scroll: gpui::ScrollHandle::new(),
+            field_epoch: Instant::now(),
+            graph_field: VaultField::default(),
+            graph_hovered: None,
+            graph_drag: None,
+            graph_suppress_click: false,
+            graph_reveal: None,
             _index_task: None,
             _subscriptions: vec![filter_sub],
         };
@@ -209,6 +239,103 @@ impl VaultBrowserPanel {
         });
     }
 
+    // ── graph field interaction (graph_render.rs calls these) ──
+
+    /// Begin dragging a graph node — record its current anchor so pointer
+    /// deltas re-aim it 1:1 (constellation drag idiom). Pure state flip.
+    pub fn begin_graph_drag(
+        &mut self,
+        id: SharedString,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(anchor) = self
+            .graph_field
+            .nodes
+            .iter()
+            .find(|n| n.id == id.as_ref())
+            .map(|n| (n.ax, n.ay))
+        else {
+            return;
+        };
+        self.graph_field.begin_drag(&id);
+        self.graph_drag = Some(GraphDrag {
+            id,
+            start_mouse: position,
+            start_anchor: anchor,
+            moved: false,
+        });
+        cx.notify();
+    }
+
+    fn graph_drag_moved(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = &mut self.graph_drag else {
+            return;
+        };
+        let dx = (position.x - drag.start_mouse.x).as_f32();
+        let dy = (position.y - drag.start_mouse.y).as_f32();
+        if dx.abs() + dy.abs() > 4. {
+            drag.moved = true;
+        }
+        let id = drag.id.clone();
+        let (ax, ay) = (drag.start_anchor.0 + dx, drag.start_anchor.1 + dy);
+        self.graph_field.drag_to(&id, ax, ay);
+        cx.notify();
+    }
+
+    fn graph_drag_ended(&mut self, cx: &mut Context<Self>) {
+        if let Some(drag) = self.graph_drag.take() {
+            self.graph_suppress_click = drag.moved;
+            self.graph_field.end_drag(self.field_now());
+            cx.notify();
+        }
+    }
+
+    /// The field sim clock (ms since the panel was created) — monotonic, so
+    /// every field transition is measured against the same origin.
+    fn field_now(&self) -> f32 {
+        self.field_epoch.elapsed().as_secs_f32() * 1000.
+    }
+
+    /// Hover a graph node (raise/lower its card). Pure state flip.
+    pub fn set_graph_hover(&mut self, id: SharedString, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            if self.graph_hovered.as_ref() != Some(&id) {
+                self.graph_hovered = Some(id);
+                cx.notify();
+            }
+        } else if self.graph_hovered.as_ref() == Some(&id) {
+            self.graph_hovered = None;
+            cx.notify();
+        }
+    }
+
+    /// Double-click a SESSION node → reveal it in the LIST view: flip the view
+    /// toggle and stage the id so the list can scroll/select it (integration
+    /// hook §3). A drag that moved is not a click.
+    pub fn reveal_in_list(&mut self, id: SharedString, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.graph_suppress_click) {
+            return;
+        }
+        self.graph_reveal = Some(id);
+        self.view = VaultView::List;
+        cx.notify();
+    }
+
+    /// The id a "reveal in list" staged (the list highlights it once). Consumed
+    /// on read so the highlight is a one-shot.
+    pub(super) fn take_graph_reveal(&mut self) -> Option<SharedString> {
+        self.graph_reveal.take()
+    }
+
+    /// Show a list row's doc in the GRAPH ("show in graph" affordance §3): flip
+    /// to the graph view. The field already carries every doc, so the node is
+    /// present; a future slice can pan/select it.
+    pub fn show_in_graph(&mut self, cx: &mut Context<Self>) {
+        self.view = VaultView::Graph;
+        cx.notify();
+    }
+
     /// First promote click → arm (show Confirm/Cancel). Pure state flip.
     pub fn arm_promote(&mut self, key: String, cx: &mut Context<Self>) {
         self.promote.set(key, BundleState::Armed);
@@ -266,51 +393,73 @@ fn short_error(msg: &str) -> String {
 }
 
 impl Render for VaultBrowserPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel_bg = cx.theme().colors().panel_background;
         let header = self.render_header(cx);
-        let body = self.render_body_element(cx);
+        let (body, animating, graph_active) = self.render_body_element(cx);
 
-        v_flex()
+        // Frame pump (§8): the panel schedules the next frame ONLY while the
+        // graph field is hot (settling, dragging). A settled field, the list
+        // view, or an empty panel pumps nothing — idle cost zero.
+        if animating {
+            window.request_animation_frame();
+        }
+
+        let mut root = v_flex()
             .key_context("VaultBrowserPanel")
             .track_focus(&self.focus_handle)
             .size_full()
-            .bg(panel_bg)
-            .child(header)
+            .bg(panel_bg);
+        // Graph drag: pointer deltas re-aim the anchor while the button holds.
+        if graph_active {
+            root = root
+                .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                    if this.graph_drag.is_some() {
+                        this.graph_drag_moved(event.position, cx);
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.graph_drag_ended(cx)),
+                );
+        }
+        root.child(header)
             .child(div().flex_1().min_h_0().child(body))
     }
 }
 
 impl VaultBrowserPanel {
-    /// Build the body element: the indexing placeholder until the first walk
-    /// lands, else the list/graph for the active root.
-    fn render_body_element(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// Build the body element (returns the element, whether a frame pump is
+    /// needed, and whether the graph is the active surface — for drag wiring).
+    /// The indexing placeholder shows until the first walk lands.
+    fn render_body_element(&mut self, cx: &mut Context<Self>) -> (gpui::AnyElement, bool, bool) {
         let filter = self.filter_editor.read(cx).text(cx);
         // Take the index out to sever the `&self.index` borrow across the
-        // `&mut self` body-building call, then put it back (no clone of the
-        // doc vec — a cheap Option swap).
+        // `&mut self` body-building call, then put it back (a cheap swap).
         let Some(index) = self.index.take() else {
-            return super::style::empty_state(
+            let el = super::style::empty_state(
                 IconName::Sparkle,
                 "Indexing the vault…",
                 "Walking the live vault and import staging.",
                 cx,
             )
             .into_any_element();
+            return (el, false, false);
         };
-        let body = self.render_body(&index, &filter, cx);
+        let out = self.render_body(&index, &filter, cx);
         self.index = Some(index);
-        body
+        out
     }
 
     /// The list/graph body for the active root, plus the honest empty states
-    /// when a root's directory is missing (spec §6).
+    /// when a root's directory is missing (spec §6). Returns `(element,
+    /// animating, graph_active)`.
     fn render_body(
-        &self,
+        &mut self,
         index: &VaultIndex,
         filter: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> (gpui::AnyElement, bool, bool) {
         let present = match self.root {
             VaultRoot::Vault => index.vault_present,
             VaultRoot::Staging => index.staging_present,
@@ -326,29 +475,66 @@ impl VaultBrowserPanel {
                     "Looked in vault-import-staging — run `import run` to stage sessions.",
                 ),
             };
-            return super::style::empty_state(IconName::FolderOpen, headline, copy, cx)
+            let el = super::style::empty_state(IconName::FolderOpen, headline, copy, cx)
                 .into_any_element();
+            return (el, false, false);
         }
 
         let docs = index.docs_for(self.root);
         // Staging with zero docs → the "run import run" hint (spec §6).
         if docs.is_empty() && self.root == VaultRoot::Staging {
-            return super::style::empty_state(
+            let el = super::style::empty_state(
                 IconName::Envelope,
                 "No staged sessions",
                 "Run `import run` to stage sessions here for review.",
                 cx,
             )
             .into_any_element();
+            return (el, false, false);
         }
 
-        let weak = cx.weak_entity();
         match self.view {
             VaultView::List => {
-                super::list::list_view(&docs, self.root, filter, &self.promote, weak, cx)
+                let reveal = self.take_graph_reveal();
+                let weak = cx.weak_entity();
+                let el = super::list::list_view(
+                    &docs,
+                    self.root,
+                    filter,
+                    &self.promote,
+                    reveal.as_deref(),
+                    weak,
+                    cx,
+                );
+                (el, false, false)
             }
             VaultView::Graph => {
-                super::graph::graph_view(&docs, &self.graph_scroll, weak, cx)
+                // Fold: (re)build the field when the doc set (identity) changed
+                // — a promote re-indexes and the fold picks it up with no jump
+                // (§3); pins + live displacement carry across. Below the field
+                // ceiling only (the static fallback needs no field).
+                let now = self.field_now();
+                let degraded = docs.len() > super::field::FIELD_MAX_NODES;
+                let animating = if degraded {
+                    false
+                } else {
+                    if !self.graph_field.matches(&docs) {
+                        self.graph_field
+                            .rebuild(&docs, super::graph::node_size, now);
+                    }
+                    self.graph_field.advance(now)
+                };
+                let hovered = self.graph_hovered.clone();
+                let weak = cx.weak_entity();
+                let el = super::graph::graph_view(
+                    &self.graph_field,
+                    &docs,
+                    &self.graph_scroll,
+                    hovered.as_deref(),
+                    weak,
+                    cx,
+                );
+                (el, animating, true)
             }
         }
     }

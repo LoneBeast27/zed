@@ -39,6 +39,7 @@ pub fn list_view(
     root: VaultRoot,
     filter: &str,
     promote: &PromoteState,
+    reveal: Option<&str>,
     panel: WeakEntity<VaultBrowserPanel>,
     cx: &App,
 ) -> AnyElement {
@@ -72,6 +73,7 @@ pub fn list_view(
     }
     let rows = Arc::new(rows);
     let promote = promote.clone();
+    let reveal: Option<SharedString> = reveal.map(SharedString::from);
 
     uniform_list(
         "vault-list",
@@ -82,7 +84,10 @@ pub fn list_view(
                     Row::Header { label, count } => {
                         header_row(label.clone(), *count, cx).into_any_element()
                     }
-                    Row::Doc(doc) => doc_row(doc, root, &promote, panel.clone(), cx),
+                    Row::Doc(doc) => {
+                        let revealed = reveal.as_deref() == Some(doc.id.as_str());
+                        doc_row(doc, root, &promote, revealed, panel.clone(), cx)
+                    }
                 })
                 .collect()
         },
@@ -124,6 +129,7 @@ fn doc_row(
     doc: &VaultDoc,
     root: VaultRoot,
     promote: &PromoteState,
+    revealed: bool,
     panel: WeakEntity<VaultBrowserPanel>,
     cx: &mut App,
 ) -> AnyElement {
@@ -161,7 +167,7 @@ fn doc_row(
 
     let open_path = abs_path;
     let open_panel = panel.clone();
-    let row = h_flex()
+    let mut row = h_flex()
         .id(ElementId::Name(SharedString::from(doc.id.clone())))
         .w_full()
         .h(px(ROW_HEIGHT))
@@ -171,6 +177,8 @@ fn doc_row(
         .border_b_1()
         .border_color(colors.border)
         .cursor_pointer()
+        // A reveal-from-graph highlights the row once (a soft accent wash).
+        .when(revealed, |r| r.bg(colors.element_selected))
         .hover(move |s| s.bg(hover_bg))
         .on_click(move |_, window, cx| {
             let path = open_path.clone();
@@ -193,6 +201,30 @@ fn doc_row(
                 )
                 .child(meta),
         );
+
+    // "Show in graph" affordance (§3): a small icon button that flips to the
+    // graph view (the node is already present in the field).
+    let graph_panel = panel.clone();
+    row = row.child(
+        div()
+            .id(ElementId::Name(format!("show-in-graph-{}", doc.id).into()))
+            .flex_none()
+            .p(px(4.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .text_color(colors.text_placeholder)
+            .hover(|s| s.text_color(colors.text_muted))
+            .on_click(move |_, _, cx| {
+                graph_panel
+                    .update(cx, |panel, cx| panel.show_in_graph(cx))
+                    .ok();
+            })
+            .child(
+                Icon::new(IconName::GitBranch)
+                    .size(ui::IconSize::XSmall)
+                    .color(Color::Custom(colors.text_placeholder)),
+            ),
+    );
 
     // Staged sessions get the promote affordance on the right rail.
     let row = if root == VaultRoot::Staging && doc.bundle_dir.is_some() {
