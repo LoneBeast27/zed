@@ -156,25 +156,37 @@ impl UsageIsland {
     /// native `location.hash = "#/usage"`; falls back to opening the usage
     /// center tab directly when no `usage` mode is installed).
     fn row_clicked(&mut self, _pool: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        // Contract the island NOW (immediate visual feedback); route to the
+        // usage mode one cycle later. The route reads the ActivityBar (the
+        // surfaces registry rides it) via switch_to_mode_id — deferred out of
+        // this listener per the interaction-dispatch law (RUST_PORT_NOTES
+        // 2026-07-04): layout mutations never fire synchronously from inside a
+        // listener's entity update. This click runs inside the UsageIsland's
+        // update, not the bar's, so it does not panic today, but the deferred
+        // form is the uniform safe idiom and is one refactor from a cycle if a
+        // surface ever anchors on the bar.
         let cmd = self.machine.row_clicked();
         self.apply_cmd(cmd, cx);
-        self.workspace
-            .update(cx, |workspace, cx| {
-                if !crate::workspace_mode_switcher::switch_to_mode_id(
-                    "usage", workspace, window, cx,
-                ) && let Some(surfaces) = crate::mode_item::workspace_surfaces(workspace, cx)
-                {
-                    crate::mode_item::open_center_item(
-                        &surfaces.usage,
-                        None,
-                        workspace,
-                        window,
-                        cx,
-                    );
-                }
-            })
-            .ok();
         cx.notify();
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    if !crate::workspace_mode_switcher::switch_to_mode_id(
+                        "usage", workspace, window, cx,
+                    ) && let Some(surfaces) = crate::mode_item::workspace_surfaces(workspace, cx)
+                    {
+                        crate::mode_item::open_center_item(
+                            &surfaces.usage,
+                            None,
+                            workspace,
+                            window,
+                            cx,
+                        );
+                    }
+                })
+                .ok();
+        });
     }
 
     /// A bridge snapshot arrived: rebuild the pool views and feed the

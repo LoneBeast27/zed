@@ -222,12 +222,21 @@ impl NotifStack {
             return;
         }
         if let Some(run_id) = toast.run_id.clone() {
-            self.workspace
-                .update(cx, |workspace, cx| {
-                    // Emits TaskBoardEvent::OpenRun + opens the drawer.
-                    crate::mode_item::open_task_board_run(run_id, workspace, window, cx);
-                })
-                .ok();
+            // Route to the board one cycle later. open_task_board_run reads the
+            // ActivityBar (via switch_to_mode_id → the surfaces registry on the
+            // bar), so the layout mutation is deferred out of this listener per
+            // the interaction-dispatch law (RUST_PORT_NOTES 2026-07-04). This
+            // click runs inside the NotifStack's update, not the bar's — it does
+            // not panic today, but the deferred form is the uniform safe idiom.
+            let workspace = self.workspace.clone();
+            window.defer(cx, move |window, cx| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        // Emits TaskBoardEvent::OpenRun + opens the drawer.
+                        crate::mode_item::open_task_board_run(run_id, workspace, window, cx);
+                    })
+                    .ok();
+            });
         }
         self.retract(id, cx);
     }

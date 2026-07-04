@@ -192,11 +192,21 @@ impl OrchestratorPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.workspace
-            .update(cx, |workspace, cx| {
-                crate::mode_item::open_task_board_run(run_id, workspace, window, cx);
-            })
-            .ok();
+        // Route to the board one cycle later. open_task_board_run reads the
+        // ActivityBar (via switch_to_mode_id → the surfaces registry on the
+        // bar), so the layout mutation is deferred out of this listener per the
+        // interaction-dispatch law (RUST_PORT_NOTES 2026-07-04). The callers
+        // (step-row / tasks-island-row clicks) run inside this panel's update,
+        // not the bar's — no panic today, but the deferred form is the uniform
+        // safe idiom and is one refactor from a cycle.
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    crate::mode_item::open_task_board_run(run_id, workspace, window, cx);
+                })
+                .ok();
+        });
     }
 
     /// Flip a tracked interactive element's hover/focus crossfade (the §0

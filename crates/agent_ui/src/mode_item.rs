@@ -178,6 +178,28 @@ impl<S: ModeSurface> Item for ModeItem<S> {
 
 /// The workspace's surface registry, if workspace modes are installed
 /// (it rides the activity bar, the mode system's per-workspace anchor).
+///
+// REGISTRY RELOCATION: this `bar.read(cx)` is the structural aggravator of the
+// entity re-entrancy crash class (2026-07-04). Because the ModeSurfaces
+// registry rides the ActivityBar, EVERY layout op (switch_to_mode →
+// open_center_surface → here; open_task_board_run → here; usage-island row →
+// here) reads the bar. Any of those invoked synchronously from inside the
+// bar's own update panics (the rail-click crash). The interaction-dispatch law
+// now defers all such calls out of listeners, which closes the crash
+// behaviorally — but the clean structural fix is to move the registry OFF the
+// bar so these paths never touch it. Contained relocation (spec'd in
+// RUST_PORT_NOTES 2026-07-04, deferred because it crosses into stock
+// workspace.rs, out of the agent_ui audit scope):
+//   1. Add `mode_surfaces: Option<ModeSurfaces>` to `Workspace` (mirrors the
+//      existing fork slots `activity_bar_item` / `corner_cluster_item`) with
+//      `set_mode_surfaces` / `mode_surfaces` accessors.
+//   2. agent_ui init: `workspace.set_mode_surfaces(surfaces)` instead of
+//      `bar.update(cx, |bar, _| bar.set_surfaces(...))`.
+//   3. This fn: `workspace.mode_surfaces().cloned()` — no entity read at all,
+//      so no layout op ever re-enters the bar; the ActivityBar goes back to
+//      owning only its own rail state.
+// Two anchor points (write @ agent_ui.rs set_surfaces call, read here) + the
+// storage on ActivityBar. NOT a wide fan-out; blocked only by the scope line.
 pub fn workspace_surfaces(workspace: &Workspace, cx: &App) -> Option<ModeSurfaces> {
     workspace
         .activity_bar_item()
