@@ -12,6 +12,7 @@ mod agent_router;
 pub mod bridge;
 mod buffer_codegen;
 mod canonical;
+pub mod commands;
 mod completion_provider;
 pub mod constellation;
 pub mod field_physics;
