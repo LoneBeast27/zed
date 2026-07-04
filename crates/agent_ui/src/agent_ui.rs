@@ -743,18 +743,26 @@ pub fn init(
         // the configured id matches no loaded mode, `switch_to_mode_id`
         // returns false and we leave the layout untouched (the bar's soft
         // highlight fallback still reads sensibly) — no empty tab is forced.
-        if !workspace_mode_switcher::switch_to_mode_id(
-            &default_mode,
-            workspace,
-            window,
-            cx,
-        ) {
-            log::info!(
-                "workspace_modes: default_mode '{}' matched no loaded mode — center pane left \
-                 to the user (no layout applied on launch)",
-                default_mode
-            );
-        }
+        //
+        // DEFERRED past the current update cycle: applying synchronously here
+        // panics in a real window ("cannot read ActivityBar while it is
+        // already being updated" — the switch's bar.update collides with this
+        // observer's own in-flight entity work; the gpui test harness masks
+        // it, launch crash 2026-07-04 does not).
+        cx.defer_in(window, move |workspace, window, cx| {
+            if !workspace_mode_switcher::switch_to_mode_id(
+                &default_mode,
+                workspace,
+                window,
+                cx,
+            ) {
+                log::info!(
+                    "workspace_modes: default_mode '{}' matched no loaded mode — center pane left \
+                     to the user (no layout applied on launch)",
+                    default_mode
+                );
+            }
+        });
     })
     .detach();
 
