@@ -1,46 +1,90 @@
-//! Workspace-modes activity bar (M1 slice).
+//! Workspace-modes rail — the floating dock-pill island (PARITY_SPEC §3).
 //!
-//! Spec: `.planning/zed-fork/WORKSPACE_MODES.md` §3 + §7. Renders a fixed
-//! 48 px-wide vertical rail at the left edge of the workspace with one icon
-//! per mode loaded from `<workspace_root>/.agents/modes/*.json` (the M0
-//! substrate at `workspace_modes::load_modes_from_dir`).
+//! **User override 2026-06-11: the VSCode activity bar is an ANTI-PATTERN**
+//! ("read incredibly Windows-like"). This is NOT an edge-flush full-height
+//! bar: it renders TWO floating fully-rounded capsules (macOS-dock grouping)
+//! inset from the left edge with top/bottom breathing room — the main mode
+//! cluster top-aligned and a small bottom cluster (Settings et al., per each
+//! mode file's `pinned_position`).
 //!
-//! Scope for M1 (+M2):
-//!   - Enumerate modes via the existing loader.
-//!   - Render the bar (active mode tinted, inactive muted, hover bg, tooltip).
-//!   - On click, switch the workspace to that mode — apply its dock layout via
-//!     `workspace_mode_switcher::switch_to_mode` (M2).
+//! Anatomy per §3:
+//! - 40px circular hit areas, 20–22px icons, muted inactive color.
+//! - Active indicator = ONE sliding tonal squircle (rgba-white fill) that
+//!   morphs between items on mode change — a single persistent element
+//!   (stable `ElementId`) whose offset is driven by a velocity-carrying
+//!   spring (the §4.9 retained-element idiom; it subtly stretches in
+//!   transit). NEVER a boxed outline, NEVER a side border-bar.
+//! - Hover: gentle scale ~1.06 + brightness fade 150ms ([`StateFades`]).
 //!
-//! Gated on `agent.workspace_modes` — when false the bar is never instantiated
-//! and the workspace render is byte-identical to stock Zed.
+//! Modes load from `<workspace_root>/.agents/modes/*.json` (M0 loader);
+//! clicking an item applies the mode's dock layout via
+//! `workspace_mode_switcher::switch_to_mode` (M2). Gated on
+//! `agent.workspace_modes` — when false the bar is never instantiated and
+//! the workspace render is byte-identical to stock Zed.
 
 use std::path::PathBuf;
-use std::str::FromStr;
 
-use gpui::{
-    AnyElement, Context, Entity, Hsla, IntoElement, MouseButton, ParentElement, Rgba,
-    SharedString, Styled, WeakEntity, Window, div, prelude::FluentBuilder, rgb,
-};
-use ui::{Color, Icon, IconName, IconSize, Tooltip, h_flex, prelude::*, v_flex};
+use gpui::{AnyElement, Context, Entity, MouseButton, Pixels, SharedString, Window, canvas};
+use ui::{Tooltip, prelude::*};
 use workspace::Workspace;
 
+use crate::agent_accents::rgba_hex;
+use crate::mode_icons::icon_name_for;
+use crate::task_board::motion::{AnimatedValue, CHROME_OMEGA, STATE_FADE, StateFades, mix};
+use crate::task_board::style::SURFACE_1;
 use crate::workspace_mode_switcher;
 use crate::workspace_modes::{PinnedPosition, WorkspaceMode, load_modes_from_dir};
 
-/// Fixed width of the activity bar in pixels. Mirrors VSCode (48 px) — see
-/// `WORKSPACE_MODES.md` §3.
-pub const ACTIVITY_BAR_WIDTH_PX: f32 = 48.0;
+/// Total rail column width: left inset + capsule + right breathing gap.
+pub const ACTIVITY_BAR_WIDTH_PX: f32 = PILL_INSET + CAPSULE_WIDTH + PILL_RIGHT_GAP;
 
-/// Width of the active-mode accent stripe drawn at the left edge of the
-/// selected icon (mirrors VSCode's active-tab indicator).
-const ACTIVE_STRIPE_WIDTH_PX: f32 = 3.0;
+/// Island inset from the left edge AND the top/bottom breathing room (§3
+/// "inset ~10px from the left edge with top/bottom breathing room").
+const PILL_INSET: f32 = 10.0;
+/// Gap between the capsule's right edge and the sidebar/center content.
+const PILL_RIGHT_GAP: f32 = 8.0;
+/// Capsule inner padding around the item column.
+const CAPSULE_PAD: f32 = 4.0;
+/// The capsule's hairline border width — consumes layout space (border-box),
+/// so item positions inside the capsule are offset by it.
+const CAPSULE_BORDER: f32 = 1.0;
+/// Circular hit area per item (§3 "40px circular hit areas").
+const ITEM_SIZE: f32 = 40.0;
+/// Vertical gap between items inside a capsule.
+const ITEM_GAP: f32 = 4.0;
+/// Capsule width = one item + padding.
+const CAPSULE_WIDTH: f32 = ITEM_SIZE + 2.0 * CAPSULE_PAD;
+/// Resting icon size (§3 "20–22px icons"); hover scales it by ~1.06.
+const ICON_PX: f32 = 21.0;
+/// Hover magnification delta ("a whisper of dock magnification").
+const HOVER_SCALE: f32 = 0.06;
+/// Squircle corner radius — rounded enough to read squircle at 40px,
+/// visibly NOT a full circle (and NEVER a boxed outline).
+const SQUIRCLE_RADIUS: f32 = 13.0;
+/// The sliding indicator's tonal rgba-white fill (§3).
+const SQUIRCLE_FILL: gpui::Rgba = rgba_hex(0xffffff1a);
+/// Transit stretch: px of extra height per (px/s) of spring velocity, capped.
+const STRETCH_PER_VELOCITY: f32 = 0.012;
+const STRETCH_MAX: f32 = 8.0;
 
-/// Default icon used when a mode's `icon` string does not match a known
-/// `IconName` variant. `ZedAgent` is the closest in-tree analog to the
-/// spec's "Hub" icon.
-const FALLBACK_ICON: IconName = IconName::ZedAgent;
+/// Y of item `index` inside the TOP capsule, in bar coordinates.
+fn top_item_y(index: usize) -> f32 {
+    PILL_INSET + CAPSULE_BORDER + CAPSULE_PAD + index as f32 * (ITEM_SIZE + ITEM_GAP)
+}
 
-/// Entity backing the left-edge activity bar.
+/// Y of item `index` inside the BOTTOM capsule (anchored to the bar's foot),
+/// in bar coordinates. Needs the measured bar height.
+fn bottom_item_y(bar_height: f32, bottom_count: usize, index: usize) -> f32 {
+    let capsule_h = 2.0 * (CAPSULE_PAD + CAPSULE_BORDER)
+        + bottom_count as f32 * ITEM_SIZE
+        + bottom_count.saturating_sub(1) as f32 * ITEM_GAP;
+    bar_height - PILL_INSET - capsule_h
+        + CAPSULE_BORDER
+        + CAPSULE_PAD
+        + index as f32 * (ITEM_SIZE + ITEM_GAP)
+}
+
+/// Entity backing the dock-pill rail.
 pub struct ActivityBar {
     /// All modes loaded from disk at construction. Order is the loader's
     /// canonical sort (Top-pinned, then alphabetical, then Bottom-pinned).
@@ -52,7 +96,19 @@ pub struct ActivityBar {
     /// Weak handle to the hosting workspace, used by the M2 switcher to apply
     /// a mode's dock layout on click. `None` in unit tests that exercise the
     /// bar without a workspace — clicks then only update the highlight.
-    workspace: Option<WeakEntity<Workspace>>,
+    workspace: Option<gpui::WeakEntity<Workspace>>,
+    /// Per-item hover crossfades (brightness + scale), 150ms effects.
+    hover_fades: StateFades,
+    /// The sliding squircle's Y — a velocity-carrying spring so mode-change
+    /// morphs are continuous even when interrupted mid-flight.
+    squircle_y: AnimatedValue,
+    /// False until the squircle has been jumped to its first position (the
+    /// first placement must not slide in from 0).
+    squircle_placed: bool,
+    /// Bar height measured each frame by a layout canvas (prepaint, no
+    /// notify) — bottom-capsule item positions resolve against last frame's
+    /// height, the drawer's width-measure idiom.
+    bar_height: Option<Pixels>,
 }
 
 impl ActivityBar {
@@ -62,15 +118,18 @@ impl ActivityBar {
     pub fn new(
         modes_dir: PathBuf,
         default_mode: impl Into<String>,
-        workspace: Option<WeakEntity<Workspace>>,
+        workspace: Option<gpui::WeakEntity<Workspace>>,
         _cx: &mut Context<Self>,
     ) -> Self {
         let modes = load_modes_from_dir(&modes_dir);
-        let active_mode_id = default_mode.into();
         Self {
             modes,
-            active_mode_id,
+            active_mode_id: default_mode.into(),
             workspace,
+            hover_fades: StateFades::new(),
+            squircle_y: AnimatedValue::spring(0.0, CHROME_OMEGA),
+            squircle_placed: false,
+            bar_height: None,
         }
     }
 
@@ -82,8 +141,8 @@ impl ActivityBar {
         &self.active_mode_id
     }
 
-    /// Set the active mode id and request a redraw. M1 uses this for
-    /// click-to-highlight; M2 will pair this with `apply_layout`.
+    /// Set the active mode id and request a redraw — the render pass
+    /// retargets the squircle spring toward the new item.
     pub fn set_active(&mut self, mode_id: impl Into<String>, cx: &mut Context<Self>) {
         let new_id = mode_id.into();
         if new_id != self.active_mode_id {
@@ -94,7 +153,6 @@ impl ActivityBar {
 
     /// Returns the effective active mode id — the explicitly-set id if it
     /// matches a loaded mode, otherwise the first non-`Bottom`-pinned mode.
-    /// Used both for rendering and for the M2 layout-apply dispatch.
     fn effective_active(&self) -> Option<&WorkspaceMode> {
         if let Some(m) = self.modes.iter().find(|m| m.id == self.active_mode_id) {
             return Some(m);
@@ -103,61 +161,117 @@ impl ActivityBar {
             .iter()
             .find(|m| m.pinned_position != Some(PinnedPosition::Bottom))
     }
-}
 
-/// Map a mode's `icon` JSON field to an `IconName` variant.
-///
-/// The `IconName` enum is `EnumString` with `serialize_all = "snake_case"`,
-/// so we lowercase + camel-to-snake the input before lookup. Unknown icons
-/// fall back to `FALLBACK_ICON` (logged once at WARN level).
-fn icon_name_for(spec: &str) -> IconName {
-    let snake = camel_to_snake(spec);
-    IconName::from_str(&snake).unwrap_or_else(|_| {
-        log::warn!(
-            "activity_bar: icon '{}' (snake='{}') not a known IconName — using fallback",
-            spec,
-            snake
-        );
-        FALLBACK_ICON
-    })
-}
-
-/// Convert a CamelCase or PascalCase string to snake_case. Idempotent on
-/// already-snake input ("Hub" → "hub", "AiOpenAi" → "ai_open_ai", "settings"
-/// → "settings").
-fn camel_to_snake(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    for (i, ch) in s.chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if i > 0 && !out.ends_with('_') {
-                out.push('_');
-            }
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            out.push(ch);
+    /// The squircle's target Y for the active item, if resolvable this frame
+    /// (bottom-cluster items need the measured bar height).
+    fn squircle_target(
+        &self,
+        top: &[&WorkspaceMode],
+        bottom: &[&WorkspaceMode],
+        active_id: &str,
+    ) -> Option<f32> {
+        if let Some(ix) = top.iter().position(|m| m.id == active_id) {
+            return Some(top_item_y(ix));
         }
+        let ix = bottom.iter().position(|m| m.id == active_id)?;
+        let height = self.bar_height?.as_f32();
+        Some(bottom_item_y(height, bottom.len(), ix))
     }
-    out
-}
 
-/// Parse a 6-digit hex color (no leading `#`) into an `Hsla`. Falls back to
-/// Apple system gray (`#8E8E93`) on parse failure.
-fn parse_accent_hex(hex: &str) -> Hsla {
-    let trimmed = hex.trim_start_matches('#');
-    match u32::from_str_radix(trimmed, 16) {
-        Ok(rgb_val) if trimmed.len() == 6 => Rgba::from(rgb(rgb_val)).into(),
-        _ => Rgba::from(rgb(0x8E8E93)).into(),
+    /// One 40px circular item: icon at hover-scaled size + brightness fade.
+    /// The squircle (not the item) carries the active treatment — the item
+    /// itself never gets a box, tile, or border.
+    fn render_mode_item(&self, mode: &WorkspaceMode, is_active: bool, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors();
+        let element_id = ElementId::Name(SharedString::from(format!("dock-pill-{}", mode.id)));
+        let hover_t = self.hover_fades.t(&element_id);
+
+        let icon = icon_name_for(&mode.icon);
+        let icon_px = ICON_PX * (1.0 + HOVER_SCALE * hover_t);
+        // Active icon at full brightness; inactive muted, fading brighter on
+        // hover (never all the way to the active white).
+        let icon_color = if is_active {
+            colors.text
+        } else {
+            mix(colors.text_muted, colors.text, 0.6 * hover_t)
+        };
+
+        let tooltip_text = match &mode.default_keybinding {
+            Some(kb) => format!("{} ({})", mode.display_name, kb),
+            None => mode.display_name.clone(),
+        };
+        let mode_id_for_click = mode.id.clone();
+        let hover_key = element_id.clone();
+
+        div()
+            .id(element_id)
+            .size(px(ITEM_SIZE))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if this.hover_fades.set(hover_key.clone(), *hovered, STATE_FADE) {
+                    cx.notify();
+                }
+            }))
+            .child(
+                Icon::new(icon)
+                    .size(IconSize::Custom(rems_from_px(icon_px)))
+                    .color(Color::Custom(icon_color)),
+            )
+            .tooltip(move |_window, cx| Tooltip::simple(tooltip_text.clone(), cx))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _ev, window, cx| {
+                    this.set_active(mode_id_for_click.clone(), cx);
+                    let Some(mode) = this
+                        .modes
+                        .iter()
+                        .find(|m| m.id == mode_id_for_click)
+                        .cloned()
+                    else {
+                        return;
+                    };
+                    let Some(workspace) = this.workspace.as_ref().and_then(|w| w.upgrade())
+                    else {
+                        log::warn!(
+                            "activity_bar: no workspace handle — cannot apply mode '{}'",
+                            mode.id
+                        );
+                        return;
+                    };
+                    workspace.update(cx, |workspace, cx| {
+                        workspace_mode_switcher::switch_to_mode(&mode, workspace, window, cx);
+                    });
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// One floating capsule: fully-rounded, surface-1-class fill, hairline
+    /// border (macOS-dock pill grouping).
+    fn capsule(children: Vec<AnyElement>, border: gpui::Hsla) -> Div {
+        v_flex()
+            .flex_none()
+            .p(px(CAPSULE_PAD))
+            .gap(px(ITEM_GAP))
+            .rounded_full()
+            .bg(SURFACE_1)
+            .border_1()
+            .border_color(border)
+            .children(children)
     }
 }
 
 impl gpui::Render for ActivityBar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme_colors = cx.theme().colors().clone();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors().clone();
 
-        // Split modes into top/middle and bottom-pinned. Bottom-pinned modes
-        // render at the foot of the bar with a flex spacer between them and
-        // the middle group (per the §3 ASCII mockup — Settings is at bottom).
-        let (bottom, top_middle): (Vec<&WorkspaceMode>, Vec<&WorkspaceMode>) = self
+        // Split modes into the main cluster and the bottom-pinned cluster
+        // (per each mode file's `pinned_position` — Settings pins bottom).
+        let (bottom, top): (Vec<&WorkspaceMode>, Vec<&WorkspaceMode>) = self
             .modes
             .iter()
             .partition(|m| m.pinned_position == Some(PinnedPosition::Bottom));
@@ -167,116 +281,96 @@ impl gpui::Render for ActivityBar {
             .map(|m| m.id.clone())
             .unwrap_or_default();
 
-        let mut top_children: Vec<AnyElement> = Vec::with_capacity(top_middle.len());
-        for mode in &top_middle {
-            top_children
-                .push(render_mode_icon(mode, &active_id, &theme_colors, cx).into_any_element());
-        }
-        let mut bottom_children: Vec<AnyElement> = Vec::with_capacity(bottom.len());
-        for mode in &bottom {
-            bottom_children
-                .push(render_mode_icon(mode, &active_id, &theme_colors, cx).into_any_element());
+        // Aim the squircle spring at the active item. First placement jumps
+        // (no slide-in from nowhere); afterwards retargets are continuous
+        // mid-flight (same-target retargets no-op).
+        if let Some(target) = self.squircle_target(&top, &bottom, &active_id) {
+            if self.squircle_placed {
+                self.squircle_y.retarget(target);
+            } else {
+                self.squircle_y.jump(target);
+                self.squircle_placed = true;
+            }
         }
 
-        v_flex()
+        let top_children: Vec<AnyElement> = top
+            .clone()
+            .into_iter()
+            .map(|mode| self.render_mode_item(mode, mode.id == active_id, cx))
+            .collect();
+        let bottom_children: Vec<AnyElement> = bottom
+            .clone()
+            .into_iter()
+            .map(|mode| self.render_mode_item(mode, mode.id == active_id, cx))
+            .collect();
+
+        // Measure the bar each frame (prepaint, no notify) — bottom-capsule
+        // squircle positions read last frame's height.
+        let measure = {
+            let bar = cx.weak_entity();
+            canvas(
+                move |bounds, _, cx| {
+                    bar.update(cx, |this, _| this.bar_height = Some(bounds.size.height))
+                        .ok();
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
+
+        // The single sliding tonal squircle — one persistent element (stable
+        // id) travelling behind the icons, subtly stretching with velocity.
+        let squircle = self.squircle_placed.then(|| {
+            let y = self.squircle_y.current();
+            let stretch = (self.squircle_y.velocity().abs() * STRETCH_PER_VELOCITY)
+                .min(STRETCH_MAX);
+            div()
+                .id("dock-pill-squircle")
+                .absolute()
+                .left(px(PILL_INSET + CAPSULE_BORDER + CAPSULE_PAD))
+                .top(px(y - stretch / 2.0))
+                .w(px(ITEM_SIZE))
+                .h(px(ITEM_SIZE + stretch))
+                .rounded(px(SQUIRCLE_RADIUS))
+                .bg(SQUIRCLE_FILL)
+        });
+
+        // Frame pump: while the squircle flies or a hover fades — plus one
+        // bootstrap frame when a bottom-pinned active item waits on the
+        // first height measurement.
+        if self.squircle_y.animating()
+            || self.hover_fades.any_animating()
+            || (!self.squircle_placed && self.bar_height.is_none() && !self.modes.is_empty())
+        {
+            window.request_animation_frame();
+        }
+
+        div()
             .id("activity-bar")
-            .w(gpui::px(ACTIVITY_BAR_WIDTH_PX))
+            .relative()
+            .w(px(ACTIVITY_BAR_WIDTH_PX))
             .h_full()
             .flex_none()
-            .bg(theme_colors.panel_background)
-            .border_r_1()
-            .border_color(theme_colors.border)
-            .py_1()
-            .gap_0p5()
-            .child(v_flex().gap_0p5().children(top_children))
-            .child(div().flex_1())
-            .child(v_flex().gap_0p5().children(bottom_children))
+            .bg(colors.background)
+            .child(measure)
+            .children(squircle)
+            .child(
+                v_flex()
+                    .size_full()
+                    .pl(px(PILL_INSET))
+                    .pr(px(PILL_RIGHT_GAP))
+                    .py(px(PILL_INSET))
+                    .items_start()
+                    .when(!top_children.is_empty(), |bar| {
+                        bar.child(Self::capsule(top_children, colors.border))
+                    })
+                    .child(div().flex_1())
+                    .when(!bottom_children.is_empty(), |bar| {
+                        bar.child(Self::capsule(bottom_children, colors.border))
+                    }),
+            )
     }
-}
-
-/// Free fn so the `render` loop can call it once per mode without re-borrowing
-/// `self` — keeps the closure-capture chain simple.
-fn render_mode_icon(
-    mode: &WorkspaceMode,
-    active_id: &str,
-    theme_colors: &theme::ThemeColors,
-    cx: &mut Context<ActivityBar>,
-) -> impl IntoElement {
-    let is_active = mode.id == active_id;
-    let accent = parse_accent_hex(&mode.accent_color_hex);
-    let icon = icon_name_for(&mode.icon);
-
-    let icon_color = if is_active {
-        Color::Custom(accent)
-    } else {
-        Color::Muted
-    };
-
-    let tooltip_text = match &mode.default_keybinding {
-        Some(kb) => format!("{} ({})", mode.display_name, kb),
-        None => mode.display_name.clone(),
-    };
-
-    let mode_id_for_click = mode.id.clone();
-    let element_id =
-        SharedString::from(format!("activity-bar-mode-{}", mode.id.as_str()));
-
-    // Left-edge accent stripe rendered absolutely. Only shown when active.
-    let stripe = if is_active {
-        Some(
-            div()
-                .absolute()
-                .left_0()
-                .top_1()
-                .bottom_1()
-                .w(gpui::px(ACTIVE_STRIPE_WIDTH_PX))
-                .rounded_r_sm()
-                .bg(accent),
-        )
-    } else {
-        None
-    };
-
-    let hover_bg = theme_colors.element_hover;
-    let active_bg = theme_colors.element_selected;
-
-    h_flex()
-        .id(element_id)
-        .relative()
-        .w_full()
-        .h(gpui::px(40.0))
-        .justify_center()
-        .items_center()
-        .hover(move |s| s.bg(hover_bg))
-        .when(is_active, move |this| this.bg(active_bg))
-        .children(stripe)
-        .child(Icon::new(icon).size(IconSize::Medium).color(icon_color))
-        .tooltip(move |_window, cx| Tooltip::simple(tooltip_text.clone(), cx))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _ev, window, cx| {
-                this.set_active(mode_id_for_click.clone(), cx);
-                // M2: apply the mode's dock layout on the hosting workspace.
-                let Some(mode) = this
-                    .modes
-                    .iter()
-                    .find(|m| m.id == mode_id_for_click)
-                    .cloned()
-                else {
-                    return;
-                };
-                let Some(workspace) = this.workspace.as_ref().and_then(|w| w.upgrade()) else {
-                    log::warn!(
-                        "activity_bar: no workspace handle — cannot apply mode '{}'",
-                        mode.id
-                    );
-                    return;
-                };
-                workspace.update(cx, |workspace, cx| {
-                    workspace_mode_switcher::switch_to_mode(&mode, workspace, window, cx);
-                });
-            }),
-        )
 }
 
 /// Convenience constructor mirroring `resource_banner::build_gpu_banner` —
@@ -286,7 +380,7 @@ pub fn build_activity_bar(
     workspace_root: PathBuf,
     modes_dir_override: Option<PathBuf>,
     default_mode: impl Into<String>,
-    workspace: WeakEntity<Workspace>,
+    workspace: gpui::WeakEntity<Workspace>,
     cx: &mut gpui::App,
 ) -> Entity<ActivityBar> {
     let modes_dir = modes_dir_override.unwrap_or_else(|| workspace_root.join(".agents/modes"));
@@ -295,151 +389,5 @@ pub fn build_activity_bar(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    fn write_mode(dir: &std::path::Path, id: &str, icon: &str, pin: Option<&str>) {
-        std::fs::create_dir_all(dir).unwrap();
-        let pin_json = match pin {
-            Some(p) => format!(", \"pinned_position\": \"{}\"", p),
-            None => String::new(),
-        };
-        let json = format!(
-            r#"{{
-                "schema_version": 1,
-                "id": "{id}",
-                "display_name": "{id}",
-                "description": "test mode",
-                "icon": "{icon}",
-                "accent_color_hex": "DA7756",
-                "layout": {{}},
-                "default_keybinding": "Ctrl+Alt+1"
-                {pin_json}
-            }}"#,
-            id = id,
-            icon = icon,
-            pin_json = pin_json,
-        );
-        std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
-    }
-
-    #[test]
-    fn camel_to_snake_handles_known_cases() {
-        assert_eq!(camel_to_snake("Hub"), "hub");
-        assert_eq!(camel_to_snake("Settings"), "settings");
-        assert_eq!(camel_to_snake("ZedAgent"), "zed_agent");
-        assert_eq!(camel_to_snake("AiOpenAi"), "ai_open_ai");
-        // Already-snake input is preserved.
-        assert_eq!(camel_to_snake("zed_agent"), "zed_agent");
-    }
-
-    #[test]
-    fn icon_name_for_falls_back_on_unknown() {
-        // "Hub" is not a real IconName variant in the current Zed tree, but
-        // the activity bar must not panic — it falls back to FALLBACK_ICON.
-        let icon = icon_name_for("Hub");
-        assert_eq!(icon, FALLBACK_ICON);
-        // "Settings" exists as a real variant — should resolve to it.
-        assert_eq!(icon_name_for("Settings"), IconName::Settings);
-        // Snake-cased input also works (forward-compat for hand-authored
-        // mode files that already used snake_case).
-        assert_eq!(icon_name_for("zed_agent"), IconName::ZedAgent);
-    }
-
-    #[test]
-    fn parse_accent_hex_handles_with_and_without_hash() {
-        let a: Rgba = parse_accent_hex("DA7756").into();
-        let b: Rgba = parse_accent_hex("#DA7756").into();
-        // Both representations resolve to the same color.
-        assert_eq!(a.r, b.r);
-        assert_eq!(a.g, b.g);
-        assert_eq!(a.b, b.b);
-    }
-
-    #[test]
-    fn parse_accent_hex_falls_back_on_garbage() {
-        // Garbage input → falls back to system gray, no panic.
-        let gray: Rgba = parse_accent_hex("not-a-color").into();
-        let expected: Rgba = parse_accent_hex("8E8E93").into();
-        assert_eq!(gray.r, expected.r);
-        assert_eq!(gray.g, expected.g);
-        assert_eq!(gray.b, expected.b);
-    }
-
-    #[test]
-    fn mode_enumeration_from_temp_dir_sorts_correctly() {
-        // Verify the M0 loader's sort contract is preserved end-to-end:
-        // pinned-top first, then unpinned alphabetical, then pinned-bottom.
-        let temp = TempDir::new().unwrap();
-        let modes_dir = temp.path().join(".agents").join("modes");
-        write_mode(&modes_dir, "zeta", "Hub", Some("bottom"));
-        write_mode(&modes_dir, "alpha", "Hub", Some("top"));
-        write_mode(&modes_dir, "beta", "Hub", None);
-
-        let modes = load_modes_from_dir(&modes_dir);
-        let ids: Vec<&str> = modes.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["alpha", "beta", "zeta"]);
-    }
-
-    #[test]
-    fn empty_modes_dir_yields_no_modes() {
-        // Empty (but existing) dir → empty list, no crash.
-        let temp = TempDir::new().unwrap();
-        let modes_dir = temp.path().join(".agents").join("modes");
-        std::fs::create_dir_all(&modes_dir).unwrap();
-        let modes = load_modes_from_dir(&modes_dir);
-        assert!(modes.is_empty());
-    }
-
-    #[test]
-    fn missing_modes_dir_yields_no_modes() {
-        // Nonexistent dir → empty list, logged warning, no crash.
-        let temp = TempDir::new().unwrap();
-        let modes_dir = temp.path().join(".agents").join("does-not-exist");
-        let modes = load_modes_from_dir(&modes_dir);
-        assert!(modes.is_empty());
-    }
-
-    #[gpui::test]
-    fn effective_active_falls_back_when_default_mode_missing(cx: &mut gpui::TestAppContext) {
-        let temp = TempDir::new().unwrap();
-        let modes_dir = temp.path().join(".agents").join("modes");
-        write_mode(&modes_dir, "orchestrator", "Hub", None);
-        write_mode(&modes_dir, "settings", "Settings", Some("bottom"));
-
-        cx.update(|cx| {
-            let entity = cx.new(|cx| {
-                ActivityBar::new(modes_dir.clone(), "nonexistent-mode".to_string(), None, cx)
-            });
-            entity.update(cx, |bar, _cx| {
-                // No mode matches "nonexistent-mode", so the bar falls back
-                // to the first non-bottom-pinned mode (orchestrator).
-                let active = bar.effective_active();
-                assert!(active.is_some());
-                assert_eq!(active.unwrap().id, "orchestrator");
-            });
-        });
-    }
-
-    #[gpui::test]
-    fn set_active_updates_and_notifies(cx: &mut gpui::TestAppContext) {
-        let temp = TempDir::new().unwrap();
-        let modes_dir = temp.path().join(".agents").join("modes");
-        write_mode(&modes_dir, "orchestrator", "Hub", None);
-        write_mode(&modes_dir, "symphony", "AiOpenAi", None);
-
-        cx.update(|cx| {
-            let entity = cx.new(|cx| {
-                ActivityBar::new(modes_dir.clone(), "orchestrator".to_string(), None, cx)
-            });
-            entity.update(cx, |bar, cx| {
-                assert_eq!(bar.active_mode_id(), "orchestrator");
-                bar.set_active("symphony", cx);
-                assert_eq!(bar.active_mode_id(), "symphony");
-                // effective_active reflects the new id.
-                assert_eq!(bar.effective_active().unwrap().id, "symphony");
-            });
-        });
-    }
-}
+#[path = "activity_bar_tests.rs"]
+mod tests;
