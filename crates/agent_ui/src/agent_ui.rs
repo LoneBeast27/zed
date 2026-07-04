@@ -14,6 +14,7 @@ mod buffer_codegen;
 mod canonical;
 mod completion_provider;
 pub mod constellation;
+pub mod field_physics;
 pub mod workspace_mode_switcher;
 mod workspace_modes;
 mod config_options;
