@@ -52,6 +52,30 @@ fn bottom_capsule_items_anchor_to_the_bar_foot() {
 }
 
 #[test]
+fn item_hit_rects_pitch_by_size_plus_gap_with_no_overlap() {
+    // Finding 3(c): pin the per-icon hit-rect geometry so a padding/gap tweak
+    // can't silently shrink the clickable targets (the taskboard-miss guard).
+    // Pitch = ITEM_SIZE + ITEM_GAP = 44; each hit-rect is ITEM_SIZE (40) tall.
+    assert_eq!(item_hit_pitch(), 44.0);
+
+    let (top0, h0) = top_item_hit_rect(0);
+    let (top1, h1) = top_item_hit_rect(1);
+    assert_eq!(h0, 40.0, "the WHOLE 40px circle is clickable, not the glyph");
+    assert_eq!(h1, 40.0);
+    // Consecutive rects advance by exactly one pitch — matching top_item_y.
+    assert_eq!(top1 - top0, item_hit_pitch());
+    assert_eq!((top0, h0), (top_item_y(0), ITEM_SIZE));
+
+    // The rects never overlap (bottom of rect 0 ≤ top of rect 1) — and the
+    // dead band between them is exactly ITEM_GAP (4px), the only place a
+    // synthetic click can fall through. If a future edit widens this band the
+    // assert breaks, surfacing the regression.
+    let bottom_of_0 = top0 + h0;
+    assert!(bottom_of_0 <= top1, "hit-rects must not overlap");
+    assert_eq!(top1 - bottom_of_0, ITEM_GAP, "dead band == the item gap only");
+}
+
+#[test]
 fn bar_width_covers_inset_capsule_and_gap() {
     // 10 left inset + 48 capsule + 8 right gap — the floating island's
     // column reservation (NOT an edge-flush 48px VSCode rail).

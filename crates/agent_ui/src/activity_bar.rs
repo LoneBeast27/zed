@@ -73,6 +73,25 @@ fn top_item_y(index: usize) -> f32 {
     PILL_INSET + CAPSULE_BORDER + CAPSULE_PAD + index as f32 * (ITEM_SIZE + ITEM_GAP)
 }
 
+/// The vertical PITCH between consecutive item hit-rects inside a capsule —
+/// one hit area plus the inter-item gap (Finding 3(c)). The hit-rect HEIGHT is
+/// [`ITEM_SIZE`]; the `ITEM_GAP` between them is dead space where a synthetic
+/// click can fall through (the taskboard-miss hypothesis). Pinned by a test so
+/// a future padding/gap tweak can't silently shrink the targets or widen the
+/// dead band.
+const fn item_hit_pitch() -> f32 {
+    ITEM_SIZE + ITEM_GAP
+}
+
+/// The clickable hit-rect for top-cluster item `index`: `(top_y, height)` in
+/// bar coordinates. The WHOLE 40px circle is the target (the item div carries
+/// `on_mouse_down`, not the glyph), so a click anywhere in this band switches
+/// the mode — confirmed by [`ActivityBar::render_mode_item`] sizing the
+/// listener div to `ITEM_SIZE`, not the icon.
+fn top_item_hit_rect(index: usize) -> (f32, f32) {
+    (top_item_y(index), ITEM_SIZE)
+}
+
 /// Y of item `index` inside the BOTTOM capsule (anchored to the bar's foot),
 /// in bar coordinates. Needs the measured bar height.
 fn bottom_item_y(bar_height: f32, bottom_count: usize, index: usize) -> f32 {
@@ -238,10 +257,25 @@ impl ActivityBar {
                     .size(IconSize::Custom(rems_from_px(icon_px)))
                     .color(Color::Custom(icon_color)),
             )
+            // Finding 3(b): a NON-hoverable tooltip (`Tooltip::simple` via
+            // `.tooltip`, `hoverable: false`). gpui non-hoverable tooltips are a
+            // passive deferred overlay that dismisses on mouse-move and never
+            // occludes the source element's hitbox, so a tooltip (this item's or
+            // a neighbor's) cannot eat the taskboard click. If this were ever
+            // switched to `.hoverable_tooltip`, the hoverable overlay CAN sit
+            // over a sibling and intercept — keep it simple() here, or move the
+            // tooltip anchor off the rail.
             .tooltip(move |_window, cx| Tooltip::simple(tooltip_text.clone(), cx))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _ev, window, cx| {
+                    // Finding 3(a): log the mode id at the TOP of the listener,
+                    // BEFORE any logic, so an eval can tell a MISSED click (this
+                    // line never prints — the event never reached the target) from
+                    // an EATEN click (this prints but the switch didn't happen)
+                    // instantly. info!, not debug!, so it survives the default
+                    // log filter during a live eval.
+                    log::info!("activity_bar: rail click → mode '{mode_id_for_click}'");
                     this.set_active(mode_id_for_click.clone(), cx);
                     let Some(mode) = this
                         .modes
