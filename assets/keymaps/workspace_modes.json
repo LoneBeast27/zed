@@ -22,7 +22,7 @@
     }
   },
   {
-    "context": "OrchestratorComposer && menu_open > Editor",
+    "context": "OrchestratorComposer > Editor && menu_open",
     "use_key_equivalents": true,
     "bindings": {
       "up": "orchestrator_panel::TypeaheadUp",

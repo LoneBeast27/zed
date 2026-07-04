@@ -10,10 +10,13 @@
 //! (`assets/keymaps/workspace_modes.json` — loaded only with the
 //! workspace-modes flag, like the panel itself).
 
-use editor::{Editor, EditorElement, EditorEvent, EditorStyle};
+use std::cell::Cell;
+use std::rc::Rc;
+
+use editor::{Addon, Editor, EditorElement, EditorEvent, EditorStyle};
 use gpui::{
-    AnyElement, App, AsyncApp, Entity, Focusable as _, SharedString, Subscription, Task,
-    TextStyle, Window,
+    AnyElement, App, AsyncApp, Entity, Focusable as _, KeyContext, SharedString, Subscription,
+    Task, TextStyle, Window,
 };
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
@@ -35,6 +38,43 @@ const HINTS: [(&str, &str); 5] = [
     ("/adversary", "/adversary "),
 ];
 
+/// A shared "the `/` menu is open" flag whose truth is derived every frame in
+/// [`OrchestratorPanel::render_composer`] and read back by the editor's
+/// [`Addon::extend_key_context`]. The `Rc<Cell<bool>>` deliberately avoids the
+/// addon reading the panel entity (which would re-enter a mid-update entity per
+/// RUST_PORT_NOTES §11): the panel writes the flag synchronously during render,
+/// the addon only reads a plain bool.
+#[derive(Clone, Default)]
+pub(super) struct MenuOpenFlag(Rc<Cell<bool>>);
+
+impl MenuOpenFlag {
+    fn set(&self, open: bool) {
+        self.0.set(open);
+    }
+}
+
+/// Editor addon that stamps `menu_open` onto the composer editor's OWN key
+/// context while the `/` typeahead is open — the stock `Editor &&
+/// showing_completions` idiom (editor.rs `key_context_internal`). Putting the
+/// flag on the FOCUSED node (not an ancestor deck) is what lets
+/// `Editor && menu_open` outrank the editor's native auto_height caret bindings
+/// (up/down/enter) so the nav keys drive the menu instead of the caret.
+struct TypeaheadAddon {
+    menu_open: MenuOpenFlag,
+}
+
+impl Addon for TypeaheadAddon {
+    fn extend_key_context(&self, key_context: &mut KeyContext, _cx: &App) {
+        if self.menu_open.0.get() {
+            key_context.add("menu_open");
+        }
+    }
+
+    fn to_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// The composer deck's view state — owned by the panel (TranscriptView
 /// pattern), not a separate entity.
 pub(super) struct Composer {
@@ -46,11 +86,16 @@ pub(super) struct Composer {
     /// in-flight `POST /message` (the web fires every `send()` to
     /// completion; serialization additionally pins arrival order).
     send_task: Option<Task<()>>,
+    /// The `/`-menu-open flag shared with the editor's [`TypeaheadAddon`].
+    /// Written each render from `render_typeahead_menu().is_some()`, read by
+    /// the addon when the editor rebuilds its key context.
+    pub(super) menu_open: MenuOpenFlag,
     _editor_subscription: Subscription,
 }
 
 impl Composer {
     pub fn new(window: &mut Window, cx: &mut gpui::Context<OrchestratorPanel>) -> Self {
+        let menu_open = MenuOpenFlag::default();
         let editor = cx.new(|cx| {
             let mut editor = Editor::auto_height(1, 8, window, cx);
             editor.set_placeholder_text(
@@ -60,6 +105,13 @@ impl Composer {
             );
             editor.set_soft_wrap();
             editor.set_show_indent_guides(false, cx);
+            // Mirror the stock `Editor && showing_completions` context flag: the
+            // addon stamps `menu_open` on the editor's OWN key context while the
+            // `/` typeahead is open, so `Editor && menu_open` bindings win over
+            // the native auto_height caret keys (the fix for dead keyboard nav).
+            editor.register_addon(TypeaheadAddon {
+                menu_open: menu_open.clone(),
+            });
             editor
         });
         // Repaint on edits so the reveal retargets off the live has-text
@@ -74,6 +126,7 @@ impl Composer {
             editor,
             send_circle: SendCircle::new(),
             send_task: None,
+            menu_open,
             _editor_subscription,
         }
     }
@@ -223,17 +276,22 @@ impl OrchestratorPanel {
         self.composer.send_circle.update_motion(busy, has_text);
 
         // Compute the `/` typeahead FIRST (needs `&mut cx`): the menu element
-        // AND the open flag (the flag adds a `menu_open` key-context so
-        // Up/Down/Tab/Escape bind to the menu only while it is showing —
-        // otherwise they move the caret normally). `render_typeahead_menu` is
-        // Some exactly when open. Built before the `colors` borrow below so the
-        // mutable `cx` reborrow is unambiguous.
+        // AND the open flag. `render_typeahead_menu` is Some exactly when open.
+        // Built before the `colors` borrow below so the mutable `cx` reborrow is
+        // unambiguous.
         let menu = self.render_typeahead_menu(cx);
+        // The `menu_open` flag rides on the EDITOR's own key context (via
+        // `TypeaheadAddon`), NOT this ancestor deck: a focused-node flag is what
+        // makes `Editor && menu_open` outrank the editor's native auto_height
+        // up/down/enter caret bindings (an ancestor `... > Editor` binding ties
+        // at the leaf depth and loses to the editor's own keys — the stock
+        // `showing_completions` pattern puts the flag on the editor for exactly
+        // this reason). The deck keeps only `OrchestratorComposer` for the
+        // menu-closed Enter→Send binding; the typeahead `on_action` handlers
+        // stay here and receive the actions as they bubble up from the editor.
+        self.composer.menu_open.set(menu.is_some());
         let mut key_context = gpui::KeyContext::new_with_defaults();
         key_context.add("OrchestratorComposer");
-        if menu.is_some() {
-            key_context.add("menu_open");
-        }
 
         let colors = cx.theme().colors();
         let focused = self
