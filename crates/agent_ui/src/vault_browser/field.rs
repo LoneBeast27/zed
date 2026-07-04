@@ -530,4 +530,72 @@ mod tests {
         field.end_drag(0.);
         assert_eq!(field.dragging(), None);
     }
+
+    /// Opt-in REAL-corpus field benchmark: build the live index, fold the
+    /// field over the busiest root, and report the settle time (frames to a
+    /// cold field) + confirm the idle-cost claim (the field goes cold, so the
+    /// panel stops pumping). Gated behind `VAULT_FIELD_BENCH=1` so the normal
+    /// suite stays machine-independent. Run:
+    /// `VAULT_FIELD_BENCH=1 cargo test -p agent_ui field_bench -- --nocapture`.
+    #[gpui::test]
+    fn field_bench_real_corpus(cx: &mut gpui::TestAppContext) {
+        use super::super::index::build_index;
+        use fs::Fs;
+        use std::sync::Arc;
+
+        if std::env::var("VAULT_FIELD_BENCH").is_err() {
+            return;
+        }
+        cx.executor().allow_parking();
+        let fs: Arc<dyn Fs> = Arc::new(fs::RealFs::new(None, cx.executor()));
+        let index = cx
+            .foreground_executor()
+            .block_on(async move { build_index(fs).await });
+
+        // Pick the busier root for the stress read.
+        let (root, docs) = {
+            let vault = index.docs_for(super::super::index::VaultRoot::Vault);
+            let staging = index.docs_for(super::super::index::VaultRoot::Staging);
+            if staging.len() >= vault.len() {
+                ("staging", staging)
+            } else {
+                ("vault", vault)
+            }
+        };
+
+        let mut field = VaultField::default();
+        field.rebuild(&docs, super::super::graph::node_size, 0.);
+
+        // Frame-step at 60fps until the field goes cold; count the frames.
+        let mut now = 0f32;
+        let mut frames = 0usize;
+        let cap = 6000usize; // 100s hard cap
+        loop {
+            now += 1000. / 60.;
+            let animating = field.advance(now);
+            frames += 1;
+            if !animating || frames >= cap {
+                break;
+            }
+        }
+        let settle_s = frames as f32 / 60.;
+        let finite = field
+            .nodes
+            .iter()
+            .all(|n| n.out_x.is_finite() && n.out_y.is_finite());
+
+        eprintln!(
+            "VAULT_FIELD_BENCH: root={root} · {} nodes · settled in {frames} frames \
+             ({settle_s:.2}s sim) · cold={} · finite={finite} · extent {:.0}x{:.0}px",
+            field.nodes.len(),
+            !field.hot(now),
+            field.width,
+            field.height,
+        );
+        assert!(finite, "no NaN over the real corpus");
+        assert!(
+            !field.hot(now) || frames >= cap,
+            "the real-corpus field goes cold (idle cost zero) within the cap"
+        );
+    }
 }
