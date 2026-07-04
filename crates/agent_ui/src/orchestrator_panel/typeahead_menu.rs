@@ -43,6 +43,13 @@ impl TypeaheadMenu {
             was_open: false,
         }
     }
+
+    /// The current selected row index — read by the dispatch tests to assert
+    /// keyboard nav moved the SELECTION (not the editor caret).
+    #[cfg(test)]
+    pub(super) fn selected_index(&self) -> usize {
+        self.selected
+    }
 }
 
 /// The live menu snapshot for a frame: the parsed slash context + the filtered

@@ -26,4 +26,7 @@ mod transcript;
 mod typeahead;
 mod typeahead_menu;
 
+#[cfg(test)]
+mod typeahead_dispatch_tests;
+
 pub use panel::{OrchestratorPanel, Send, ToggleFocus};
