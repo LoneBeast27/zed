@@ -606,7 +606,7 @@ pub fn init(
         let bar = activity_bar::build_activity_bar(
             root,
             modes_dir_override,
-            default_mode,
+            default_mode.clone(),
             weak_workspace,
             cx,
         );
@@ -727,6 +727,31 @@ pub fn init(
                 );
             },
         );
+
+        // t9 — APPLY the default mode's layout on launch. The activity bar
+        // already MARKS the default active (its `active_mode_id` = the
+        // `agent.default_mode` setting), but marking is not applying: without
+        // this the center pane stays empty until the first rail click. Drive
+        // the SAME idempotent path a click uses (`switch_to_mode_id` →
+        // `switch_to_mode` → `apply_mode_layout`) so launch and click can
+        // never diverge. Ordering is safe here: the surface registry is set
+        // on the bar and the constellation panel is added just above, so both
+        // the center item and a `right_dock` constellation spec resolve. If
+        // the configured id matches no loaded mode, `switch_to_mode_id`
+        // returns false and we leave the layout untouched (the bar's soft
+        // highlight fallback still reads sensibly) — no empty tab is forced.
+        if !workspace_mode_switcher::switch_to_mode_id(
+            &default_mode,
+            workspace,
+            window,
+            cx,
+        ) {
+            log::info!(
+                "workspace_modes: default_mode '{}' matched no loaded mode — center pane left \
+                 to the user (no layout applied on launch)",
+                default_mode
+            );
+        }
     })
     .detach();
 
