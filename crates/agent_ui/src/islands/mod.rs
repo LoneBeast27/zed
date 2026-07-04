@@ -28,9 +28,11 @@
 //!    relative content div (after docks/center/zoomed, before the status
 //!    bar + toast layer), which delivers all three requirements: persistent
 //!    across every mode (mode switches only touch docks — the workspace
-//!    entity lives on), anchored top-right of the content area at 14px
-//!    insets (the cluster owns its own absolute geometry), and never
-//!    unmounted (the `AnyView` is held by the `Workspace` struct itself).
+//!    entity lives on), anchored top-right of the content area — below the
+//!    center pane's tab-bar row so the pill clears the tab-bar corner
+//!    buttons (Finding 1; `layout::cluster_anchor` owns the geometry), and
+//!    never unmounted (the `AnyView` is held by the `Workspace` struct
+//!    itself).
 //!
 //! Concern split (CLAUDE.md modularity):
 //! - [`state`] — the pure rest/notify/held/expanded machine + 75/90
@@ -44,6 +46,8 @@
 //!   emerge/retract motion.
 //! - [`corner_cluster`] — the workspace-mounted positioner that composes
 //!   the island + stack into the one corner system.
+//! - [`layout`] — pure corner-anchor geometry (the §4.9 below-tab-bar anchor,
+//!   CPU-testable at any width/scale).
 //! - [`tasks_island`] — the §4.9 composer-anchored running-tasks island
 //!   (NOT part of the corner system: it lives in normal flow above the
 //!   orchestrator composer, displacing it — the anchor-catalog
@@ -51,6 +55,7 @@
 
 pub mod corner_cluster;
 pub mod island_faces;
+pub mod layout;
 mod notif_card;
 pub mod notif_logic;
 pub mod notif_stack;
