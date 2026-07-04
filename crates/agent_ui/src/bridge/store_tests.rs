@@ -229,6 +229,86 @@ fn sse_plan_frame_for_another_conv_is_dropped(cx: &mut gpui::TestAppContext) {
     });
 }
 
+#[test]
+fn accepts_plan_follow_default_fold() {
+    // Nothing followed (a fresh app) → adopt ANY plan; the bridge's
+    // global-newest IS the most-recent-conversation-with-a-plan default.
+    assert!(accepts_plan(None, "conv-a"));
+    assert!(accepts_plan(None, ""));
+    // Following a conv → adopt only that conv's plan.
+    assert!(accepts_plan(Some("conv-a"), "conv-a"));
+    assert!(!accepts_plan(Some("conv-a"), "conv-b"));
+    // An empty incoming conv (single-conv / older bridge) is always accepted —
+    // there is no conv to disambiguate against.
+    assert!(accepts_plan(Some("conv-a"), ""));
+}
+
+#[gpui::test]
+fn unfollowed_app_defaults_to_the_bridge_newest_plan(cx: &mut gpui::TestAppContext) {
+    // Finding 2: a fresh app follows nothing (transcript_conv == None). The
+    // bridge's global-newest SSE plan frame must be ADOPTED — the panel
+    // defaults to it instead of "No plans yet" — and its conv recorded so the
+    // header can label it.
+    let store = cx.new(|_| BridgeStore::default());
+    store.update(cx, |store, cx| {
+        assert!(store.transcript_conv.is_none(), "fresh app follows nothing");
+        assert!(store.plan.is_none());
+
+        store.apply_event(plan_event("conv-live", "plan-live"), cx);
+        assert_eq!(
+            store.plan.as_ref().and_then(|p| p.plan_id.clone()),
+            Some("plan-live".into()),
+            "the global-newest plan is adopted when nothing is followed"
+        );
+        assert_eq!(
+            store.plan_conv, "conv-live",
+            "the plan's conv is recorded for the header label"
+        );
+
+        // A newer global frame (another conv) still wins while unfollowed —
+        // "most recent" tracks the newest push.
+        store.apply_event(plan_event("conv-newer", "plan-newer"), cx);
+        assert_eq!(
+            store.plan.as_ref().and_then(|p| p.plan_id.clone()),
+            Some("plan-newer".into())
+        );
+        assert_eq!(store.plan_conv, "conv-newer");
+    });
+}
+
+#[gpui::test]
+fn poll_path_shares_the_accept_fold_and_records_conv(cx: &mut gpui::TestAppContext) {
+    // apply_plan (the poll / on-connect default-fetch path) uses the same fold:
+    // a followed conv scopes it, and the adopted plan's conv is recorded.
+    let store = cx.new(|_| BridgeStore::default());
+    store.update(cx, |store, cx| {
+        store.transcript_conv = Some("conv-a".into());
+        let a = super::super::protocol::PlanSnapshot {
+            plan_id: Some("plan-a".into()),
+            conv: "conv-a".into(),
+            waves: vec![vec![Default::default()]],
+            ..Default::default()
+        };
+        store.apply_plan(a, cx);
+        assert_eq!(store.plan_conv, "conv-a");
+
+        // A poll result for a different conv is rejected by the fold.
+        let b = super::super::protocol::PlanSnapshot {
+            plan_id: Some("plan-b".into()),
+            conv: "conv-b".into(),
+            waves: vec![vec![Default::default()]],
+            ..Default::default()
+        };
+        store.apply_plan(b, cx);
+        assert_eq!(
+            store.plan.as_ref().and_then(|p| p.plan_id.clone()),
+            Some("plan-a".into()),
+            "the poll path scopes by the followed conv, like the SSE path"
+        );
+        assert_eq!(store.plan_conv, "conv-a");
+    });
+}
+
 #[gpui::test]
 fn ticker_lives_only_while_a_run_is_running(cx: &mut gpui::TestAppContext) {
     let store = cx.new(|_| BridgeStore::default());

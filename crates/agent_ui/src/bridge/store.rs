@@ -57,6 +57,11 @@ pub struct BridgeStore {
     /// the first `plan` event / `/plan` poll. Fed by SSE when connected and by
     /// the watch-gated `/plan` poll in the polling-fallback window.
     pub plan: Option<PlanSnapshot>,
+    /// The conversation id the current [`Self::plan`] belongs to — surfaced by
+    /// the Symphony header when the plan is the bridge default (nothing is
+    /// explicitly followed) so it labels WHICH conversation's plan it renders
+    /// (Finding 2). Empty when the plan carries no conv (single-conv bridge).
+    pub plan_conv: String,
     /// Boost-channel rows (T2, the constellation's sibling edges) — fed by
     /// the SSE `channels` event and the constellation's supplemental poll.
     pub channels: Vec<ChannelRow>,
@@ -100,6 +105,7 @@ impl Default for BridgeStore {
             transcript: None,
             transcript_conv: None,
             plan: None,
+            plan_conv: String::new(),
             channels: Vec::new(),
             projects: Vec::new(),
             board_received_at: Instant::now(),
@@ -137,6 +143,26 @@ pub struct PlanWatch {
 impl Drop for PlanWatch {
     fn drop(&mut self) {
         self.watchers.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether an incoming plan snapshot should be adopted, given the currently
+/// followed conversation (`None` = nothing explicitly followed — a fresh app).
+///
+/// The follow-default fold (Finding 2, PARITY_SPEC §4.3 "symphony renders
+/// orchestrator plans as a live score"):
+/// - Nothing followed → adopt ANY plan. The bridge pushes the GLOBAL-newest
+///   plan on the single SSE stream / returns it for an empty `/plan?conv=`, so
+///   "adopt whatever arrives" IS defaulting to the most-recent conversation
+///   with a plan — the panel shows it instead of an empty state.
+/// - Following conv A → adopt only conv A's plan (scope by conv, no flicker to
+///   another conversation's plan on the shared stream).
+/// - An empty incoming `conv` (single-conv bridge / older bridge) is always
+///   accepted — there is no conv to mismatch against.
+pub(super) fn accepts_plan(followed: Option<&str>, incoming_conv: &str) -> bool {
+    match followed {
+        None => true,
+        Some(conv) => incoming_conv.is_empty() || conv == incoming_conv,
     }
 }
 
@@ -193,18 +219,19 @@ impl BridgeStore {
                 }
             }
             BridgeEvent::Plan { plan } => {
-                // P5: the SSE `plan` frame is GLOBAL-newest across all
-                // conversations (bridge serve.py pushes latest_plan_view on the
-                // single stream). If it describes a DIFFERENT conversation than
-                // the one the panel follows, dropping it here keeps the panel
-                // from flickering to conv B's plan while following conv A — the
-                // watch-gated `/plan?conv=A` poll already scopes by conv, so
-                // the SSE push must too. An empty `conv` (single-conv usage or
-                // an older bridge) is never filtered.
-                let follows = self.transcript_conv.as_deref();
-                let mismatched = !plan.conv.is_empty()
-                    && follows.is_some_and(|conv| conv != plan.conv);
-                if !mismatched && self.plan.as_ref() != Some(&plan) {
+                // P5 + Finding 2: the SSE `plan` frame is GLOBAL-newest across
+                // all conversations (bridge serve.py pushes latest_plan_view on
+                // the single stream). [`accepts_plan`] decides whether to take
+                // it: it matches the followed conv, OR nothing is explicitly
+                // followed (a fresh app) — in which case the global-newest IS
+                // the "most recent conversation with a plan" the panel should
+                // default to, so we adopt it instead of showing "No plans yet"
+                // while a live plan exists bridge-wide. A followed conv still
+                // scopes the panel to that conv's plan (no flicker to conv B).
+                if accepts_plan(self.transcript_conv.as_deref(), &plan.conv)
+                    && (self.plan.as_ref() != Some(&plan) || self.plan_conv != plan.conv)
+                {
+                    self.plan_conv = plan.conv.clone();
                     self.plan = Some(plan);
                     changed = true;
                 }
@@ -264,9 +291,14 @@ impl BridgeStore {
         PlanWatch { watchers }
     }
 
-    /// Apply a `/plan` poll result — change-gated like every other apply.
+    /// Apply a `/plan` poll or default-fetch result — change-gated like every
+    /// other apply, and scoped by the same [`accepts_plan`] fold as the SSE
+    /// path so the poll and the push never disagree on which conv's plan wins.
     pub(super) fn apply_plan(&mut self, plan: PlanSnapshot, cx: &mut gpui::Context<Self>) {
-        if self.plan.as_ref() != Some(&plan) {
+        if accepts_plan(self.transcript_conv.as_deref(), &plan.conv)
+            && (self.plan.as_ref() != Some(&plan) || self.plan_conv != plan.conv)
+        {
+            self.plan_conv = plan.conv.clone();
             self.plan = Some(plan);
             cx.notify();
         }

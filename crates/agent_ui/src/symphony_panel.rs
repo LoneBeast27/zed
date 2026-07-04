@@ -15,6 +15,17 @@
 //! `ModeSurface::set_surface_active`, the [`PlanWatch`] lifetime law) covers
 //! the polling-fallback window.
 //!
+//! FOLLOW-DEFAULT (Finding 2): a fresh app follows no conversation, and SSE
+//! replays no plan on connect (it pushes only on change), so the panel would
+//! sit on "No plans yet" while a live plan exists bridge-wide. The store now
+//! DEFAULTS to the bridge's most-recent conversation with a plan whenever
+//! nothing is explicitly followed — the `accepts_plan` fold adopts the
+//! global-newest SSE frame, and a one-shot `/plan` fetch on SSE connect
+//! delivers the current plan immediately (not a poll). The header labels which
+//! conversation the rendered plan belongs to (`plan_conv`), so a defaulted
+//! plan is never anonymous. The empty state remains only when NO plan exists
+//! bridge-wide.
+//!
 //! The bridge OWNS the wave derivation (`bridge/state.py` `plan_view` →
 //! `orchestrator/plans.py` `to_waves`) and is the single source of truth: the
 //! panel renders the bands it is handed via [`PlanSnapshot::waves`] and never
@@ -74,8 +85,10 @@ impl SymphonyPanel {
         }
     }
 
-    /// `.panel-head`: "Symphony" 18px/500 + the sub-line.
-    fn render_header(&self, cx: &App) -> Div {
+    /// `.panel-head`: "Symphony" 18px/500 + the sub-line, plus a conv crumb
+    /// when the rendered plan belongs to a specific conversation (Finding 2 —
+    /// so the default-followed plan is labelled with WHICH conversation it is).
+    fn render_header(&self, conv_label: Option<SharedString>, cx: &App) -> Div {
         let colors = cx.theme().colors();
         h_flex()
             .flex_none()
@@ -99,6 +112,43 @@ impl SymphonyPanel {
                     .text_color(colors.text_placeholder)
                     .child("plan waves from the judgment tier"),
             )
+            .children(conv_label.map(|label| {
+                // The conversation crumb: right-aligned muted pill so the plan
+                // is never anonymous when the panel defaulted to a conversation
+                // the user didn't explicitly select.
+                div()
+                    .ml_auto()
+                    .text_size(px(12.))
+                    .text_color(colors.text_muted)
+                    .child(label)
+            }))
+    }
+
+    /// A short human label for the plan's conversation: the conversation's
+    /// title (resolved through the store's project rows) when known, else a
+    /// truncated id crumb. `None` when the plan carries no conv (single-conv
+    /// bridge — there is nothing to disambiguate).
+    fn conv_label(&self, cx: &App) -> Option<SharedString> {
+        let store = self.store.read(cx);
+        let conv = store.plan_conv.as_str();
+        if conv.is_empty() {
+            return None;
+        }
+        let title = store
+            .conversations()
+            .find(|row| row.id == conv)
+            .map(|row| row.title.clone())
+            .filter(|title| !title.is_empty());
+        let text = match title {
+            Some(title) => {
+                let short: String = title.chars().take(48).collect();
+                format!("· {short}")
+            }
+            // No title resolved yet (projects not loaded) — a short id crumb
+            // still tells the user WHICH conversation, honestly.
+            None => format!("· {}", &conv[..conv.len().min(12)]),
+        };
+        Some(SharedString::from(text))
     }
 
     /// One `.score`: summary line over the wave bands (a `v_flex` of
@@ -321,7 +371,15 @@ impl Render for SymphonyPanel {
         } else {
             self.store.read(cx).plan.clone()
         };
-        let body: AnyElement = match plan.filter(PlanSnapshot::is_present) {
+        let present = plan.filter(PlanSnapshot::is_present);
+        // Label the conversation only when a plan is actually on screen (the
+        // empty state has nothing to attribute). Demo gate carries no conv, so
+        // the crumb is naturally absent there.
+        let conv_label = present
+            .as_ref()
+            .filter(|_| !crate::bridge::is_agentic_demo())
+            .and_then(|_| self.conv_label(cx));
+        let body: AnyElement = match present {
             None => empty_state(
                 IconName::AudioOn,
                 "No plans yet",
@@ -347,7 +405,7 @@ impl Render for SymphonyPanel {
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(colors.panel_background)
-            .child(self.render_header(cx))
+            .child(self.render_header(conv_label, cx))
             .child(div().flex_1().min_h_0().child(body))
     }
 }

@@ -70,7 +70,10 @@ pub(super) async fn connection_loop(
         match attached {
             Ok(response) => {
                 backoff = SSE_BACKOFF_START;
-                if consume_sse(response, &this, cx).await.is_err() {
+                if consume_sse(&http_client, response, &this, cx)
+                    .await
+                    .is_err()
+                {
                     return; // store dropped
                 }
                 // Stream ended/erred — mark offline and reconnect promptly.
@@ -120,6 +123,7 @@ async fn connect_sse(client: &dyn HttpClient) -> Result<Response<AsyncBody>> {
 /// to the store as they arrive. Returns `Ok(())` when the stream ends and
 /// `Err` only when the store entity is gone.
 async fn consume_sse(
+    http_client: &Arc<dyn HttpClient>,
     mut response: Response<AsyncBody>,
     this: &WeakEntity<BridgeStore>,
     cx: &mut AsyncApp,
@@ -131,6 +135,15 @@ async fn consume_sse(
         store.set_transport(super::store::Transport::Sse, cx);
     })
     .map_err(|_| ())?;
+
+    // Finding 2: SSE pushes the `plan` frame only on a CHANGE, so a fresh
+    // connect replays no plan — the Symphony panel would sit on "No plans yet"
+    // while a live plan already exists bridge-wide. Fetch the bridge default
+    // `/plan` ONCE on connect (empty conv = the bridge's most-recent
+    // conversation with a plan) so the panel defaults to it immediately; the
+    // store's `accepts_plan` fold scopes it (adopted only when nothing is
+    // explicitly followed). This is a one-shot on-connect fetch, NOT a poll.
+    fetch_and_apply_default_plan(http_client, &this, cx).await.ok();
 
     let (tx, mut rx) = mpsc::unbounded::<BridgeEvent>();
     let reader = cx.background_spawn(async move {
@@ -333,6 +346,42 @@ pub(super) async fn fetch_and_apply_transcript(
     })
     .map_err(|_| ())?;
     Ok(Some(busy))
+}
+
+/// One-shot `/plan` fetch for the bridge DEFAULT plan (empty conv = the
+/// bridge's most-recent conversation with a plan), applied through the store's
+/// `accepts_plan` fold. Called once on SSE connect (Finding 2) so a fresh app
+/// defaults to the live plan instead of "No plans yet" — SSE only pushes plan
+/// frames on change, so without this the current plan never arrives until it
+/// next mutates. Returns `Err` only when the store entity is gone; a fetch
+/// failure is swallowed (the empty state is the correct fallback then).
+pub(super) async fn fetch_and_apply_default_plan(
+    http_client: &Arc<dyn HttpClient>,
+    this: &WeakEntity<BridgeStore>,
+    cx: &mut AsyncApp,
+) -> Result<(), ()> {
+    // Only worth fetching when nothing is explicitly followed — a followed
+    // conv gets its plan from the watch-gated poll / the scoped SSE frame.
+    let unfollowed = this
+        .read_with(cx, |store, _| store.transcript_conv.is_none())
+        .map_err(|_| ())?;
+    if !unfollowed {
+        return Ok(());
+    }
+    let client = http_client.clone();
+    let fetched = cx
+        .background_spawn(async move {
+            // Empty conv → the bridge default (latest plan across conversations).
+            let url = format!("{BRIDGE_BASE_URL}/plan?conv=");
+            let raw = fetch_json(client.as_ref(), &url).await?;
+            anyhow::Ok(serde_json::from_str::<PlanSnapshot>(&raw)?)
+        })
+        .await;
+    if let Ok(plan) = fetched {
+        this.update(cx, |store, cx| store.apply_plan(plan, cx))
+            .map_err(|_| ())?;
+    }
+    Ok(())
 }
 
 /// The `/plan` poll task — spawned by the store ONLY while the Symphony panel
