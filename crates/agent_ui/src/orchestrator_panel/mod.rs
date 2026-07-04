@@ -18,9 +18,12 @@
 //!   morph lives in [`send_circle`].
 
 mod composer;
+mod dispatch;
 mod message;
 mod panel;
 mod send_circle;
 mod transcript;
+mod typeahead;
+mod typeahead_menu;
 
 pub use panel::{OrchestratorPanel, Send, ToggleFocus};

@@ -19,12 +19,14 @@ use ui::prelude::*;
 use workspace::Workspace;
 
 use crate::bridge::{self, BridgeStore, TranscriptSnapshot, TranscriptWatch};
+use crate::commands::CommandRegistry;
 use crate::islands::TasksIsland;
 use crate::task_board::motion::StateFades;
 
 use super::composer::Composer;
 use super::message::render_message;
 use super::transcript::{TranscriptView, render_greeting, render_shimmer};
+use super::typeahead_menu::TypeaheadMenu;
 
 actions!(
     orchestrator_panel,
@@ -33,7 +35,16 @@ actions!(
         ToggleFocus,
         /// Sends the composer's message (Enter via the
         /// `OrchestratorComposer > Editor` keymap binding).
-        Send
+        Send,
+        /// Move the `/` typeahead selection up (Up arrow while the menu is
+        /// open; ignored otherwise so the caret moves normally).
+        TypeaheadUp,
+        /// Move the `/` typeahead selection down (Down arrow while open).
+        TypeaheadDown,
+        /// Accept the highlighted `/` command (Tab while the menu is open).
+        TypeaheadAccept,
+        /// Dismiss the `/` typeahead, dropping the stray slash token (Escape).
+        TypeaheadDismiss
     ]
 );
 
@@ -44,12 +55,18 @@ const BUSY_TICK: Duration = Duration::from_secs(1);
 pub struct OrchestratorPanel {
     focus_handle: FocusHandle,
     pub(super) store: Entity<BridgeStore>,
-    workspace: WeakEntity<Workspace>,
+    pub(super) workspace: WeakEntity<Workspace>,
     pub(super) transcript: TranscriptView,
     pub(super) composer: Composer,
     /// The composer-anchored running-tasks island (§4.9) — `pub(crate)` so
     /// `islands::tasks_island`'s retract clock and listeners can reach it.
     pub(crate) tasks_island: TasksIsland,
+    /// The `/` command registry (S0) — the source the typeahead + `/help`
+    /// render from. Shared entity, built at panel construction.
+    pub(super) registry: Entity<CommandRegistry>,
+    /// The `/` typeahead menu state (S1): open flag + selection index. Live
+    /// rows are recomputed each keystroke from the composer text + registry.
+    pub(super) typeahead: TypeaheadMenu,
     /// Orchestrator busy flag from the latest snapshot.
     pub(super) busy: bool,
     /// The 1s rolling-tick task — `Some` only while busy (store ticker
@@ -80,6 +97,18 @@ impl OrchestratorPanel {
         let store = bridge::global_store(cx);
         let _store_subscription =
             cx.observe(&store, |this: &mut Self, _, cx| this.sync_from_store(cx));
+
+        // The `/` command registry: static seed is live immediately, the
+        // user-local skills/commands stream in from a background walk. The
+        // registry resolves the workspace root LAZILY inside its discovery task
+        // (dispatch law, RUST_PORT_NOTES §11: `OrchestratorPanel::new` runs
+        // inside the Workspace's own `observe_new` update — a synchronous
+        // `workspace.read(cx)` here re-enters the mid-update Workspace entity
+        // and panics; the deferred read in the background task is safe).
+        let fs = <dyn fs::Fs>::global(cx);
+        let home = paths::home_dir().clone();
+        let registry = cx.new(|cx| CommandRegistry::new(fs, home, workspace.clone(), cx));
+
         Self {
             focus_handle: cx.focus_handle(),
             store,
@@ -87,6 +116,8 @@ impl OrchestratorPanel {
             transcript: TranscriptView::new(),
             composer: Composer::new(window, cx),
             tasks_island: TasksIsland::new(cx),
+            registry,
+            typeahead: TypeaheadMenu::new(),
             busy: false,
             busy_ticker: None,
             last_snapshot: None,

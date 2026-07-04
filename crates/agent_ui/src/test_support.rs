@@ -105,6 +105,11 @@ pub fn init_test(cx: &mut TestAppContext) {
         cx.set_global(acp_thread::StubSessionCounter(
             std::sync::atomic::AtomicUsize::new(0),
         ));
+        // A global Fs — real workspaces always have one; the orchestrator
+        // panel's command registry (S0) reads it at construction to discover
+        // local skills/commands. Without this the mode-surface tests panic
+        // (`no state of type fs::GlobalFs`) the moment they build the panel.
+        <dyn fs::Fs>::set_global(fs::FakeFs::new(cx.background_executor().clone()), cx);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         editor::init(cx);
         release_channel::init("0.0.0".parse().unwrap(), cx);

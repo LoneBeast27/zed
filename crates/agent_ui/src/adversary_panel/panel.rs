@@ -123,6 +123,19 @@ impl AdversaryPanel {
         self.jobs.update(cx, |jobs, cx| jobs.start(text, cx));
     }
 
+    /// Broadcast a prompt supplied externally (the orchestrator's `/adversary
+    /// <text>` command, S4): seed the composer so the text is visible + editable
+    /// for a follow-up, then fire. Empty text opens the surface without firing.
+    pub fn broadcast_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.editor
+            .update(cx, |editor, cx| editor.set_text(text.clone(), window, cx));
+        self.jobs.update(cx, |jobs, cx| jobs.start(text, cx));
+    }
+
     /// Abort the in-flight broadcast (the abort affordance) — POSTs
     /// `/adversary/<job>/abort` via the jobs entity; the live poll lands the
     /// aborted result. A no-op unless a broadcast is pending.

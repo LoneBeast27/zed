@@ -133,6 +133,13 @@ impl OrchestratorPanel {
     /// executor, then canonicalize the conversation + refetch the
     /// transcript (the web's `send()` + immediate `loop()`).
     pub(super) fn send_message(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        // Enter while the `/` typeahead is open ACCEPTS the highlighted command
+        // (splices `/name ` into the editor) instead of sending — the menu owns
+        // Enter, exactly like the mention menu. `typeahead_accept` returns
+        // false when the menu is closed, so a normal Enter still sends.
+        if self.typeahead_accept(window, cx) {
+            return;
+        }
         if self.busy {
             return; // stop is a no-op until a real abort endpoint lands (banked)
         }
@@ -141,6 +148,25 @@ impl OrchestratorPanel {
         if text.is_empty() {
             return;
         }
+
+        // S4: a leading orchestrator-native `/command` routes IN-APP (open a
+        // surface, escalate a plan, render /help) instead of POSTing as a chat
+        // message. A `@vendor`-forced message, or a `/name` that is a
+        // skill/custom command, falls through to the bridge with the prefix
+        // INTACT — the claude worker's `-p` expands it (S2, verified).
+        let orch_names = self.orchestrator_command_names(cx);
+        let name_refs: Vec<&str> = orch_names.iter().map(String::as_str).collect();
+        if let super::dispatch::Submission::Orchestrator { target, args } =
+            super::dispatch::parse_submission(&text, &name_refs)
+        {
+            self.composer
+                .editor
+                .update(cx, |editor, cx| editor.clear(window, cx));
+            self.dispatch_orchestrator(target, args, window, cx);
+            cx.notify();
+            return;
+        }
+
         self.composer
             .editor
             .update(cx, |editor, cx| editor.clear(window, cx));
@@ -196,6 +222,19 @@ impl OrchestratorPanel {
         let busy = self.busy;
         self.composer.send_circle.update_motion(busy, has_text);
 
+        // Compute the `/` typeahead FIRST (needs `&mut cx`): the menu element
+        // AND the open flag (the flag adds a `menu_open` key-context so
+        // Up/Down/Tab/Escape bind to the menu only while it is showing —
+        // otherwise they move the caret normally). `render_typeahead_menu` is
+        // Some exactly when open. Built before the `colors` borrow below so the
+        // mutable `cx` reborrow is unambiguous.
+        let menu = self.render_typeahead_menu(cx);
+        let mut key_context = gpui::KeyContext::new_with_defaults();
+        key_context.add("OrchestratorComposer");
+        if menu.is_some() {
+            key_context.add("menu_open");
+        }
+
         let colors = cx.theme().colors();
         let focused = self
             .composer
@@ -211,8 +250,20 @@ impl OrchestratorPanel {
         let focus_t = self.fades.t(&focus_id);
 
         let deck = v_flex()
-            .key_context("OrchestratorComposer")
+            .key_context(key_context)
             .on_action(cx.listener(|this, _: &Send, window, cx| this.send_message(window, cx)))
+            .on_action(cx.listener(|this, _: &super::panel::TypeaheadUp, _, cx| {
+                this.typeahead_move(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &super::panel::TypeaheadDown, _, cx| {
+                this.typeahead_move(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &super::panel::TypeaheadAccept, window, cx| {
+                this.typeahead_accept(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &super::panel::TypeaheadDismiss, window, cx| {
+                this.typeahead_dismiss(window, cx);
+            }))
             .w_full()
             .rounded(px(16.))
             .bg(SURFACE_2)
@@ -243,6 +294,9 @@ impl OrchestratorPanel {
                     // §4.9 composer anchor slot: the running-tasks island
                     // (Task 4) emerges ABOVE the typing pill, in flow.
                     .children(self.render_tasks_island_slot(cx))
+                    // S1: the `/` typeahead popover — anchored above the deck,
+                    // in flow (displaces the deck downward while open).
+                    .children(menu)
                     .child(deck),
             )
             .into_any_element()

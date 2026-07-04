@@ -10,10 +10,12 @@
 //! Filtering + scoping ([`Self::visible`]) is PURE (no cx) so the typeahead
 //! fold is unit-tested directly against fixtures.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use fs::Fs;
-use gpui::{AppContext as _, Context, Task};
+use gpui::{AppContext as _, Context, Task, WeakEntity};
+use workspace::Workspace;
 
 use super::discovery;
 use super::static_seed::static_entries;
@@ -29,8 +31,12 @@ pub struct CommandRegistry {
     /// Whether the first (or a manual-refresh) discovery walk is in flight.
     discovering: bool,
     fs: Arc<dyn Fs>,
-    home: std::path::PathBuf,
-    workspace_root: Option<std::path::PathBuf>,
+    home: PathBuf,
+    /// The hosting workspace — the discovery task resolves the project root
+    /// from it LAZILY (never in `new`, which runs inside the workspace's own
+    /// update: a synchronous read there re-enters the mid-update entity and
+    /// panics per RUST_PORT_NOTES §11).
+    workspace: WeakEntity<Workspace>,
     _discovery_task: Option<Task<()>>,
 }
 
@@ -40,8 +46,8 @@ impl CommandRegistry {
     /// lands (`cx.notify()` repaints the menu if open).
     pub fn new(
         fs: Arc<dyn Fs>,
-        home: std::path::PathBuf,
-        workspace_root: Option<std::path::PathBuf>,
+        home: PathBuf,
+        workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self {
@@ -50,7 +56,7 @@ impl CommandRegistry {
             discovering: false,
             fs,
             home,
-            workspace_root,
+            workspace,
             _discovery_task: None,
         };
         this.refresh(cx);
@@ -58,15 +64,28 @@ impl CommandRegistry {
     }
 
     /// Kick (or re-kick) the background discovery walk. Idempotent-ish: a
-    /// second call replaces the in-flight task (the newer walk wins).
+    /// second call replaces the in-flight task (the newer walk wins). The
+    /// project root is resolved inside the task (safe — the workspace is
+    /// settled by the time the deferred task runs).
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.discovering = true;
         let fs = self.fs.clone();
         let home = self.home.clone();
-        let ws = self.workspace_root.clone();
+        let workspace = self.workspace.clone();
         self._discovery_task = Some(cx.spawn(async move |this, cx| {
+            let ws_root = workspace
+                .read_with(cx, |workspace, cx| {
+                    workspace
+                        .project()
+                        .read(cx)
+                        .visible_worktrees(cx)
+                        .next()
+                        .map(|wt| wt.read(cx).abs_path().to_path_buf())
+                })
+                .ok()
+                .flatten();
             let rows = cx
-                .background_spawn(async move { discovery::discover(fs, home, ws).await })
+                .background_spawn(async move { discovery::discover(fs, home, ws_root).await })
                 .await;
             this.update(cx, |this, cx| {
                 this.dynamic_rows = rows;

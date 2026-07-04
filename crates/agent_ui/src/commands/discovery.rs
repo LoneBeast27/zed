@@ -288,4 +288,62 @@ mod tests {
         // No workspace → only the two user roots.
         assert_eq!(discovery_roots(home, None).len(), 2);
     }
+
+    #[gpui::test]
+    async fn discover_walks_all_roots_over_a_fixture(cx: &mut gpui::TestAppContext) {
+        use crate::commands::types::CommandKind;
+        use fs::FakeFs;
+        use serde_json::json;
+        use util::path;
+
+        let fs = FakeFs::new(cx.executor());
+        // A user custom command, a user skill, a project skill, and a shared
+        // .agents skill — one of each discovery layout.
+        fs.insert_tree(
+            path!("/home"),
+            json!({
+                ".claude": {
+                    "commands": {
+                        "commit.md": "# Commit\n\nCreate a new commit for all changes.\n"
+                    },
+                    "skills": {
+                        "afk": { "SKILL.md": "---\ndescription: User is going AFK.\n---\n# afk" }
+                    }
+                }
+            }),
+        )
+        .await;
+        fs.insert_tree(
+            path!("/ws"),
+            json!({
+                ".claude": {
+                    "skills": {
+                        "build": { "SKILL.md": "---\ndescription: Execute an approved plan.\n---\n" }
+                    }
+                },
+                ".agents": {
+                    "skills": {
+                        "skill-creator": { "SKILL.md": "---\ndescription: Create new skills.\n---\n" }
+                    }
+                }
+            }),
+        )
+        .await;
+
+        let rows = discover(fs, path!("/home").into(), Some(path!("/ws").into())).await;
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_ref()).collect();
+        assert!(names.contains(&"commit"), "user custom command found");
+        assert!(names.contains(&"afk"), "user skill found");
+        assert!(names.contains(&"build"), "project skill found");
+        assert!(names.contains(&"skill-creator"), "shared .agents skill found");
+
+        // The custom command carries its prose description + Custom kind.
+        let commit = rows.iter().find(|r| r.name == "commit").unwrap();
+        assert_eq!(commit.kind, CommandKind::Custom);
+        assert!(commit.description.contains("Create a new commit"));
+        // A skill carries its frontmatter description + Skill kind.
+        let afk = rows.iter().find(|r| r.name == "afk").unwrap();
+        assert_eq!(afk.kind, CommandKind::Skill);
+        assert_eq!(afk.description.as_ref(), "User is going AFK.");
+    }
 }
