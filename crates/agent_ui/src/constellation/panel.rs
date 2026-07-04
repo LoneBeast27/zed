@@ -387,6 +387,6 @@ impl Panel for ConstellationPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        6
+        16
     }
 }

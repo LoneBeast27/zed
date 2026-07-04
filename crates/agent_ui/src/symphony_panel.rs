@@ -408,6 +408,6 @@ impl Panel for SymphonyPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        8
+        19
     }
 }

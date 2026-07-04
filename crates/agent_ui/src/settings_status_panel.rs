@@ -475,7 +475,7 @@ impl Panel for SettingsStatusPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        9
+        20
     }
 }
 

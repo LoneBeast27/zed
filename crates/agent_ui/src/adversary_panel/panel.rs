@@ -366,6 +366,6 @@ impl Panel for AdversaryPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        7
+        18
     }
 }

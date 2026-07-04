@@ -386,6 +386,6 @@ impl Panel for OrchestratorPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        4
+        14
     }
 }

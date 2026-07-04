@@ -413,7 +413,7 @@ impl Panel for UsagePanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        6
+        17
     }
 }
 
