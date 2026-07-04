@@ -26,11 +26,6 @@ use crate::usage_panel_groups::group_pools;
 use crate::usage_panel_meter::MeterState;
 use crate::usage_panel_render::render_vendor_cluster;
 
-// The `${used}%` formatter moved to [`crate::usage_panel_render`] with the
-// vendor-grouping render split; re-exported here so the usage island's
-// existing `use crate::usage_panel::fmt_pct` keeps resolving.
-pub(crate) use crate::usage_panel_render::fmt_pct;
-
 actions!(
     usage_panel,
     [

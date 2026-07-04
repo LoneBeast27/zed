@@ -32,7 +32,7 @@ use crate::task_board::motion::{
     AnimatedColor, AnimatedValue, EFFECTS, RollValue, SPATIAL, StateFade,
 };
 use crate::task_board::style::HAIRLINE_HI;
-use crate::usage_panel::fmt_pct;
+use crate::usage_panel_render::fmt_pct;
 
 use super::island_faces::{Face, build_face, measure, short_pool};
 use super::state::{IslandMachine, IslandState, TimerCmd};
@@ -69,6 +69,25 @@ struct PoolView {
     used: Option<f64>,
     window: String,
     tone: Tone,
+}
+
+/// THE SESSION POOL — the pill's metric source (Amendment 2026-07-04 (4) item
+/// 2, user ruling). The corner pill % reads the claude 5h window ("that's the
+/// useful one for pill" — the session meter), not the worst/tightest pool.
+/// The vendor-bundled detail lives in the usage panel; the pill stays the
+/// at-a-glance session figure.
+const SESSION_POOL: &str = "claude_5h";
+
+/// The pill's Rest % text: the [`SESSION_POOL`]'s used-% (formatted "NN%").
+/// `None` when the session pool is absent or unmetered, so the pill degrades
+/// to dots-only rather than borrowing a different pool's number — the metric
+/// source stays honest.
+fn session_pct(pools: &[PoolView]) -> Option<SharedString> {
+    pools
+        .iter()
+        .find(|pool| pool.name == SESSION_POOL)
+        .and_then(|pool| pool.used)
+        .map(|used| SharedString::from(format!("{}%", fmt_pct(used))))
 }
 
 pub struct UsageIsland {
@@ -287,19 +306,11 @@ impl UsageIsland {
         match self.machine.state() {
             IslandState::Rest => {
                 let dots = self.pools.iter().take(5).map(|pool| pool.tone).collect();
-                // The tightest pool's % — first strictly-greatest wins
-                // (web `reduce` with a -1 sentinel; all-unknown → no text).
-                let mut best_used = -1.0_f64;
-                let mut pct = None;
-                for pool in &self.pools {
-                    let used = pool.used.unwrap_or(-1.);
-                    if used > best_used {
-                        best_used = used;
-                        pct = pool
-                            .used
-                            .map(|used| SharedString::from(format!("{}%", fmt_pct(used))));
-                    }
-                }
+                // The pill's % is the SESSION metric (Amendment 2026-07-04 (4)
+                // item 2, user ruling: "that's the useful one for pill") — the
+                // claude 5h window, NOT the tightest pool. The dot row still
+                // spans every pool; the vendor detail lives in the panel.
+                let pct = session_pct(&self.pools);
                 Face::Rest { dots, pct }
             }
             IslandState::Notify | IslandState::Held => {
@@ -525,5 +536,48 @@ impl Render for UsageIsland {
                 .border_color(self.tint_border.target())
                 .into_any_element()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool(name: &str, used: Option<f64>) -> PoolView {
+        PoolView {
+            name: name.into(),
+            short: SharedString::from(name),
+            used,
+            window: String::new(),
+            tone: Tone::Ok,
+        }
+    }
+
+    #[test]
+    fn pill_reads_the_session_pool_not_the_tightest() {
+        // claude_5h is at 82% while agy is fuller at 94% — the pill shows the
+        // SESSION metric (5h), never the worst pool (Amendment (4) item 2).
+        let pools = vec![
+            pool("antigravity_weekly", Some(94.)),
+            pool("claude_5h", Some(82.)),
+            pool("gemini_free_rpd", Some(0.)),
+        ];
+        assert_eq!(session_pct(&pools).as_deref(), Some("82%"));
+    }
+
+    #[test]
+    fn pill_degrades_when_session_pool_absent_or_unmetered() {
+        // No claude_5h pool → no borrowed number, dots-only pill.
+        let no_session = vec![pool("codex_plan", Some(40.))];
+        assert_eq!(session_pct(&no_session), None);
+        // Present but unmetered (headroom unknown) → still None, honestly.
+        let unmetered = vec![pool("claude_5h", None), pool("codex_plan", Some(40.))];
+        assert_eq!(session_pct(&unmetered), None);
+    }
+
+    #[test]
+    fn session_pct_formats_like_the_web() {
+        assert_eq!(session_pct(&[pool("claude_5h", Some(99.5))]).as_deref(), Some("99.5%"));
+        assert_eq!(session_pct(&[pool("claude_5h", Some(100.))]).as_deref(), Some("100%"));
     }
 }
