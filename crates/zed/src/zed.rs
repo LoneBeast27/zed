@@ -4943,6 +4943,26 @@ mod tests {
     actions!(test_only, [ActionA, ActionB]);
 
     #[gpui::test]
+    async fn test_workspace_modes_keymap_asset_parses(cx: &mut gpui::TestAppContext) {
+        // Fork regression net (launch crash 2026-07-04): the workspace-modes
+        // keymap asset is loaded at RUNTIME behind the agent.workspace_modes
+        // flag, so no stock test ever parses it -- a bad context expression
+        // ("OrchestratorComposer.menu_open", dotted identifiers are not
+        // grammar) crashed launch while every crate suite stayed green. This
+        // test does exactly what zed.rs's loader does: parse the asset,
+        // contexts included, and fail the SUITE instead of the app.
+        init_keymap_test(cx);
+        cx.update(|cx| {
+            KeymapFile::load_asset(
+                WORKSPACE_MODES_KEYMAP_PATH,
+                Some(KeybindSource::Default),
+                cx,
+            )
+            .expect("workspace_modes.json must parse (bindings + context grammar)");
+        });
+    }
+
+    #[gpui::test]
     async fn test_base_keymap(cx: &mut gpui::TestAppContext) {
         let executor = cx.executor();
         let app_state = init_keymap_test(cx);
