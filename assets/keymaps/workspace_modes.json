@@ -22,12 +22,13 @@
     }
   },
   {
-    "context": "OrchestratorComposer.menu_open > Editor",
+    "context": "OrchestratorComposer && menu_open > Editor",
     "use_key_equivalents": true,
     "bindings": {
       "up": "orchestrator_panel::TypeaheadUp",
       "down": "orchestrator_panel::TypeaheadDown",
       "tab": "orchestrator_panel::TypeaheadAccept",
+      "enter": "orchestrator_panel::TypeaheadAccept",
       "escape": "orchestrator_panel::TypeaheadDismiss"
     }
   },
