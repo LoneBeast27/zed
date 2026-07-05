@@ -315,8 +315,8 @@ fn pill_with_label(
 /// The shared `.empty-state` block (icon · headline · copy), centered.
 pub fn empty_state(
     icon: IconName,
-    headline: &'static str,
-    copy: &'static str,
+    headline: impl IntoElement,
+    copy: impl IntoElement,
     cx: &App,
 ) -> impl IntoElement {
     let colors = cx.theme().colors();

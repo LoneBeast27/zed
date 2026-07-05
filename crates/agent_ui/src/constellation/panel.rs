@@ -233,24 +233,30 @@ impl ConstellationPanel {
         cx.notify();
     }
 
-    /// The `.board-head` twin: title · arrange button.
+    /// The shared `.panel-head` twin: title · subtitle · arrange button.
     fn render_header(&self, has_nodes: bool, cx: &mut Context<Self>) -> Div {
         let colors = cx.theme().colors();
         h_flex()
             .flex_none()
-            .items_center()
-            .gap(px(10.))
-            .px(px(16.))
-            .pt(px(12.))
-            .pb(px(10.))
+            .items_baseline()
+            .gap(px(12.))
+            .px(px(28.))
+            .pt(px(18.))
+            .pb(px(14.))
             .border_b_1()
             .border_color(colors.border)
             .child(
                 div()
-                    .text_size(px(14.))
+                    .text_size(px(18.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(colors.text)
                     .child("Constellation"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(colors.text_placeholder)
+                    .child("agent relationships and message flow"),
             )
             .child(div().flex_1())
             .when(has_nodes, |header| {

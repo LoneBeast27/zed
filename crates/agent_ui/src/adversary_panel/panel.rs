@@ -13,7 +13,7 @@ use ui::prelude::*;
 use crate::agent_accents::ACCENT_FILL;
 use crate::bridge::{AdversaryJobs, AdversaryPhase, AdversaryWatch};
 use crate::task_board::motion::{STATE_FADE, StateFades, mix};
-use crate::task_board::style::{HAIRLINE_HI, SURFACE_2};
+use crate::task_board::style::{HAIRLINE_HI, SURFACE_2, empty_state};
 
 use super::columns::{DoneView, build_done_view};
 
@@ -263,33 +263,13 @@ impl AdversaryPanel {
     /// The web's `renderError`: the `.empty-state` block in the columns'
     /// slot (icon · "Broadcast failed" · the error text).
     fn render_error(&self, error: &str, cx: &App) -> AnyElement {
-        let colors = cx.theme().colors();
-        v_flex()
-            .w_full()
-            .items_center()
-            .text_center()
-            .gap(px(10.))
-            .p(px(40.))
-            .child(
-                Icon::new(IconName::XCircle)
-                    .size(IconSize::Custom(rems_from_px(34.)))
-                    .color(Color::Custom(colors.text_placeholder.opacity(0.8))),
-            )
-            .child(
-                div()
-                    .text_size(px(20.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors.text_muted)
-                    .child("Broadcast failed"),
-            )
-            .child(
-                div()
-                    .max_w(px(380.))
-                    .text_size(px(13.))
-                    .text_color(colors.text_placeholder)
-                    .child(SharedString::from(error.to_string())),
-            )
-            .into_any_element()
+        empty_state(
+            IconName::XCircle,
+            "Broadcast failed",
+            SharedString::from(error.to_string()),
+            cx,
+        )
+        .into_any_element()
     }
 }
 

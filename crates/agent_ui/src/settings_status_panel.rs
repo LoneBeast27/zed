@@ -410,7 +410,7 @@ impl Render for SettingsStatusPanel {
                     .min_h_0()
                     .overflow_y_scroll()
                     .px(px(28.))
-                    .pt(px(22.))
+                    .pt(px(20.))
                     .pb(px(32.))
                     .items_center()
                     .children(cards),
