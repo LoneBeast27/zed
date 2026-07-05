@@ -10,6 +10,7 @@ mod agent_panel;
 mod agent_registry_ui;
 mod agent_router;
 mod billing;
+mod briefing;
 pub mod bridge;
 mod buffer_codegen;
 mod canonical;
