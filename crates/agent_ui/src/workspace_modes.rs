@@ -211,6 +211,7 @@ mod tests {
             make_keybound_mode("taskboard", "Ctrl+Alt+2"),
             make_keybound_mode("usage", "Ctrl+Alt+4"),
             make_keybound_mode("settings", "Ctrl+Alt+6"),
+            make_keybound_mode("briefing", "Ctrl+Alt+7"),
         ];
         sort_modes(&mut modes);
 
@@ -223,7 +224,8 @@ mod tests {
                 "symphony",
                 "usage",
                 "adversary",
-                "settings"
+                "settings",
+                "briefing"
             ]
         );
         for (index, mode) in modes.iter().enumerate() {

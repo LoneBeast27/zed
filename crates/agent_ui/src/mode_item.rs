@@ -25,6 +25,7 @@ use workspace::item::{Item, ItemEvent};
 
 use crate::activity_bar::ActivityBar;
 use crate::adversary_panel::AdversaryPanel;
+use crate::briefing_panel::BriefingPanel;
 use crate::orchestrator_panel::OrchestratorPanel;
 use crate::settings_status_panel::SettingsStatusPanel;
 use crate::symphony_panel::SymphonyPanel;
@@ -56,6 +57,7 @@ pub trait ModeSurface: Render + Focusable + Sized + 'static {
 /// mode system's per-workspace anchor.
 #[derive(Clone)]
 pub struct ModeSurfaces {
+    pub briefing: Entity<BriefingPanel>,
     pub orchestrator: Entity<OrchestratorPanel>,
     pub task_board: Entity<TaskBoardPanel>,
     pub symphony: Entity<SymphonyPanel>,
@@ -69,6 +71,7 @@ pub struct ModeSurfaces {
 /// ([`crate::workspace_mode_switcher`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CenterSurface {
+    Briefing,
     Orchestrator,
     TaskBoard,
     Symphony,
@@ -283,6 +286,7 @@ pub fn open_center_surface(
         return false;
     };
     match surface {
+        CenterSurface::Briefing => open_center_item(&surfaces.briefing, tab, workspace, window, cx),
         CenterSurface::Orchestrator => {
             open_center_item(&surfaces.orchestrator, tab, workspace, window, cx)
         }

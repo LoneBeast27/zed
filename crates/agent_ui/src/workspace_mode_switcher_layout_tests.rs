@@ -20,6 +20,7 @@ use ui::IconName;
 use workspace::dock::{Panel, PanelEvent};
 
 use crate::adversary_panel::AdversaryPanel;
+use crate::briefing_panel::BriefingPanel;
 use crate::mode_item::{ModeItem, ModeSurfaces};
 use crate::orchestrator_panel::OrchestratorPanel;
 use crate::settings_status_panel::SettingsStatusPanel;
@@ -139,6 +140,7 @@ fn install_surfaces(
     workspace.update_in(cx, |workspace, window, cx| {
         let weak = cx.weak_entity();
         let surfaces = ModeSurfaces {
+            briefing: cx.new(|cx| BriefingPanel::new(cx)),
             orchestrator: cx.new(|cx| OrchestratorPanel::new(weak, window, cx)),
             task_board: cx.new(|cx| TaskBoardPanel::new(cx)),
             symphony: cx.new(|cx| SymphonyPanel::new(cx)),
@@ -173,6 +175,7 @@ fn install_surfaces_from_modes_dir(
     workspace.update_in(cx, |workspace, window, cx| {
         let weak = cx.weak_entity();
         let surfaces = ModeSurfaces {
+            briefing: cx.new(|cx| BriefingPanel::new(cx)),
             orchestrator: cx.new(|cx| OrchestratorPanel::new(weak, window, cx)),
             task_board: cx.new(|cx| TaskBoardPanel::new(cx)),
             symphony: cx.new(|cx| SymphonyPanel::new(cx)),
