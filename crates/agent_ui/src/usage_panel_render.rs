@@ -15,9 +15,11 @@ use std::collections::HashMap;
 use gpui::{AnyElement, App, Div, ElementId, FontWeight, SharedString};
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
+use ui::Tooltip;
 use ui::prelude::*;
 
 use crate::agent_accents::{STATUS_BLOCKED, STATUS_ERROR, tone_for_used, used_pct};
+use crate::bridge::protocol::VendorPlan;
 use crate::bridge::{PoolRow, UsageMeta, VendorLiveness};
 use crate::task_board::motion::RollValue;
 use crate::task_board::style::{SURFACE_1, tabular_nums};
@@ -102,14 +104,26 @@ fn render_vendor_header(group: &VendorGroup, cx: &App) -> Div {
                 .text_color(colors.text)
                 .child(SharedString::from(vendor_label(group.vendor).to_string())),
         )
-        .children(group.liveness.map(|vendor| render_liveness_chip(vendor, cx)))
+        .children(
+            group
+                .liveness
+                .map(|vendor| render_liveness_chip(vendor, cx)),
+        )
         .child(
             // Worst-pool at-a-glance figure, right-aligned.
             h_flex()
                 .ml_auto()
                 .items_center()
                 .gap(px(6.))
-                .child(div().size(px(6.)).rounded_full().bg(tone.color()).flex_none())
+                .children(group.plan.map(|plan| render_plan_chip(plan, cx)))
+                .children(group.plan.map(|plan| render_billing_button(plan)))
+                .child(
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(tone.color())
+                        .flex_none(),
+                )
                 .child(
                     div()
                         .text_size(px(12.))
@@ -119,6 +133,46 @@ fn render_vendor_header(group: &VendorGroup, cx: &App) -> Div {
                         .child(SharedString::from(glance)),
                 ),
         )
+}
+
+/// The vendor cluster's plan chip, folded into the header next to liveness.
+fn render_plan_chip(plan: &VendorPlan, cx: &App) -> Div {
+    let colors = cx.theme().colors();
+    let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
+    let label_color = if plan.source == "detected" {
+        colors.text
+    } else {
+        colors.text_muted
+    };
+    h_flex()
+        .flex_none()
+        .items_center()
+        .px(px(9.))
+        .py(px(4.))
+        .rounded(px(8.))
+        .bg(SURFACE_1)
+        .child(
+            div()
+                .font_family(mono)
+                .text_size(px(12.))
+                .text_color(label_color)
+                .child(SharedString::from(plan.label.clone())),
+        )
+}
+
+/// External billing affordance for the vendor plan.
+fn render_billing_button(plan: &VendorPlan) -> IconButton {
+    let billing_url = plan.billing_url.clone();
+    IconButton::new(
+        SharedString::from(format!("usage-plan-billing-{}", plan.vendor)),
+        IconName::ArrowUpRight,
+    )
+    .icon_size(IconSize::Small)
+    .icon_color(Color::Muted)
+    .tooltip(Tooltip::text("Manage billing"))
+    .on_click(move |_, _, cx| {
+        cx.open_url(&billing_url);
+    })
 }
 
 /// The vendor cluster's liveness chip, folded into the header (2026-07-04
@@ -146,7 +200,10 @@ fn render_liveness_chip(vendor: &VendorLiveness, cx: &App) -> Div {
                 .font_family(mono)
                 .text_size(px(12.))
                 .text_color(label_color)
-                .child(SharedString::from(format!("{}{age}", liveness_word(&vendor.state)))),
+                .child(SharedString::from(format!(
+                    "{}{age}",
+                    liveness_word(&vendor.state)
+                ))),
         )
 }
 

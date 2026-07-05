@@ -6,6 +6,7 @@
 //! island) can be reviewed without a live bridge. Decoded once (a plain
 //! builder, no timers — the panel/island pump their own frames).
 
+use crate::bridge::protocol::VendorPlan;
 use crate::bridge::{PoolRow, ScrapeMeta, UsageMeta, VendorLiveness};
 
 /// Staged six-pool set spanning the four vendor clusters (Amendment
@@ -97,6 +98,35 @@ pub fn demo_meta() -> UsageMeta {
                 latency_ms: None,
             },
         ],
+        plans: vec![
+            VendorPlan {
+                vendor: "claude".into(),
+                tier: "max_5x".into(),
+                label: "Max 5x".into(),
+                price_usd: Some(100.),
+                billing_url: "https://claude.ai/settings/billing".into(),
+                usage_url: Some("https://claude.ai/settings/usage".into()),
+                source: "detected".into(),
+            },
+            VendorPlan {
+                vendor: "codex".into(),
+                tier: "base".into(),
+                label: "Base ($10)".into(),
+                price_usd: Some(10.),
+                billing_url: "https://chatgpt.com/#settings/Subscription".into(),
+                usage_url: Some("https://chatgpt.com/codex/settings/usage".into()),
+                source: "default".into(),
+            },
+            VendorPlan {
+                vendor: "google".into(),
+                tier: "base_10".into(),
+                label: "AI ($10)".into(),
+                price_usd: Some(10.),
+                billing_url: "https://one.google.com/ai".into(),
+                usage_url: Some("https://one.google.com/ai".into()),
+                source: "default".into(),
+            },
+        ],
     }
 }
 
@@ -130,5 +160,7 @@ mod tests {
         let meta = demo_meta();
         let states: Vec<&str> = meta.liveness.iter().map(|v| v.state.as_str()).collect();
         assert_eq!(states, ["alive", "rate_limited", "down"]);
+        let plan_vendors: Vec<&str> = meta.plans.iter().map(|p| p.vendor.as_str()).collect();
+        assert_eq!(plan_vendors, ["claude", "codex", "google"]);
     }
 }

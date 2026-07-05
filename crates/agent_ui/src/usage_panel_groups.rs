@@ -10,6 +10,7 @@
 //! vendor attribution, and roll-up math is unit-tested here.
 
 use crate::agent_accents::{Tone, tone_for_used, used_pct};
+use crate::bridge::protocol::VendorPlan;
 use crate::bridge::{PoolRow, UsageMeta, VendorLiveness};
 
 /// Canonical vendor ordering for the clusters. Amendment (4b): gemini and
@@ -71,6 +72,9 @@ pub struct VendorGroup<'a> {
     /// vendor name. `None` when the bridge surfaces no liveness for it (no
     /// blank chip — the header just omits it).
     pub liveness: Option<&'a VendorLiveness>,
+    /// The vendor's plan chip/link, matched from [`UsageMeta::plans`] by the
+    /// cluster vendor key. `None` when absent.
+    pub plan: Option<&'a VendorPlan>,
 }
 
 impl VendorGroup<'_> {
@@ -114,6 +118,7 @@ pub fn group_pools<'a>(pools: &'a [PoolRow], meta: &'a UsageMeta) -> Vec<VendorG
                     vendor,
                     pools: Vec::new(),
                     liveness: liveness_for(vendor, meta),
+                    plan: plan_for(vendor, meta),
                 });
                 groups.len() - 1
             }
@@ -149,6 +154,11 @@ fn liveness_for<'a>(vendor: &str, meta: &'a UsageMeta) -> Option<&'a VendorLiven
     meta.liveness.iter().find(|entry| entry.vendor == vendor)
 }
 
+/// Match a vendor's plan entry (by cluster vendor name) from the usage meta.
+fn plan_for<'a>(vendor: &str, meta: &'a UsageMeta) -> Option<&'a VendorPlan> {
+    meta.plans.iter().find(|entry| entry.vendor == vendor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +178,14 @@ mod tests {
             source: None,
             scraped: Some(ScrapeMeta::default()),
             liveness,
+            ..Default::default()
+        }
+    }
+
+    fn meta_with_plans(plans: Vec<VendorPlan>) -> UsageMeta {
+        UsageMeta {
+            plans,
+            ..Default::default()
         }
     }
 
@@ -216,13 +234,19 @@ mod tests {
         let groups = group_pools(&pools, &meta);
         assert_eq!(groups.len(), 1);
         let names: Vec<&str> = groups[0].pools.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["claude_5h", "claude_weekly", "claude_weekly_sonnet"]);
+        assert_eq!(
+            names,
+            ["claude_5h", "claude_weekly", "claude_weekly_sonnet"]
+        );
     }
 
     #[test]
     fn worst_used_is_the_fullest_metered_pool() {
         // 82% used (headroom 18) is worse than 12% used (headroom 88).
-        let pools = vec![pool("claude_5h", Some(18.)), pool("claude_weekly", Some(88.))];
+        let pools = vec![
+            pool("claude_5h", Some(18.)),
+            pool("claude_weekly", Some(88.)),
+        ];
         let meta = meta_with_liveness(vec![]);
         let groups = group_pools(&pools, &meta);
         assert_eq!(groups[0].worst_used(), Some(82.));
@@ -243,7 +267,10 @@ mod tests {
         // The google cluster (Amendment (4b)) matches EITHER family member's
         // liveness — today only gemini pings exist, and they must surface on
         // the google header.
-        let pools = vec![pool("gemini_free_rpd", Some(99.)), pool("claude_5h", Some(100.))];
+        let pools = vec![
+            pool("gemini_free_rpd", Some(99.)),
+            pool("claude_5h", Some(100.)),
+        ];
         let meta = meta_with_liveness(vec![VendorLiveness {
             vendor: "gemini".into(),
             state: "alive".into(),
@@ -254,6 +281,22 @@ mod tests {
         assert_eq!(google.liveness.map(|l| l.state.as_str()), Some("alive"));
         let claude = groups.iter().find(|g| g.vendor == "claude").unwrap();
         assert!(claude.liveness.is_none());
+    }
+
+    #[test]
+    fn plan_matches_by_cluster_vendor_name() {
+        let pools = vec![pool("claude_5h", Some(100.)), pool("codex_plan", Some(88.))];
+        let meta = meta_with_plans(vec![VendorPlan {
+            vendor: "claude".into(),
+            label: "Max 5x".into(),
+            billing_url: "https://claude.ai/settings/billing".into(),
+            ..Default::default()
+        }]);
+        let groups = group_pools(&pools, &meta);
+        let claude = groups.iter().find(|g| g.vendor == "claude").unwrap();
+        assert_eq!(claude.plan.map(|p| p.label.as_str()), Some("Max 5x"));
+        let codex = groups.iter().find(|g| g.vendor == "codex").unwrap();
+        assert!(codex.plan.is_none());
     }
 
     #[test]

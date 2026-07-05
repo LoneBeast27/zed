@@ -329,8 +329,22 @@ pub struct VendorLiveness {
     pub latency_ms: Option<f64>,
 }
 
+/// One vendor's subscription plan off the usage `_plans` map (2026-07-05),
+/// keyed by the rendered vendor cluster. Missing fields default so a partial
+/// scrape never breaks the usage panel.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VendorPlan {
+    pub vendor: String,
+    pub tier: String,
+    pub label: String,
+    pub price_usd: Option<f64>,
+    pub billing_url: String,
+    pub usage_url: Option<String>,
+    pub source: String,
+}
+
 /// The `_`-prefixed metadata keys that ride next to the pools in every
-/// usage payload, plus the top-level `liveness` map.
+/// usage payload, plus the top-level `liveness` and `_plans` maps.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UsageMeta {
     /// `_source` — "self-metering + vendor-page scrape".
@@ -340,6 +354,9 @@ pub struct UsageMeta {
     /// `liveness` — per-vendor alive/rate-limited/down state (2026-07-04),
     /// in wire order. Empty when the bridge doesn't surface it.
     pub liveness: Vec<VendorLiveness>,
+    /// `_plans` — per-cluster plan metadata (2026-07-05), in wire order.
+    /// Empty when the bridge doesn't surface it.
+    pub plans: Vec<VendorPlan>,
 }
 
 impl UsageMeta {
@@ -376,17 +393,21 @@ pub fn usage_meta_from_object(object: &serde_json::Map<String, serde_json::Value
             }
         });
     let liveness = liveness_from_object(object);
+    let plans = plans_from_object(object);
     UsageMeta {
         source,
         scraped,
         liveness,
+        plans,
     }
 }
 
 /// Extract the per-vendor liveness rows from the usage object's `liveness`
 /// map (wire order, `preserve_order`). Missing/odd-shaped entries degrade to
 /// defaults rather than erroring — the liberal-protocol rule.
-fn liveness_from_object(object: &serde_json::Map<String, serde_json::Value>) -> Vec<VendorLiveness> {
+fn liveness_from_object(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<VendorLiveness> {
     let Some(map) = object.get("liveness").and_then(|value| value.as_object()) else {
         return Vec::new();
     };
@@ -408,6 +429,45 @@ fn liveness_from_object(object: &serde_json::Map<String, serde_json::Value>) -> 
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
             latency_ms: entry.get("latency_ms").and_then(serde_json::Value::as_f64),
+        })
+        .collect()
+}
+
+/// Extract the per-vendor plan rows from the usage object's `_plans` map
+/// (wire order, `preserve_order`). Missing/odd-shaped metadata degrades to an
+/// empty vec; missing fields on entries default.
+fn plans_from_object(object: &serde_json::Map<String, serde_json::Value>) -> Vec<VendorPlan> {
+    let Some(map) = object.get("_plans").and_then(|value| value.as_object()) else {
+        return Vec::new();
+    };
+    map.iter()
+        .map(|(vendor, entry)| VendorPlan {
+            vendor: vendor.clone(),
+            tier: entry
+                .get("tier")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            label: entry
+                .get("label")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            price_usd: entry.get("price_usd").and_then(serde_json::Value::as_f64),
+            billing_url: entry
+                .get("billing_url")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            usage_url: entry
+                .get("usage_url")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            source: entry
+                .get("source")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
         })
         .collect()
 }
@@ -793,6 +853,47 @@ mod tests {
     }
 
     #[test]
+    fn plans_map_parses_into_meta_and_defaults_absent() {
+        let object = usage_object(
+            r#"{
+                "claude_5h": {"headroom_pct": 78},
+                "_plans": {
+                    "claude": {"tier":"max_5x","label":"Max 5×","price_usd":100,
+                        "billing_url":"https://claude.ai/settings/billing",
+                        "usage_url":"https://claude.ai/settings/usage","source":"default"},
+                    "codex": {"tier":"base","label":"Base ($10)","price_usd":10,
+                        "billing_url":"https://chatgpt.com/#settings/Subscription",
+                        "usage_url":"https://chatgpt.com/codex/settings/usage","source":"default"},
+                    "google": {"tier":"base_10","label":"AI ($10)","price_usd":10,
+                        "billing_url":"https://one.google.com/ai",
+                        "usage_url":"https://one.google.com/ai","source":"default"}
+                }
+            }"#,
+        );
+        let meta = usage_meta_from_object(&object);
+        assert_eq!(meta.plans.len(), 3);
+        assert_eq!(meta.plans[0].vendor, "claude");
+        assert_eq!(meta.plans[0].label, "Max 5×");
+        assert_eq!(
+            meta.plans[0].billing_url,
+            "https://claude.ai/settings/billing"
+        );
+        assert_eq!(meta.plans[0].source, "default");
+        assert_eq!(meta.plans[1].label, "Base ($10)");
+        assert_eq!(
+            meta.plans[1].billing_url,
+            "https://chatgpt.com/#settings/Subscription"
+        );
+        assert_eq!(meta.plans[1].source, "default");
+        assert_eq!(meta.plans[2].label, "AI ($10)");
+        assert_eq!(meta.plans[2].billing_url, "https://one.google.com/ai");
+        assert_eq!(meta.plans[2].source, "default");
+
+        let bare = usage_meta_from_object(&usage_object(r#"{"claude_5h": {}}"#));
+        assert!(bare.plans.is_empty());
+    }
+
+    #[test]
     fn usage_meta_stale_scrape_withholds_reset_phrase() {
         // resetPhrase() returns null when stale — a reset time it can no
         // longer trust is worse than none.
@@ -887,9 +988,7 @@ mod tests {
         assert_eq!(meta, UsageMeta::default());
         assert!(!meta.stale());
         // Wrong-typed metadata degrades instead of erroring.
-        let meta = usage_meta_from_object(&usage_object(
-            r#"{"_source": 7, "_scraped": "yes"}"#,
-        ));
+        let meta = usage_meta_from_object(&usage_object(r#"{"_source": 7, "_scraped": "yes"}"#));
         assert_eq!(meta, UsageMeta::default());
     }
 }
