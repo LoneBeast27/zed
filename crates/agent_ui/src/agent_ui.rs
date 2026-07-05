@@ -36,6 +36,7 @@ mod message_editor;
 mod mode_icons;
 pub mod mode_item;
 mod mode_selector;
+mod model_roles;
 mod model_selector;
 pub mod orchestrator_panel;
 mod model_selector_popover;
