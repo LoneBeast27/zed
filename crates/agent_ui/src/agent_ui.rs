@@ -9,6 +9,7 @@ mod agent_model_selector;
 mod agent_panel;
 mod agent_registry_ui;
 mod agent_router;
+mod billing;
 pub mod bridge;
 mod buffer_codegen;
 mod canonical;
