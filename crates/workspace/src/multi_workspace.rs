@@ -2086,6 +2086,7 @@ impl Render for MultiWorkspace {
         let text_color = cx.theme().colors().text;
 
         let workspace = self.workspace().clone();
+        let activity_bar_item = workspace.read(cx).activity_bar_item();
         let workspace_key_context = workspace.update(cx, |workspace, cx| workspace.key_context(cx));
         let root = workspace.update(cx, |workspace, cx| workspace.actions(h_flex(), window, cx));
 
@@ -2174,6 +2175,7 @@ impl Render for MultiWorkspace {
                         ))
                     },
                 )
+                .children(activity_bar_item)
                 .children(left_sidebar)
                 .child(
                     div()

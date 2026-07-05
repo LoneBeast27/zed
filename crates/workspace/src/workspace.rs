@@ -8537,7 +8537,6 @@ impl Render for Workspace {
                             .flex_1()
                             .w_full()
                             .overflow_hidden()
-                            .children(self.activity_bar_item.clone())
                             .child(
                         div()
                             .id("workspace")
