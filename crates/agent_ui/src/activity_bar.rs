@@ -413,6 +413,11 @@ impl gpui::Render for ActivityBar {
             .h_full()
             .flex_none()
             .bg(colors.background)
+            // Right border so the rail reads as its own extreme-left column
+            // (leftmost in the workspace flex — workspace.rs) rather than
+            // blending into the left dock beside it.
+            .border_r_1()
+            .border_color(colors.border)
             .child(measure)
             .children(squircle)
             .child(
