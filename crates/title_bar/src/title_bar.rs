@@ -4,6 +4,7 @@ mod onboarding_banner;
 mod plan_chip;
 mod title_bar_settings;
 mod update_version;
+mod vendor_accounts;
 
 use crate::application_menu::{ApplicationMenu, show_menus};
 use crate::plan_chip::PlanChip;
@@ -41,6 +42,7 @@ use remote::RemoteConnectionOptions;
 use settings::Settings as _;
 
 use std::sync::Arc;
+use std::rc::Rc;
 use std::time::Duration;
 use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
@@ -160,6 +162,9 @@ pub struct TitleBar {
     banner: Option<Entity<OnboardingBanner>>,
     update_version: Entity<UpdateVersion>,
     screen_share_popover_handle: PopoverMenuHandle<ContextMenu>,
+    vendor_accounts: vendor_accounts::VendorAccounts,
+    vendor_accounts_fetching: bool,
+    vendor_accounts_loaded: bool,
     _diagnostics_subscription: Option<gpui::Subscription>,
 }
 
@@ -177,6 +182,8 @@ impl Render for TitleBar {
                 });
             }
         }
+
+        self.fetch_vendor_accounts(false, cx);
 
         let title_bar_settings = *TitleBarSettings::get_global(cx);
         let button_layout = title_bar_settings.button_layout;
@@ -318,6 +325,7 @@ impl Render for TitleBar {
                 .children(self.render_call_controls(window, cx))
                 .children(self.render_connection_status(status, cx))
                 .child(self.update_version.clone())
+                .child(self.render_vendor_accounts_button(cx))
                 .when(
                     user.is_none()
                         && is_signed_out_or_auth_error
@@ -469,6 +477,9 @@ impl TitleBar {
             banner,
             update_version,
             screen_share_popover_handle: PopoverMenuHandle::default(),
+            vendor_accounts: vendor_accounts::VendorAccounts::default(),
+            vendor_accounts_fetching: false,
+            vendor_accounts_loaded: false,
             _diagnostics_subscription: None,
         };
 
@@ -1153,6 +1164,87 @@ impl TitleBar {
                             .notify_workspace_async_err(workspace, &mut cx);
                     })
                     .detach();
+            })
+    }
+
+    fn fetch_vendor_accounts(&mut self, force: bool, cx: &mut Context<Self>) {
+        if self.vendor_accounts_fetching || (!force && self.vendor_accounts_loaded) {
+            return;
+        }
+
+        self.vendor_accounts_fetching = true;
+        let http = cx.http_client();
+
+        cx.spawn(async move |this, cx| {
+            let accounts = vendor_accounts::fetch(http).await;
+            this.update(cx, |this, cx| {
+                this.vendor_accounts = accounts;
+                this.vendor_accounts_fetching = false;
+                this.vendor_accounts_loaded = true;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn connect_claude_vendor_account(&mut self, cx: &mut Context<Self>) {
+        if self.vendor_accounts_fetching {
+            return;
+        }
+
+        self.vendor_accounts_fetching = true;
+        let http = cx.http_client();
+
+        cx.spawn(async move |this, cx| {
+            vendor_accounts::connect_claude(http.clone()).await;
+            let accounts = vendor_accounts::fetch(http).await;
+            this.update(cx, |this, cx| {
+                this.vendor_accounts = accounts;
+                this.vendor_accounts_fetching = false;
+                this.vendor_accounts_loaded = true;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_vendor_accounts_button(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let accounts = self.vendor_accounts.clone();
+        let titlebar = cx.weak_entity();
+        let on_open_titlebar = titlebar.clone();
+
+        PopoverMenu::<ContextMenu>::new("vendor-accounts")
+            .on_open(Rc::new(move |_, cx| {
+                if let Some(titlebar) = on_open_titlebar.upgrade() {
+                    titlebar.update(cx, |titlebar, cx| {
+                        titlebar.fetch_vendor_accounts(true, cx);
+                    });
+                }
+            }))
+            .trigger(
+                IconButton::new("vendor-accounts", IconName::UserCheck)
+                    .style(ButtonStyle::Subtle)
+                    .tooltip(Tooltip::text("Vendor accounts")),
+            )
+            .menu(move |window, cx| {
+                let accounts = accounts.clone();
+                let titlebar = titlebar.clone();
+
+                Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                    menu.custom_row(move |_, _| {
+                        let titlebar = titlebar.clone();
+                        vendor_accounts::render_popover(&accounts, move |_, _, cx| {
+                            if let Some(titlebar) = titlebar.upgrade() {
+                                titlebar.update(cx, |titlebar, cx| {
+                                    titlebar.connect_claude_vendor_account(cx);
+                                });
+                            }
+                        })
+                        .into_any_element()
+                    })
+                }))
             })
     }
 

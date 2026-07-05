@@ -43,6 +43,7 @@ db.workspace = true
 
 git_ui.workspace = true
 gpui = { workspace = true, features = ["screen-capture"] }
+futures.workspace = true
 icons.workspace = true
 livekit_client.workspace = true
 notifications.workspace = true
@@ -54,6 +55,7 @@ rpc.workspace = true
 semver.workspace = true
 schemars.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 settings.workspace = true
 smallvec.workspace = true
 telemetry.workspace = true
