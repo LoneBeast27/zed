@@ -1,6 +1,7 @@
 mod activity_bar;
 pub mod adversary_panel;
 mod adversary_panel_demo;
+mod accounts_section;
 pub mod agent_accents;
 mod agent_configuration;
 pub mod agent_connection_store;

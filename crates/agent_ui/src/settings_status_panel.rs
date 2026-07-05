@@ -3,13 +3,6 @@
 //! READ-ONLY live status in the web's section-card language (`.setting-card`
 //! anatomy from panels.css) plus "open settings.json" jumps — no form
 //! widgets, no web-style form state.
-//!
-//! Sections: bridge connection (connected / transport / last-frame age from
-//! the [`BridgeStore`]), usage scrape freshness (`_scraped`), the active
-//! brain (from the transcript snapshot — a TranscriptWatch is held only
-//! while the center tab shows the panel), the workspace-modes flag state,
-//! and the theme/fonts in effect. The only timer is a 1s age-label roll,
-//! alive only while the panel is visible (the §5 worked-for ticker class).
 
 use std::time::Duration;
 
@@ -21,6 +14,7 @@ use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
+use crate::accounts_section::{self, ConnectedAccounts};
 use crate::agent_accents::{STATUS_BLOCKED, STATUS_ERROR, STATUS_RUNNING};
 use crate::bridge::{self, BRIDGE_BASE_URL, BridgeStore, Transport, TranscriptWatch, UsageMeta};
 use crate::task_board::motion::{STATE_FADE, StateFades, mix};
@@ -65,12 +59,12 @@ pub fn freshness_line(meta: &UsageMeta) -> String {
 pub struct SettingsStatusPanel {
     focus_handle: FocusHandle,
     store: Entity<BridgeStore>,
-    /// Held only while the center tab shows this panel — keeps the
-    /// `/transcript` poll (the brain's source) alive, the orchestrator-panel
-    /// pattern.
     transcript_watch: Option<TranscriptWatch>,
-    /// 1s repaint for the age labels — `Some` only while visible.
     ticker: Option<Task<()>>,
+    accounts: Option<ConnectedAccounts>,
+    accounts_requested: bool,
+    accounts_connecting: bool,
+    accounts_task: Option<Task<()>>,
     fades: StateFades,
     _store_subscription: Subscription,
 }
@@ -86,9 +80,49 @@ impl SettingsStatusPanel {
             store,
             transcript_watch: None,
             ticker: None,
+            accounts: None,
+            accounts_requested: false,
+            accounts_connecting: false,
+            accounts_task: None,
             fades: StateFades::new(),
             _store_subscription,
         }
+    }
+
+    fn ensure_accounts_loaded(&mut self, cx: &mut Context<Self>) {
+        if self.accounts_requested { return; }
+        self.accounts_requested = true;
+        self.fetch_accounts(cx);
+    }
+
+    fn fetch_accounts(&mut self, cx: &mut Context<Self>) {
+        let http = cx.http_client();
+        self.accounts_task = Some(cx.spawn(async move |this, cx| {
+            let accounts = cx.background_spawn(accounts_section::fetch_accounts(http)).await;
+            this.update(cx, |this, cx| {
+                this.accounts = Some(accounts);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn connect_claude(&mut self, cx: &mut Context<Self>) {
+        if self.accounts_connecting { return; }
+        self.accounts_connecting = true;
+        let http = cx.http_client();
+        self.accounts_task = Some(cx.spawn(async move |this, cx| {
+            let accounts = cx
+                .background_spawn(accounts_section::connect_claude_and_fetch(http))
+                .await;
+            this.update(cx, |this, cx| {
+                this.accounts = Some(accounts);
+                this.accounts_connecting = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     fn set_live(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -286,6 +320,16 @@ impl SettingsStatusPanel {
         self.card("Bridge", rows, None, false, cx)
     }
 
+    fn render_accounts_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let accounts = self.accounts.clone().unwrap_or_else(ConnectedAccounts::unavailable);
+        let button = Button::new("connect-claude-account", "Connect")
+            .style(ButtonStyle::Outlined)
+            .label_size(LabelSize::Small)
+            .disabled(self.accounts_connecting)
+            .on_click(cx.listener(|this, _, _, cx| this.connect_claude(cx)));
+        accounts_section::render_connected_accounts(&accounts, button, cx)
+    }
+
     fn render_scrape_card(&self, cx: &mut Context<Self>) -> AnyElement {
         let meta = self.store.read(cx).usage_meta.clone();
         let stale = meta.stale();
@@ -382,8 +426,10 @@ impl SettingsStatusPanel {
 
 impl Render for SettingsStatusPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_accounts_loaded(cx);
         let cards = vec![
             self.render_bridge_card(cx),
+            self.render_accounts_card(cx),
             self.render_scrape_card(cx),
             self.render_brain_card(cx),
             self.render_modes_card(cx),
