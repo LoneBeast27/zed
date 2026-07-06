@@ -86,6 +86,7 @@ fn top_item_y(index: usize) -> f32 {
 /// click can fall through (the taskboard-miss hypothesis). Pinned by a test so
 /// a future padding/gap tweak can't silently shrink the targets or widen the
 /// dead band.
+#[cfg_attr(not(test), allow(dead_code))] // contract pin — used by layout tests
 const fn item_hit_pitch() -> f32 {
     ITEM_SIZE + ITEM_GAP
 }
@@ -95,6 +96,7 @@ const fn item_hit_pitch() -> f32 {
 /// `on_mouse_down`, not the glyph), so a click anywhere in this band switches
 /// the mode — confirmed by [`ActivityBar::render_mode_item`] sizing the
 /// listener div to `ITEM_SIZE`, not the icon.
+#[cfg_attr(not(test), allow(dead_code))] // contract pin — used by layout tests
 fn top_item_hit_rect(index: usize) -> (f32, f32) {
     (top_item_y(index), ITEM_SIZE)
 }
@@ -180,6 +182,7 @@ impl ActivityBar {
         self.surfaces.as_ref()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // test-facing getter (mode assertions)
     pub fn active_mode_id(&self) -> &str {
         &self.active_mode_id
     }
@@ -445,7 +448,7 @@ impl gpui::Render for ActivityBar {
     }
 }
 
-/// Convenience constructor mirroring `resource_banner::build_gpu_banner` —
+/// Convenience constructor —
 /// builds an `ActivityBar` Entity anchored at `<workspace_root>/.agents/modes/`
 /// unless `modes_dir_override` is supplied (settings escape hatch).
 pub fn build_activity_bar(

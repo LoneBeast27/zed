@@ -12,18 +12,16 @@
 //! internally uses the `notify` crate (already in the workspace dep tree).
 //!
 //! Banner is gated on `agent.canonical_agent_ui && agent.show_resource_banner`
-//! (the AgentPanel call site applies the canonical gate; this module reads
-//! the `show_resource_banner` flag from settings).
+//! — the AgentPanel call site applies BOTH gates before constructing this
+//! entity (`agent_panel::resource_banner_entity`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_settings::AgentSettings;
 use fs::Fs;
 use futures::StreamExt;
-use gpui::{Context, Entity, Hsla, IntoElement, ParentElement, Rgba, Styled, Task, rgb};
-use settings::Settings as _;
+use gpui::{Context, Hsla, IntoElement, ParentElement, Rgba, Styled, Task, rgb};
 use ui::{Color, Label, LabelSize, Tooltip, h_flex, prelude::*};
 
 /// Default polling latency for `fs.watch()` (200ms matches `notify`'s default debounce).
@@ -283,8 +281,6 @@ fn build_tooltip(state: &LockState) -> String {
 /// Entity wrapping the live lock state for one resource. Holds the `fs.watch`
 /// task; dropping the entity drops the task and tears down the watcher.
 pub struct ResourceBanner {
-    locks_dir: PathBuf,
-    resource: String,
     state: LockState,
     _watcher: Option<Task<()>>,
 }
@@ -333,29 +329,9 @@ impl ResourceBanner {
         };
 
         Self {
-            locks_dir,
-            resource,
             state,
             _watcher: watcher_task,
         }
-    }
-
-    pub fn state(&self) -> &LockState {
-        &self.state
-    }
-
-    pub fn locks_dir(&self) -> &Path {
-        &self.locks_dir
-    }
-
-    pub fn resource(&self) -> &str {
-        &self.resource
-    }
-
-    /// Returns true when the user has opted out of the banner via the
-    /// `agent.show_resource_banner` setting.
-    pub fn is_enabled_in_settings(cx: &gpui::App) -> bool {
-        AgentSettings::get_global(cx).show_resource_banner
     }
 }
 
@@ -363,15 +339,6 @@ impl gpui::Render for ResourceBanner {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         render_resource_banner(&self.state, cx)
     }
-}
-
-/// Convenience: build a `ResourceBanner` Entity for the GPU resource.
-pub fn build_gpu_banner(
-    locks_dir: PathBuf,
-    fs: Arc<dyn Fs>,
-    cx: &mut gpui::App,
-) -> Entity<ResourceBanner> {
-    cx.new(|cx| ResourceBanner::new(locks_dir, "gpu", fs, cx))
 }
 
 #[cfg(test)]

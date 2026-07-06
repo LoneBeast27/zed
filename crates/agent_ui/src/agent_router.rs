@@ -7,6 +7,10 @@
 //!
 //! Future slices (B2 user-extensible role hints, B3 LLM classifier) build on
 //! this surface. The settings-side hint shape mirrors §7 of the same doc.
+// B1 is built + fully tested but not yet wired into the composer pre-dispatch
+// path (that's the B2 slice). Dead-code silenced module-wide until the wiring
+// lands so real regressions elsewhere stay visible in the warning stream.
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
