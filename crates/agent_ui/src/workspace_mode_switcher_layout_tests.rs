@@ -140,6 +140,7 @@ fn install_surfaces(
     workspace.update_in(cx, |workspace, window, cx| {
         let weak = cx.weak_entity();
         let surfaces = ModeSurfaces {
+            artifact: cx.new(|cx| crate::artifact_surface::ArtifactSurface::new(cx)),
             briefing: cx.new(|cx| BriefingPanel::new(cx)),
             orchestrator: cx.new(|cx| OrchestratorPanel::new(weak, window, cx)),
             task_board: cx.new(|cx| TaskBoardPanel::new(cx)),
@@ -175,6 +176,7 @@ fn install_surfaces_from_modes_dir(
     workspace.update_in(cx, |workspace, window, cx| {
         let weak = cx.weak_entity();
         let surfaces = ModeSurfaces {
+            artifact: cx.new(|cx| crate::artifact_surface::ArtifactSurface::new(cx)),
             briefing: cx.new(|cx| BriefingPanel::new(cx)),
             orchestrator: cx.new(|cx| OrchestratorPanel::new(weak, window, cx)),
             task_board: cx.new(|cx| TaskBoardPanel::new(cx)),

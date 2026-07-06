@@ -12,6 +12,7 @@ mod agent_registry_ui;
 mod agent_router;
 mod billing;
 mod briefing;
+mod artifact_surface;
 mod briefing_panel;
 pub mod bridge;
 mod buffer_codegen;
@@ -635,6 +636,7 @@ pub fn init(
         // modes: stock Zed stays untouched when the flag is off.
         let panel_workspace = cx.weak_entity();
         let surfaces = mode_item::ModeSurfaces {
+            artifact: cx.new(|cx| artifact_surface::ArtifactSurface::new(cx)),
             briefing: cx.new(|cx| briefing_panel::BriefingPanel::new(cx)),
             orchestrator: cx
                 .new(|cx| orchestrator_panel::OrchestratorPanel::new(panel_workspace, window, cx)),

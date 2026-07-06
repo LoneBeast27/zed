@@ -326,6 +326,7 @@ fn normalize_panel_name(raw: &str) -> String {
 /// (2)): the six mode primaries live in the center pane, not in docks.
 pub(crate) fn resolve_center_surface(raw: &str) -> Option<CenterSurface> {
     match normalize_panel_name(raw).as_str() {
+        "artifact" | "artifactsurface" | "display" => Some(CenterSurface::Artifact),
         "briefing" | "briefingpanel" => Some(CenterSurface::Briefing),
         "orchestrator" | "orchestratorpanel" | "chat" => Some(CenterSurface::Orchestrator),
         "taskboard" | "taskboardpanel" | "board" => Some(CenterSurface::TaskBoard),

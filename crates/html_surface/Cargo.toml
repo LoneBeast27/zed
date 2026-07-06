@@ -1,0 +1,29 @@
+[package]
+name = "html_surface"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/html_surface.rs"
+
+# Blitz native HTML/CSS renderer (Stylo CSS + Taffy layout + Parley text,
+# CPU raster via vello_cpu — zero GPU contention, no webview, no telemetry).
+# Versions are the mutually-compatible alpha.6 set from Blitz's own workspace,
+# proven by the standalone spike (agentic-ide/.tmp/blitz-spike): 28ms/artifact,
+# Firefox-grade CSS fidelity on Windows/MSVC.
+#
+# Deliberately NO gpui dependency: the seam returns raw RGBA + dims so the
+# engine stays headless-testable and swappable (Servo behind the same trait if
+# Blitz's pre-alpha bites).
+[dependencies]
+anyrender = "0.11"
+anyrender_vello_cpu = "0.14"
+blitz-dom = "0.3.0-alpha.6"
+blitz-html = "0.3.0-alpha.6"
+blitz-paint = "0.3.0-alpha.6"
+blitz-traits = "0.3.0-alpha.6"
