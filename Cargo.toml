@@ -101,6 +101,7 @@ members = [
     "crates/gpui_web",
     "crates/gpui_wgpu",
     "crates/gpui_windows",
+    "crates/html_surface",
     "crates/html_to_markdown",
     "crates/http_client",
     "crates/http_client_tls",
@@ -358,6 +359,7 @@ gpui_windows = { path = "crates/gpui_windows", default-features = false }
 gpui_tokio = { path = "crates/gpui_tokio" }
 gpui_util = { path = "crates/gpui_util" }
 html_to_markdown = { path = "crates/html_to_markdown" }
+html_surface = { path = "crates/html_surface" }
 http_client = { path = "crates/http_client" }
 http_client_tls = { path = "crates/http_client_tls" }
 icons = { path = "crates/icons" }
@@ -621,7 +623,11 @@ libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
 linkify = "0.10.0"
 libwebrtc = "0.3.26"
 livekit = { version = "0.7.32", features = ["tokio", "rustls-tls-native-roots"] }
-log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
+# kv features dropped (fork, 2026-07-06): no zed code uses log::kv APIs, and
+# kv_unstable_serde pulls value-bag/serde_fmt whose `From<serde_fmt::Error> for
+# fmt::Error` impl breaks stylo's ToCss derive (E0282/E0283) once html_surface
+# joins the graph. Restore only with a stylo that tolerates it.
+log = { version = "0.4.16" }
 lsp-types = { git = "https://github.com/zed-industries/lsp-types", rev = "f4dfa89a21ca35cd929b70354b1583fabae325f8" }
 mach2 = "0.5"
 markup5ever_rcdom = "0.3.0"
