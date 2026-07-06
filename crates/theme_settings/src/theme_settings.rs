@@ -160,7 +160,13 @@ fn configured_theme(cx: &mut App) -> Arc<Theme> {
                 .unwrap_or_else(|_| themes.get(DEFAULT_DARK_THEME).unwrap())
         }
     };
-    theme_settings.apply_theme_overrides(theme)
+    let theme = theme_settings.apply_theme_overrides(theme);
+    // The fork lock: force the central design palette onto the resolved theme's
+    // chrome so every native panel matches our custom widgets (no un-retheme'd
+    // surface can stand out). Syntax/editor colors stay per-theme.
+    let mut canonical = (*theme).clone();
+    theme::design_bridge::apply_canonical(&mut canonical);
+    Arc::new(canonical)
 }
 
 fn configured_icon_theme(cx: &mut App) -> Arc<theme::IconTheme> {

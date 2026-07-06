@@ -62,6 +62,13 @@ const HOVER_SCALE: f32 = 0.06;
 /// Squircle corner radius — rounded enough to read squircle at 40px,
 /// visibly NOT a full circle (and NEVER a boxed outline).
 const SQUIRCLE_RADIUS: f32 = 13.0;
+/// The capsule's corner radius is the squircle's radius PLUS the uniform inset
+/// ([`CAPSULE_PAD`]) — so the capsule edge is a *concentric* offset of the
+/// active squircle: two arcs sharing one center, the gap identical (4px) on the
+/// straights AND around every corner. User 2026-07-05: the full-`rounded_full`
+/// pill ends read "off" against the squarer inner squircle (uneven corner gap);
+/// equidistant nesting fixes it. Tweak `SQUIRCLE_RADIUS` and the capsule follows.
+const CAPSULE_RADIUS: f32 = SQUIRCLE_RADIUS + CAPSULE_PAD;
 /// The sliding indicator's tonal rgba-white fill (§3).
 const SQUIRCLE_FILL: gpui::Rgba = rgba_hex(0xffffff1a);
 /// Transit stretch: px of extra height per (px/s) of spring velocity, capped.
@@ -317,7 +324,7 @@ impl ActivityBar {
             .flex_none()
             .p(px(CAPSULE_PAD))
             .gap(px(ITEM_GAP))
-            .rounded_full()
+            .rounded(px(CAPSULE_RADIUS))
             .bg(SURFACE_1)
             .border_1()
             .border_color(border)

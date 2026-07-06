@@ -9,6 +9,12 @@
 //! A theme is a collection of colors used to build a consistent appearance for UI components across the application.
 
 mod default_colors;
+// The fork's central design system — the single source of truth for every
+// themeable value. Token consts are self-describing (the module doc carries the
+// system-level context), so `missing_docs` is relaxed for its interior.
+#[allow(missing_docs)]
+pub mod design;
+pub mod design_bridge;
 mod fallback_themes;
 mod font_family_cache;
 mod icon_theme;
