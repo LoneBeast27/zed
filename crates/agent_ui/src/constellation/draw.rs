@@ -19,8 +19,7 @@ use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
-use crate::agent_accents::{ACCENT, STATUS_ERROR, STATUS_RUNNING, rgba_hex};
-use crate::task_board::style::HAIRLINE_HI;
+use crate::agent_accents::{ACCENT, STATUS_ERROR, rgba_hex};
 
 use super::advance::{RING_MS, exhale_scale, gulp_scale};
 use super::draw_node::node_el;
@@ -88,7 +87,12 @@ pub(super) fn conv_block(
             root_r + 3.,
             node.mass_cur * node.out_scale / 2. + 4.,
         );
-        cmds.push(PaintCmd::Seg(a, b, 1.5, star_edge_color(&node.status).opacity(alpha)));
+        cmds.push(PaintCmd::Seg(
+            a,
+            b,
+            1.5,
+            star_edge_color(&node.agent, &node.status).opacity(alpha),
+        ));
     }
 
     // Boost-channel edges (Kiali grammar): glow + line + particles, terminal
@@ -244,12 +248,14 @@ fn circle_path(
     builder.build().ok()
 }
 
-/// `.gedge` tint: running 45%, failed/killed 30%, else the high hairline.
-fn star_edge_color(status: &str) -> Hsla {
+/// `.gedge` tint (3-provider ruling 2026-07-08): the edge carries its
+/// node's VENDOR hue — bright while running (45%), quiet when settled
+/// (20%) — so provider clusters read at a glance; failure stays red.
+fn star_edge_color(agent: &str, status: &str) -> Hsla {
     match status {
-        "running" => Hsla::from(STATUS_RUNNING).opacity(0.45),
         "failed" | "killed" => Hsla::from(STATUS_ERROR).opacity(0.30),
-        _ => HAIRLINE_HI.into(),
+        "running" => crate::agent_accents::accent_for_agent(agent).opacity(0.45),
+        _ => crate::agent_accents::accent_for_agent(agent).opacity(0.20),
     }
 }
 

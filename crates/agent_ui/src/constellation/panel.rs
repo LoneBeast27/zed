@@ -12,8 +12,9 @@
 use std::time::Instant;
 
 use gpui::{
-    Action, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, MouseButton, Pixels, Point, SharedString, Subscription, Task, Window, actions,
+    Action, AnimationExt as _, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, MouseButton, Pixels, Point, SharedString, Subscription, Task, Window,
+    actions,
 };
 use ui::prelude::*;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -66,6 +67,11 @@ pub struct ConstellationPanel {
     demo_drawer_pushed_s: Option<u64>,
     /// Stamped every render — the feed poll's visibility gate.
     last_render_at: Instant,
+    /// Empty→populated transition (backlog: the blank-to-graph flip was
+    /// abrupt): bumped when the first node arrives; the graph fades in
+    /// 300ms instead of snapping.
+    was_populated: bool,
+    populated_fade: crate::task_board::motion::StateFade,
     position: DockPosition,
     scroll: gpui::ScrollHandle,
     _feed: Option<Task<()>>,
@@ -94,6 +100,8 @@ impl ConstellationPanel {
             demo_drawer_run: None,
             demo_drawer_pushed_s: None,
             last_render_at: Instant::now(),
+            was_populated: false,
+            populated_fade: crate::task_board::motion::StateFade::default(),
             position: DockPosition::Right,
             scroll: gpui::ScrollHandle::new(),
             _feed: feed,
@@ -233,9 +241,48 @@ impl ConstellationPanel {
         cx.notify();
     }
 
-    /// The shared `.panel-head` twin: title · subtitle · arrange button.
+    /// The shared `.panel-head` twin: title · live stats · provider legend ·
+    /// arrange button. The stats + legend land with the first node (an empty
+    /// panel keeps the plain subtitle).
     fn render_header(&self, has_nodes: bool, cx: &mut Context<Self>) -> Div {
         let colors = cx.theme().colors();
+        // Live density stats (backlog item: "N nodes · M channels · ctx") —
+        // read off the already-folded sim, no extra derivation.
+        let node_count: usize = self.sim.convs.iter().map(|conv| conv.nodes.len()).sum();
+        let channel_count = self.sim.channels.iter_sorted().len();
+        let ctx_tokens: f64 = self
+            .sim
+            .convs
+            .iter()
+            .filter_map(|conv| conv.root_mass.as_ref())
+            .map(|mass| mass.tokens)
+            .sum();
+        let stats = if has_nodes {
+            let mut s = format!("{node_count} node{}", if node_count == 1 { "" } else { "s" });
+            if channel_count > 0 {
+                s.push_str(&format!(" · {channel_count} channel{}", if channel_count == 1 { "" } else { "s" }));
+            }
+            if ctx_tokens > 0. {
+                s.push_str(&format!(" · {:.1}K ctx", ctx_tokens / 1000.));
+            }
+            SharedString::from(s)
+        } else {
+            "agent relationships and message flow".into()
+        };
+        // The 3-provider legend (user ruling 2026-07-08: hue = WHO) — the
+        // color coding must never need prior knowledge to read.
+        let legend_dot = |accent: gpui::Rgba, label: &'static str| {
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(div().flex_none().size(px(6.)).rounded_full().bg(accent))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(colors.text_placeholder)
+                        .child(label),
+                )
+        };
         h_flex()
             .flex_none()
             .items_baseline()
@@ -256,18 +303,27 @@ impl ConstellationPanel {
                 div()
                     .text_size(px(13.))
                     .text_color(colors.text_placeholder)
-                    .child("agent relationships and message flow"),
+                    .child(stats),
             )
             .child(div().flex_1())
             .when(has_nodes, |header| {
-                header.child(
-                    ui::IconButton::new("constellation-arrange", IconName::GitGraph)
-                        .icon_size(ui::IconSize::Small)
-                        .tooltip(ui::Tooltip::text(
-                            "Auto-arrange the constellation (drags re-pin)",
-                        ))
-                        .on_click(cx.listener(|this, _, _, cx| this.arrange_clicked(cx))),
-                )
+                header
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(legend_dot(crate::agent_accents::ACCENT_CLAUDE, "claude"))
+                            .child(legend_dot(crate::agent_accents::ACCENT_CODEX, "codex"))
+                            .child(legend_dot(crate::agent_accents::ACCENT_AGY, "google")),
+                    )
+                    .child(
+                        ui::IconButton::new("constellation-arrange", IconName::GitGraph)
+                            .icon_size(ui::IconSize::Small)
+                            .tooltip(ui::Tooltip::text(
+                                "Auto-arrange the constellation (drags re-pin)",
+                            ))
+                            .on_click(cx.listener(|this, _, _, cx| this.arrange_clicked(cx))),
+                    )
             })
     }
 }
@@ -327,6 +383,14 @@ impl Render for ConstellationPanel {
         let weak = cx.weak_entity();
         let hovered = self.hovered.clone();
         let has_nodes = self.sim.convs.iter().any(|conv| !conv.nodes.is_empty());
+        if has_nodes != self.was_populated {
+            self.was_populated = has_nodes;
+            if has_nodes {
+                // First node arrived — ease the graph in (300ms) instead of
+                // the old instant empty→populated snap.
+                self.populated_fade.bump();
+            }
+        }
 
         let body: gpui::AnyElement = if !has_nodes {
             empty_state(
@@ -359,14 +423,28 @@ impl Render for ConstellationPanel {
                     )
                 })
                 .collect();
-            div()
+            let graph = div()
                 .id("constellation-scroll")
                 .size_full()
                 .overflow_y_scroll()
                 .track_scroll(&self.scroll)
                 .pt(px(8.))
-                .children(blocks)
-                .into_any_element()
+                .children(blocks);
+            if self.populated_fade.fresh() {
+                graph
+                    .with_animation(
+                        gpui::ElementId::NamedInteger(
+                            "constellation-populate".into(),
+                            self.populated_fade.generation() as u64,
+                        ),
+                        gpui::Animation::new(std::time::Duration::from_millis(300))
+                            .with_easing(crate::task_board::motion::EFFECTS.easing()),
+                        |graph, t| graph.opacity(t),
+                    )
+                    .into_any_element()
+            } else {
+                graph.into_any_element()
+            }
         };
 
         // Frame pump: a populated constellation breathes (drift) — pump

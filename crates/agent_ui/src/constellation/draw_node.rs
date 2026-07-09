@@ -12,7 +12,7 @@ use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
-use crate::agent_accents::color_for_status;
+use crate::agent_accents::constellation_node_color;
 use crate::task_board::style::{HAIRLINE_HI, SURFACE_2, agent_chip, status_phrase};
 
 use super::panel::ConstellationPanel;
@@ -83,7 +83,7 @@ pub(super) fn node_el(
                 })
                 .ok();
         })
-        .child(checkpoint_dot(&node.status, dot_size, now))
+        .child(checkpoint_dot(&node.agent, &node.status, dot_size, now))
         .child(
             div()
                 .max_w(px(70.))
@@ -106,8 +106,11 @@ pub(super) fn node_el(
 /// The Atlas checkpoint-dot grammar (board.css `.gdot`, mass-sized):
 /// hollow = pending · sweeping rim arc = running · solid = done · stilled
 /// hard ring = failed. Bloom = real BoxShadow (§1 native upgrade).
-fn checkpoint_dot(status: &str, size: f32, now: f32) -> AnyElement {
-    let color = color_for_status(status);
+/// HUE carries the vendor (3-provider ruling 2026-07-08); the SHAPE above
+/// carries lifecycle; failed/killed stay error-red via
+/// [`constellation_node_color`].
+fn checkpoint_dot(agent: &str, status: &str, size: f32, now: f32) -> AnyElement {
+    let color = constellation_node_color(agent, status);
     let mut shadows: Vec<BoxShadow> = Vec::with_capacity(2);
     if matches!(status, "running" | "completed" | "failed" | "killed") {
         shadows.push(BoxShadow {
@@ -140,7 +143,9 @@ fn checkpoint_dot(status: &str, size: f32, now: f32) -> AnyElement {
             .border_2()
             .border_color(color.opacity(0.30))
             .child(rim_arc(color, now)),
-        _ => dot.border_2().border_color(HAIRLINE_HI),
+        // Pending: hollow, but the ring already carries the vendor hue at
+        // half strength — identity is visible from the moment of spawn.
+        _ => dot.border_2().border_color(color.opacity(0.5)),
     }
     .into_any_element()
 }

@@ -206,6 +206,7 @@ pub fn graph_view(
     docs: &[&VaultDoc],
     scroll: &gpui::ScrollHandle,
     hovered: Option<&str>,
+    edge_mode: super::panel::EdgeMode,
     panel: WeakEntity<VaultBrowserPanel>,
     cx: &App,
 ) -> gpui::AnyElement {
@@ -219,7 +220,17 @@ pub fn graph_view(
         .into_any_element();
     }
 
-    let edges = resolve_edges(docs);
+    // Edge-kind declutter (galaxy backlog 2026-07-08): Links isolates the
+    // semantic wiki-links, Chain isolates the supersedes corrections; the
+    // structural index spine only paints under All.
+    let mut edges = resolve_edges(docs);
+    match edge_mode {
+        super::panel::EdgeMode::All => {}
+        super::panel::EdgeMode::Links => edges.retain(|edge| edge.kind == EdgeKind::Link),
+        super::panel::EdgeMode::Supersedes => {
+            edges.retain(|edge| edge.kind == EdgeKind::Supersedes)
+        }
+    }
     let degraded = docs.len() > super::field::FIELD_MAX_NODES;
     let truncated = docs.iter().filter(|d| d.link_scan_truncated).count();
 

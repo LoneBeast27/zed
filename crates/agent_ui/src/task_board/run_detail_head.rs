@@ -152,10 +152,186 @@ impl RunDrawer {
         // Raw lowercase status — the web drawer's vocabulary
         // (drawer.js:37-38), distinct from the inbox's `statusLabel`.
         .child(raw_status_pill("drawer-pill", &detail.status, cx))
+        // Run actions (dogfood 2026-07-08): reassign for any bridge run;
+        // steer + rollback join only on a LIVE codex run (the bridge's
+        // thread-control relays refuse anything else, honestly).
+        .children(self.render_run_actions(&detail, cx))
         // Abort affordance — only while the run is live (POSTs
         // /run/<id>/abort; the bridge kills the tracked child process).
         .children(self.render_abort(&detail.status, cx))
         .child(self.render_close(cx))
+    }
+
+    /// The reassign/steer/rollback head buttons. 30×30 icon controls in the
+    /// abort/close grammar.
+    fn render_run_actions(
+        &self,
+        detail: &RunDetail,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        if self.local {
+            return Vec::new();
+        }
+        let colors = cx.theme().colors();
+        let button = |id: &'static str, icon: IconName, tip: &'static str| {
+            div()
+                .id(id)
+                .flex_none()
+                .size(px(30.))
+                .rounded(px(8.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(colors.element_hover))
+                .tooltip(ui::Tooltip::text(tip))
+                .child(
+                    Icon::new(icon)
+                        .size(IconSize::Custom(rems_from_px(17.)))
+                        .color(Color::Custom(colors.text_placeholder)),
+                )
+        };
+        let mut actions: Vec<AnyElement> = Vec::new();
+        actions.push(
+            button("drawer-reassign", IconName::ArrowRightLeft, "Reassign to another vendor")
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_reassign(cx)))
+                .into_any_element(),
+        );
+        let live_codex = detail.agent == "codex" && detail.status == "running";
+        if live_codex {
+            actions.push(
+                button("drawer-steer", IconName::Pencil, "Steer mid-turn")
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_steer(window, cx)))
+                    .into_any_element(),
+            );
+            actions.push(
+                button("drawer-rollback", IconName::Undo, "Undo last turn")
+                    .on_click(cx.listener(|this, _, _, cx| this.rollback_turn(cx)))
+                    .into_any_element(),
+            );
+        }
+        actions
+    }
+
+    /// The reassign vendor strip + steer input + action-error line — rows
+    /// under the head, present only while their affordance is open.
+    pub(super) fn render_action_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        // Copy the Hsla tokens out so the chip builder can take `cx`
+        // mutably (the render_foot idiom — the theme borrow must not
+        // outlive this).
+        let (border, text_muted, hover_bg, placeholder, element_bg) = {
+            let colors = cx.theme().colors();
+            (
+                colors.border,
+                colors.text_muted,
+                colors.element_hover,
+                colors.text_placeholder,
+                colors.element_background,
+            )
+        };
+        let mut rows: Vec<AnyElement> = Vec::new();
+        if self.reassign_open || self.reassigning {
+            let current = self
+                .detail
+                .as_ref()
+                .map(|detail| detail.agent.clone())
+                .unwrap_or_default();
+            let chip = |agent: &'static str, cx: &mut Context<Self>| {
+                h_flex()
+                    .id(ElementId::Name(format!("reassign-{agent}").into()))
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(9.))
+                    .py(px(4.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(border)
+                    .text_size(px(12.))
+                    .text_color(text_muted)
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg))
+                    .on_click(cx.listener(move |this, _, _, cx| this.reassign_to(agent, cx)))
+                    .child(div().flex_none().size(px(6.)).rounded_full().bg(
+                        crate::agent_accents::accent_for_agent(agent),
+                    ))
+                    .child(agent)
+            };
+            let mut strip = h_flex()
+                .flex_none()
+                .items_center()
+                .gap(px(8.))
+                .px(px(22.))
+                .pt(px(10.))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(placeholder)
+                        .child(if self.reassigning {
+                            "reassigning…"
+                        } else {
+                            "reassign to"
+                        }),
+                );
+            if !self.reassigning {
+                for agent in ["claude", "codex", "agy", "gemini"] {
+                    if agent != current {
+                        strip = strip.child(chip(agent, cx));
+                    }
+                }
+            }
+            rows.push(strip.into_any_element());
+        }
+        if let Some(editor) = self.steer_editor.clone() {
+            rows.push(
+                h_flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(22.))
+                    .pt(px(10.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .px(px(10.))
+                            .py(px(5.))
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(border)
+                            .bg(element_bg)
+                            .child(editor),
+                    )
+                    .child(
+                        div()
+                            .id("steer-send")
+                            .px(px(10.))
+                            .py(px(5.))
+                            .rounded(px(8.))
+                            .bg(crate::agent_accents::ACCENT_FILL)
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(gpui::black())
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.send_steer(window, cx)
+                            }))
+                            .child("Steer"),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if let Some(error) = &self.action_error {
+            rows.push(
+                div()
+                    .flex_none()
+                    .px(px(22.))
+                    .pt(px(8.))
+                    .text_size(px(12.))
+                    .text_color(crate::agent_accents::STATUS_ERROR)
+                    .child(error.clone())
+                    .into_any_element(),
+            );
+        }
+        rows
     }
 
     /// The abort button: a 30×30 Stop-glyph control shown only while the run

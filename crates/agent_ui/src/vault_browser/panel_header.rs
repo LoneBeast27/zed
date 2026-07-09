@@ -8,15 +8,17 @@ use gpui::{Context, ElementId, FontWeight, Hsla, SharedString};
 use ui::prelude::*;
 
 use super::index::VaultRoot;
-use super::panel::{VaultBrowserPanel, VaultView};
+use super::panel::{EdgeMode, SortMode, VaultBrowserPanel, VaultView};
 use super::style::SURFACE_1;
 
-/// A segment target — a root switch or a view switch (so `segmented` handles
-/// both controls).
+/// A segment target — root / view / list-sort / graph-edge-filter (so one
+/// `segmented` builder handles every header control).
 #[derive(Clone, Copy)]
 enum RootOrView {
     Root(VaultRoot),
     View(VaultView),
+    Sort(SortMode),
+    Edges(EdgeMode),
 }
 
 impl VaultBrowserPanel {
@@ -68,14 +70,63 @@ impl VaultBrowserPanel {
                     ),
             )
             .child(
+                // WRAPPING row (sweep find 2026-07-08: three segmented
+                // controls overflowed the dock width and clipped the Graph
+                // segment to a sliver) — at narrow dock widths the trailing
+                // controls flow onto the next line instead of vanishing.
                 h_flex()
                     .items_center()
+                    .flex_wrap()
                     .gap(px(8.))
                     .child(self.render_root_switcher(cx))
-                    .child(div().flex_1())
+                    // Contextual control (galaxy backlog 2026-07-08): the
+                    // LIST view sorts, the GRAPH view filters edges.
+                    .child(match self.view() {
+                        VaultView::List => self.render_sort_toggle(cx),
+                        VaultView::Graph => self.render_edges_toggle(cx),
+                    })
                     .child(self.render_view_toggle(cx)),
             )
             .child(self.render_filter(cx))
+    }
+
+    /// LIST sort toggle: grouped OKF kinds ⇄ one recency stream.
+    fn render_sort_toggle(&self, cx: &Context<Self>) -> gpui::Div {
+        let sort = self.sort();
+        self.segmented(
+            "sort",
+            &[
+                ("Kind", sort == SortMode::Kind, RootOrView::Sort(SortMode::Kind)),
+                (
+                    "Recent",
+                    sort == SortMode::Updated,
+                    RootOrView::Sort(SortMode::Updated),
+                ),
+            ],
+            cx,
+        )
+    }
+
+    /// GRAPH edge filter: everything ⇄ semantic links only ⇄ supersedes only.
+    fn render_edges_toggle(&self, cx: &Context<Self>) -> gpui::Div {
+        let edges = self.edges();
+        self.segmented(
+            "edges",
+            &[
+                ("All", edges == EdgeMode::All, RootOrView::Edges(EdgeMode::All)),
+                (
+                    "Links",
+                    edges == EdgeMode::Links,
+                    RootOrView::Edges(EdgeMode::Links),
+                ),
+                (
+                    "Chain",
+                    edges == EdgeMode::Supersedes,
+                    RootOrView::Edges(EdgeMode::Supersedes),
+                ),
+            ],
+            cx,
+        )
     }
 
     /// The two-root switcher segmented control (Vault ⇄ Staging).
@@ -136,6 +187,8 @@ impl VaultBrowserPanel {
                 .on_click(cx.listener(move |this, _, _, cx| match target {
                     RootOrView::Root(r) => this.set_root(r, cx),
                     RootOrView::View(v) => this.set_view(v, cx),
+                    RootOrView::Sort(s) => this.set_sort(s, cx),
+                    RootOrView::Edges(e) => this.set_edges(e, cx),
                 }))
                 .child(label);
             row = row.child(seg);

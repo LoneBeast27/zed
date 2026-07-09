@@ -18,11 +18,13 @@ use super::panel::VaultBrowserPanel;
 use super::promote::PromoteState;
 use super::style::{redactions_badge, type_chip, updated_age, vendor_chip};
 
-/// Fixed doc-row height (title + meta sub-line, matching the inbox 72px feel
-/// but tighter for a dense file list).
+/// Fixed row height for EVERY row — headers included. `uniform_list`
+/// measures one item and gives all items that slot, so mixed heights
+/// (the old 30px header / 56px doc split) silently overlap: every doc
+/// overflowed its short slot and painted over the next section (dogfood
+/// 2026-07-07, the vault dock's overdrawn headers). Headers bottom-anchor
+/// their label inside the uniform slot, which reads as section spacing.
 const ROW_HEIGHT: f32 = 56.;
-/// Fixed section-header row height.
-const HEADER_HEIGHT: f32 = 30.;
 
 /// A flattened list row: a group header or a document.
 #[derive(Clone)]
@@ -38,6 +40,7 @@ pub fn list_view(
     docs: &[&VaultDoc],
     root: VaultRoot,
     filter: &str,
+    sort: super::panel::SortMode,
     promote: &PromoteState,
     reveal: Option<&str>,
     panel: WeakEntity<VaultBrowserPanel>,
@@ -59,16 +62,33 @@ pub fn list_view(
         return super::style::empty_state(IconName::Filter, headline, copy, cx).into_any_element();
     }
 
-    // Flatten grouped docs into header + doc rows (stable section order).
-    let groups = group_by_kind(&filtered);
-    let mut rows: Vec<Row> = Vec::with_capacity(filtered.len() + groups.len());
-    for (kind, group_docs) in &groups {
-        rows.push(Row::Header {
-            label: kind.group_label().into(),
-            count: group_docs.len(),
-        });
-        for doc in group_docs {
-            rows.push(Row::Doc(Arc::new((*doc).clone())));
+    // Flatten into header + doc rows. Kind = the stable OKF section order;
+    // Recent (galaxy backlog 2026-07-08) = one stream, newest ISO first
+    // (undated docs sink to the tail).
+    let mut rows: Vec<Row> = Vec::with_capacity(filtered.len() + 4);
+    match sort {
+        super::panel::SortMode::Kind => {
+            let groups = group_by_kind(&filtered);
+            for (kind, group_docs) in &groups {
+                rows.push(Row::Header {
+                    label: kind.group_label().into(),
+                    count: group_docs.len(),
+                });
+                for doc in group_docs {
+                    rows.push(Row::Doc(Arc::new((*doc).clone())));
+                }
+            }
+        }
+        super::panel::SortMode::Updated => {
+            let mut recent = filtered.clone();
+            recent.sort_by(|a, b| b.updated.cmp(&a.updated).then(a.title.cmp(&b.title)));
+            rows.push(Row::Header {
+                label: "Recent".into(),
+                count: recent.len(),
+            });
+            for doc in recent {
+                rows.push(Row::Doc(Arc::new(doc.clone())));
+            }
         }
     }
     let rows = Arc::new(rows);
@@ -103,11 +123,11 @@ pub fn list_view(
 fn header_row(label: SharedString, count: usize, cx: &mut App) -> Div {
     let colors = cx.theme().colors();
     h_flex()
-        .h(px(HEADER_HEIGHT))
+        .h(px(ROW_HEIGHT))
         .w_full()
-        .items_center()
+        .items_end()
         .gap(px(6.))
-        .pt(px(10.))
+        .pb(px(8.))
         .child(
             div()
                 .text_size(px(11.))

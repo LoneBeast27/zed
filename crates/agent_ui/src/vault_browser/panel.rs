@@ -47,6 +47,24 @@ pub enum VaultView {
     Graph,
 }
 
+/// LIST sort (galaxy backlog 2026-07-08): grouped-by-kind (the OKF section
+/// order) or one flat recency stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    Kind,
+    Updated,
+}
+
+/// GRAPH edge filter (galaxy backlog 2026-07-08): declutter by isolating
+/// semantic wiki-links or the supersedes chains; Structural spine only ever
+/// paints under All.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeMode {
+    All,
+    Links,
+    Supersedes,
+}
+
 pub struct VaultBrowserPanel {
     focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
@@ -59,6 +77,8 @@ pub struct VaultBrowserPanel {
     built_at: Option<Instant>,
     root: VaultRoot,
     view: VaultView,
+    sort: SortMode,
+    edges: EdgeMode,
     filter_editor: Entity<Editor>,
     /// Per-bundle promote UI state.
     promote: PromoteState,
@@ -118,6 +138,8 @@ impl VaultBrowserPanel {
             built_at: None,
             root: VaultRoot::Vault,
             view: VaultView::List,
+            sort: SortMode::Kind,
+            edges: EdgeMode::All,
             filter_editor,
             promote: PromoteState::default(),
             graph_scroll: gpui::ScrollHandle::new(),
@@ -188,6 +210,28 @@ impl VaultBrowserPanel {
             self.view = view;
             cx.notify();
         }
+    }
+
+    pub(super) fn set_sort(&mut self, sort: SortMode, cx: &mut Context<Self>) {
+        if self.sort != sort {
+            self.sort = sort;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_edges(&mut self, edges: EdgeMode, cx: &mut Context<Self>) {
+        if self.edges != edges {
+            self.edges = edges;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn sort(&self) -> SortMode {
+        self.sort
+    }
+
+    pub(super) fn edges(&self) -> EdgeMode {
+        self.edges
     }
 
     // ── header accessors (read by panel_header.rs, the split-out chrome) ──
@@ -501,6 +545,7 @@ impl VaultBrowserPanel {
                     &docs,
                     self.root,
                     filter,
+                    self.sort,
                     &self.promote,
                     reveal.as_deref(),
                     weak,
@@ -531,6 +576,7 @@ impl VaultBrowserPanel {
                     &docs,
                     &self.graph_scroll,
                     hovered.as_deref(),
+                    self.edges,
                     weak,
                     cx,
                 );

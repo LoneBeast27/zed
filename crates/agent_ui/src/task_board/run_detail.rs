@@ -153,15 +153,33 @@ pub struct RunDrawer {
     /// True once an abort has been POSTed — the head's abort button reflects
     /// it (disabled "Aborting…") until the poll lands the killed status.
     pub(super) aborting: bool,
+    /// Reassign affordance (dogfood 2026-07-08): vendor strip open + POST
+    /// in flight. On success the drawer REBINDS to the successor run.
+    pub(super) reassign_open: bool,
+    pub(super) reassigning: bool,
+    /// The steer input row (codex mid-turn control) — present while open.
+    pub(super) steer_editor: Option<Entity<editor::Editor>>,
+    /// One-line error from the last reassign/steer/rollback POST — honest
+    /// 404/409s from the bridge land here, never silently swallowed.
+    pub(super) action_error: Option<SharedString>,
     _poll: Task<()>,
     _abort: Option<Task<()>>,
+    _action: Option<Task<()>>,
 }
 
 impl RunDrawer {
     pub fn new(run_id: SharedString, cx: &mut Context<Self>) -> Self {
+        let poll = Self::spawn_poll(run_id.clone(), cx);
+        Self::empty(run_id, poll, false, cx)
+    }
+
+    /// The bounded-first-fetch tail poll for one run id. Split out of
+    /// [`Self::new`] so a reassign can REBIND the drawer to the successor
+    /// run (dogfood 2026-07-08) by respawning the poll.
+    fn spawn_poll(run_id: SharedString, cx: &mut Context<Self>) -> Task<()> {
         let http_client: Arc<dyn HttpClient> = cx.http_client();
-        let poll_run_id = run_id.clone();
-        let poll = cx.spawn(async move |this, cx| {
+        let poll_run_id = run_id;
+        cx.spawn(async move |this, cx| {
             let run_id = poll_run_id;
             let mut failures: u32 = 0;
             loop {
@@ -227,8 +245,7 @@ impl RunDrawer {
                 let delay = (LOG_POLL * (failures + 1)).min(LOG_POLL_ERROR_CAP);
                 cx.background_executor().timer(delay).await;
             }
-        });
-        Self::empty(run_id, poll, false, cx)
+        })
     }
 
     /// A drawer fed from a LOCAL store (the constellation's staged demo —
@@ -269,9 +286,155 @@ impl RunDrawer {
             needs_focus: true,
             closing: false,
             aborting: false,
+            reassign_open: false,
+            reassigning: false,
+            steer_editor: None,
+            action_error: None,
             _poll: poll,
             _abort: None,
+            _action: None,
         }
+    }
+
+    /// Rebind the drawer to a successor run (post-reassign): reset every
+    /// per-run view state and respawn the tail poll on the new id.
+    fn rebind(&mut self, new_run_id: SharedString, cx: &mut Context<Self>) {
+        self.run_id = new_run_id.clone();
+        self.detail = None;
+        self.load_failed = None;
+        self.task_md = None;
+        self.result_md = None;
+        self.log_rows.clear();
+        self.aborting = false;
+        self._poll = Self::spawn_poll(new_run_id, cx);
+        cx.notify();
+    }
+
+    pub(super) fn toggle_reassign(&mut self, cx: &mut Context<Self>) {
+        self.reassign_open = !self.reassign_open;
+        cx.notify();
+    }
+
+    /// POST `/run/<id>/reassign {"agent"}` — the bridge kills the live run
+    /// if needed and respawns the SAME task + identity + envelope on the
+    /// chosen vendor; the drawer then follows the successor run.
+    pub(super) fn reassign_to(&mut self, agent: &'static str, cx: &mut Context<Self>) {
+        if self.local || self.reassigning {
+            return;
+        }
+        self.reassigning = true;
+        self.reassign_open = false;
+        self.action_error = None;
+        cx.notify();
+        let run_id = self.run_id.clone();
+        let http_client: Arc<dyn HttpClient> = cx.http_client();
+        self._action = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let url = format!("{BRIDGE_BASE_URL}/run/{run_id}/reassign");
+                    let body = serde_json::json!({ "agent": agent }).to_string();
+                    let raw = post_json(http_client.as_ref(), &url, body).await?;
+                    anyhow::Ok(serde_json::from_str::<serde_json::Value>(&raw)?)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.reassigning = false;
+                match result {
+                    Ok(value) => match value.get("run_id").and_then(|v| v.as_str()) {
+                        Some(new_id) => this.rebind(new_id.to_string().into(), cx),
+                        None => {
+                            this.action_error =
+                                Some("reassign: bridge returned no run_id".into());
+                        }
+                    },
+                    Err(error) => {
+                        this.action_error =
+                            Some(format!("reassign failed: {error}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Toggle the steer input row (codex mid-turn steer — the bridge relays
+    /// `turn/steer` onto the live thread; anything else 404/409s honestly).
+    pub(super) fn toggle_steer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.steer_editor.is_some() {
+            self.steer_editor = None;
+        } else {
+            let editor = cx.new(|cx| {
+                let mut editor = editor::Editor::single_line(window, cx);
+                editor.set_placeholder_text("Steer this run mid-turn…", window, cx);
+                editor
+            });
+            window.focus(&editor.read(cx).focus_handle(cx), cx);
+            self.steer_editor = Some(editor);
+        }
+        cx.notify();
+    }
+
+    /// POST the steer text and close the row. Errors land on the honest
+    /// action line (e.g. a non-codex or settled run refuses server-side).
+    pub(super) fn send_steer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.steer_editor.as_ref() else {
+            return;
+        };
+        let text = editor.read(cx).text(cx).trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let _ = window;
+        self.steer_editor = None;
+        self.action_error = None;
+        cx.notify();
+        let run_id = self.run_id.clone();
+        let http_client: Arc<dyn HttpClient> = cx.http_client();
+        self._action = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let url = format!("{BRIDGE_BASE_URL}/run/{run_id}/steer");
+                    let body = serde_json::json!({ "text": text }).to_string();
+                    post_json(http_client.as_ref(), &url, body).await
+                })
+                .await;
+            if let Err(error) = result {
+                this.update(cx, |this, cx| {
+                    this.action_error = Some(format!("steer failed: {error}").into());
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
+    }
+
+    /// POST `/run/<id>/rollback {"num_turns": 1}` — undo the last turn on a
+    /// live codex thread. Server-side guards produce the honest error line.
+    pub(super) fn rollback_turn(&mut self, cx: &mut Context<Self>) {
+        if self.local {
+            return;
+        }
+        self.action_error = None;
+        cx.notify();
+        let run_id = self.run_id.clone();
+        let http_client: Arc<dyn HttpClient> = cx.http_client();
+        self._action = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let url = format!("{BRIDGE_BASE_URL}/run/{run_id}/rollback");
+                    post_json(http_client.as_ref(), &url, "{\"num_turns\": 1}".to_string())
+                        .await
+                })
+                .await;
+            if let Err(error) = result {
+                this.update(cx, |this, cx| {
+                    this.action_error = Some(format!("rollback failed: {error}").into());
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
     }
 
     /// Abort this run (the drawer abort affordance): POST `/run/<id>/abort` on
@@ -430,6 +593,7 @@ impl Render for RunDrawer {
                 .size_full()
                 .min_h_0()
                 .child(self.render_head(cx))
+                .children(self.render_action_rows(cx))
                 .children(self.render_worked(cx))
                 .child(self.render_tabs(cx))
                 .child(self.render_body(window, cx))
@@ -487,6 +651,7 @@ impl Render for RunDrawer {
             .border_color(HAIRLINE_HI)
             .occlude()
             .child(self.render_head(cx))
+            .children(self.render_action_rows(cx))
             .children(self.render_worked(cx))
             .child(self.render_tabs(cx))
             .child(self.render_body(window, cx))
