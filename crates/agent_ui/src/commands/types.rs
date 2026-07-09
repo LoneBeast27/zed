@@ -165,6 +165,9 @@ pub enum OrchTarget {
     OpenImport,
     /// `/help [vendor]` → render the transient help buffer from the registry.
     Help,
+    /// `/compact` → `POST /conv/<id>/compact` (forced heartbeat splice,
+    /// dogfood 2026-07-08); the result rides back as a transcript note.
+    Compact,
 }
 
 /// One row of the command surface.

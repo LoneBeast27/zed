@@ -635,11 +635,24 @@ pub fn init(
         // open/activate them idempotently. Built only alongside workspace
         // modes: stock Zed stays untouched when the flag is off.
         let panel_workspace = cx.weak_entity();
+        // The dynamic-island home (user rulings 2026-07-07/08): information
+        // lives ON the composer — toasts float above the deck (the stack
+        // entity built here), and usage is the deck's own strip
+        // (orchestrator_panel::usage_strip, no separate entity). The old
+        // corner UsageIsland is retired alongside the corner cluster.
+        let weak_workspace_islands = cx.weak_entity();
+        let notif_stack = cx.new(|cx| islands::NotifStack::new(weak_workspace_islands, cx));
         let surfaces = mode_item::ModeSurfaces {
             artifact: cx.new(|cx| artifact_surface::ArtifactSurface::new(cx)),
             briefing: cx.new(|cx| briefing_panel::BriefingPanel::new(cx)),
-            orchestrator: cx
-                .new(|cx| orchestrator_panel::OrchestratorPanel::new(panel_workspace, window, cx)),
+            orchestrator: cx.new(|cx| {
+                orchestrator_panel::OrchestratorPanel::new(
+                    panel_workspace,
+                    notif_stack.clone(),
+                    window,
+                    cx,
+                )
+            }),
             task_board: cx.new(|cx| task_board::TaskBoardPanel::new(cx)),
             symphony: cx.new(|cx| symphony_panel::SymphonyPanel::new(cx)),
             adversary: cx.new(|cx| adversary_panel::AdversaryPanel::new(window, cx)),
@@ -737,14 +750,13 @@ pub fn init(
             },
         );
 
-        // Z2 — the corner cluster (usage island head + notification stack),
-        // mounted ONCE at workspace level so it stays alive across every
-        // mode (PARITY_SPEC §4.8 cross-route persistence).
-        let weak_workspace = cx.weak_entity();
-        let island = cx.new(|cx| islands::UsageIsland::new(weak_workspace.clone(), cx));
-        let stack = cx.new(|cx| islands::NotifStack::new(weak_workspace, cx));
-        let cluster = cx.new(|cx| islands::CornerCluster::new(island, stack, cx));
-        workspace.set_corner_cluster_item(Some(cluster.into()), window, cx);
+        // Z2 RETIRED (2026-07-07): the corner cluster's top-right anchor is
+        // replaced by the composer dynamic-island home (user ruling) — the
+        // usage island + toast stack entities are built above and rendered
+        // by the orchestrator panel over its composer deck. The workspace
+        // `corner_cluster_item` slot stays (stock-safe, `None` = no layout
+        // impact) as does `islands::corner_cluster` (the corner-anchor
+        // reference implementation).
 
         // M2 — `Ctrl+Alt+1..9` (keymap asset, loaded only when the flag is
         // on) and the command palette dispatch this action.

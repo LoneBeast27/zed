@@ -129,10 +129,18 @@ impl UsagePanel {
             .map(|age_h| format!(" ({age_h}h old)"))
             .unwrap_or_default();
         Some(
+            // Fork shape grammar (uniformity audit 2026-07-06): the banner is
+            // a rounded inset card, never a full-bleed square strip. Amber
+            // stays — it's a semantic warning (safety-color ruling).
             h_flex()
                 .flex_none()
-                .px(px(28.))
+                .mx(px(16.))
+                .mt(px(12.))
+                .px(px(14.))
                 .py(px(8.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(gpui::Hsla::from(STATUS_BLOCKED).opacity(0.35))
                 .bg(gpui::Hsla::from(STATUS_BLOCKED).opacity(0.10))
                 .text_size(px(13.))
                 .text_color(STATUS_BLOCKED)

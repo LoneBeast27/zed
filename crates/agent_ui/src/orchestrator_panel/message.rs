@@ -38,6 +38,7 @@ pub(super) fn render_message(
     view: &MessageView,
     ix: usize,
     live: bool,
+    verdict: Option<bool>,
     fades: &StateFades,
     window: &mut Window,
     cx: &mut Context<OrchestratorPanel>,
@@ -46,7 +47,7 @@ pub(super) fn render_message(
         render_user_card(view, window, cx)
     } else {
         let live_extra_s = live.then(|| view.seen_at.elapsed().as_secs_f64());
-        render_agent_block(view, ix, live_extra_s, fades, window, cx)
+        render_agent_block(view, ix, live_extra_s, verdict, fades, window, cx)
     };
 
     // Entrance: user cards rise 4px on decel (web `rise`); agent replies get
@@ -103,12 +104,13 @@ fn render_agent_block(
     view: &MessageView,
     ix: usize,
     live_extra_s: Option<f64>,
+    verdict: Option<bool>,
     fades: &StateFades,
     window: &mut Window,
     cx: &mut Context<OrchestratorPanel>,
 ) -> AnyElement {
     let worked = render_worked_for(view, ix, live_extra_s, fades, cx);
-    let meta = render_meta_row(view, ix, fades, cx);
+    let meta = render_meta_row(view, ix, verdict, fades, cx);
     v_flex()
         .id(msg_hover_id(ix))
         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -337,6 +339,7 @@ fn render_step_row(
 fn render_meta_row(
     view: &MessageView,
     ix: usize,
+    verdict: Option<bool>,
     fades: &StateFades,
     cx: &mut Context<OrchestratorPanel>,
 ) -> AnyElement {
@@ -388,6 +391,42 @@ fn render_meta_row(
             )
     };
     let copy_text = view.text.clone();
+    // Filled thumbs (dogfood 2026-07-08): the chosen verdict renders bright
+    // + washed permanently; clicking the other thumb overrides (the panel's
+    // send_feedback banks it on the bridge's vault ledger).
+    let thumb = |id: &'static str,
+                 icon: IconName,
+                 filled: bool,
+                 up: bool,
+                 ts: f64,
+                 cx: &mut Context<OrchestratorPanel>| {
+        let button_id = ElementId::NamedInteger(id.into(), ix as u64);
+        let hover_t = fades.t(&button_id);
+        let hover_id = button_id.clone();
+        div()
+            .id(button_id)
+            .size(px(26.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.))
+            .bg(hover_bg.opacity(if filled { 1.0 } else { hover_t }))
+            .cursor_pointer()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                this.set_fade(hover_id.clone(), *hovered, STATE_FADE, cx);
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.send_feedback(ts, up, cx);
+            }))
+            .child(Icon::new(icon).size(IconSize::Medium).color(Color::Custom(
+                if filled {
+                    text
+                } else {
+                    mix(placeholder, text, hover_t)
+                },
+            )))
+    };
+    let ts = view.ts;
     let trio = h_flex()
         .gap(px(4.))
         .child(
@@ -395,10 +434,15 @@ fn render_meta_row(
                 cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
             })),
         )
-        // Feedback buttons are anatomy-only (the web ships them without
-        // handlers — wiring is banked).
-        .child(action("msg-up", IconName::ThumbsUp, cx))
-        .child(action("msg-down", IconName::ThumbsDown, cx));
+        .child(thumb("msg-up", IconName::ThumbsUp, verdict == Some(true), true, ts, cx))
+        .child(thumb(
+            "msg-down",
+            IconName::ThumbsDown,
+            verdict == Some(false),
+            false,
+            ts,
+            cx,
+        ));
 
     // Tracked-hover reveal (`.msg.agent:hover .meta-actions { opacity: 1 }`
     // on the .15s effects transition): the scalar is read per frame off the

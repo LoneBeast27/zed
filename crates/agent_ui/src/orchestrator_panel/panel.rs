@@ -61,6 +61,15 @@ pub struct OrchestratorPanel {
     /// The composer-anchored running-tasks island (§4.9) — `pub(crate)` so
     /// `islands::tasks_island`'s retract clock and listeners can reach it.
     pub(crate) tasks_island: TasksIsland,
+    /// The toast stack, homed on the composer anchor (user ruling
+    /// 2026-07-07: "all elements to give information live on it"; was the
+    /// top-right corner stack). Usage itself is the deck's own strip —
+    /// [`super::usage_strip`], user ruling 2026-07-08.
+    pub(super) notif_stack: gpui::Entity<crate::islands::NotifStack>,
+    /// Message feedback verdicts, keyed by the message ts bits (`true` =
+    /// thumbs-up). Session-local render state; the durable record is the
+    /// bridge's vault ledger (POST /feedback, dogfood 2026-07-08).
+    pub(super) feedback: std::collections::HashMap<u64, bool>,
     /// The `/` command registry (S0) — the source the typeahead + `/help`
     /// render from. Shared entity, built at panel construction.
     pub(super) registry: Entity<CommandRegistry>,
@@ -91,6 +100,7 @@ pub struct OrchestratorPanel {
 impl OrchestratorPanel {
     pub fn new(
         workspace: WeakEntity<Workspace>,
+        notif_stack: gpui::Entity<crate::islands::NotifStack>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -116,6 +126,8 @@ impl OrchestratorPanel {
             transcript: TranscriptView::new(),
             composer: Composer::new(window, cx),
             tasks_island: TasksIsland::new(cx),
+            notif_stack,
+            feedback: std::collections::HashMap::new(),
             registry,
             typeahead: TypeaheadMenu::new(),
             busy: false,
@@ -211,6 +223,41 @@ impl OrchestratorPanel {
     pub(super) fn toggle_worked(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.transcript.toggle_worked(ix);
         cx.notify();
+    }
+
+    /// A thumbs click (dogfood 2026-07-08): fill locally at once, and bank
+    /// the verdict on the bridge's vault ledger in the background. A repeat
+    /// click with the other thumb overrides (ledger keeps history; readers
+    /// take the last row).
+    pub(super) fn send_feedback(&mut self, ts: f64, up: bool, cx: &mut Context<Self>) {
+        self.feedback.insert(ts.to_bits(), up);
+        cx.notify();
+        let conv = {
+            let store = self.store.read(cx);
+            store
+                .transcript
+                .as_ref()
+                .map(|snapshot| snapshot.id.clone())
+                .or_else(|| store.transcript_conv.clone())
+                .unwrap_or_default()
+        };
+        let client = cx.http_client();
+        cx.background_spawn(async move {
+            let body = serde_json::json!({
+                "conv": conv,
+                "message_ts": ts,
+                "verdict": if up { "up" } else { "down" },
+            })
+            .to_string();
+            crate::bridge::post_json(
+                client.as_ref(),
+                &format!("{}/feedback", crate::bridge::BRIDGE_BASE_URL),
+                body,
+            )
+            .await
+            .ok();
+        })
+        .detach();
     }
 
     /// Step-row / island-row click → route to the task board (taskboard
@@ -312,7 +359,8 @@ impl OrchestratorPanel {
             cx.processor(move |this, ix: usize, window, cx| {
                 let content: AnyElement = if let Some(view) = this.transcript.message(ix) {
                     let live = live_ix == Some(ix);
-                    render_message(view, ix, live, &this.fades, window, cx)
+                    let verdict = this.feedback.get(&view.ts.to_bits()).copied();
+                    render_message(view, ix, live, verdict, &this.fades, window, cx)
                 } else if ix == message_count {
                     render_shimmer(cx)
                 } else {
@@ -342,8 +390,14 @@ impl Render for OrchestratorPanel {
             .bg(colors.panel_background)
             .children(self.render_crumb(cx))
             .child(
-                div()
+                // `.flex_1().size_full()` is the thread_view list-host idiom
+                // (thread_view.rs render): without the definite `size_full`
+                // height the Auto-sized `list()` measures ZERO and the
+                // transcript paints nothing (dogfood 2026-07-07 — greeting
+                // rendered, 12 live messages didn't).
+                v_flex()
                     .flex_1()
+                    .size_full()
                     .min_h_0()
                     .pt(px(20.))
                     .pb(px(8.))

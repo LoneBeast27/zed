@@ -73,8 +73,7 @@ fn orchestrator_target(name: &str) -> Option<OrchTarget> {
         "vault" => OrchTarget::OpenVault,
         "import" => OrchTarget::OpenImport,
         "help" => OrchTarget::Help,
-        // /compact is orchestrator-native but Unbuilt (no bridge trigger) — it
-        // never routes here; it falls through and the composer no-ops it.
+        "compact" => OrchTarget::Compact,
         _ => return None,
     })
 }
@@ -82,7 +81,7 @@ fn orchestrator_target(name: &str) -> Option<OrchTarget> {
 impl OrchestratorPanel {
     /// The orchestrator-native command names, read from the registry (so the
     /// dispatcher and the menu never drift). Only names that route to a LIVE
-    /// target — the Unbuilt `/compact` is excluded (it must not silently POST).
+    /// target — disabled rows are excluded (they must not silently POST).
     pub(super) fn orchestrator_command_names(&self, cx: &App) -> Vec<String> {
         self.registry
             .read(cx)
@@ -116,7 +115,41 @@ impl OrchestratorPanel {
                 self.defer_open_vault(window, cx)
             }
             OrchTarget::Help => self.dispatch_help(args, window, cx),
+            OrchTarget::Compact => self.dispatch_compact(cx),
         }
+    }
+
+    /// `/compact` → `POST /conv/<id>/compact` (forced heartbeat splice,
+    /// dogfood 2026-07-08). The bridge appends the result as a transcript
+    /// note ("(context compacted: X → Y est tokens)") — the refetch lands
+    /// it; a busy conversation is refused server-side (409) and simply
+    /// produces no note.
+    fn dispatch_compact(&mut self, cx: &mut gpui::Context<Self>) {
+        let conv = {
+            let store = self.store.read(cx);
+            store
+                .transcript
+                .as_ref()
+                .map(|snapshot| snapshot.id.clone())
+                .or_else(|| store.transcript_conv.clone())
+        };
+        let Some(conv) = conv else { return };
+        let http_client = cx.http_client();
+        let store = self.store.clone();
+        cx.spawn(async move |_this, cx| {
+            let _ = cx
+                .background_spawn(async move {
+                    post_json(
+                        http_client.as_ref(),
+                        &format!("{BRIDGE_BASE_URL}/conv/{conv}/compact"),
+                        "{}".to_string(),
+                    )
+                    .await
+                })
+                .await;
+            let _ = store.update(cx, |store, cx| store.refetch_transcript_soon(cx));
+        })
+        .detach();
     }
 
     /// `/plan <text>` → `POST /plan/escalate {"request", "conv"}` (real
@@ -276,7 +309,8 @@ fn open_help_buffer(
 mod tests {
     use super::*;
 
-    const ORCH: [&str; 6] = ["plan", "board", "usage", "adversary", "vault", "import"];
+    const ORCH: [&str; 7] =
+        ["plan", "board", "usage", "adversary", "vault", "import", "compact"];
 
     #[test]
     fn orchestrator_command_is_intercepted() {
@@ -330,10 +364,16 @@ mod tests {
     }
 
     #[test]
-    fn disabled_compact_is_not_intercepted() {
-        // /compact is not in the LIVE orchestrator name set → falls to Bridge,
-        // never routed as a silent no-op. (The composer guards it separately.)
-        assert_eq!(parse_submission("/compact", &ORCH), Submission::Bridge);
+    fn live_compact_is_intercepted() {
+        // /compact went live with POST /conv/<id>/compact (2026-07-08): it
+        // now routes as an orchestrator command instead of falling through.
+        assert_eq!(
+            parse_submission("/compact", &ORCH),
+            Submission::Orchestrator {
+                target: OrchTarget::Compact,
+                args: String::new()
+            }
+        );
     }
 
     #[test]

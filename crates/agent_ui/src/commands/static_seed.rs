@@ -107,10 +107,7 @@ pub fn static_entries() -> Vec<CommandEntry> {
     entries
 }
 
-/// Band 1 — orchestrator-native (contract §1.1, wired live in S4). `/compact`
-/// is orchestrator-native BUT has no bridge trigger (no `/compact` route in
-/// `routes_core.py`; compaction is the heartbeat's internal splice,
-/// `orchestrator/compaction.py`) → honest Unbuilt-disabled row.
+/// Band 1 — orchestrator-native (contract §1.1, wired live in S4).
 fn orchestrator_native() -> Vec<CommandEntry> {
     vec![
         orch(
@@ -155,21 +152,12 @@ fn orchestrator_native() -> Vec<CommandEntry> {
             Classification::polyfill("commands::help"),
             "List every command by source, including documented-but-disabled ones.",
         ), // §2 (/help renders from the registry)
-        // /compact is orchestrator-native but has NO bridge trigger today:
-        // routes_core.py has no /compact route; compaction is the heartbeat's
-        // internal context splice (orchestrator/compaction.py), not a
-        // composer-reachable action. Honest Unbuilt-disabled (contract S4).
-        CommandEntry {
-            name: "compact".into(),
-            vendor: None,
-            kind: CommandKind::Orchestrator,
-            classification: Classification::polyfill("orchestrator/compaction.py"),
-            mechanism: Mechanism::unbuilt(
-                "No bridge compact endpoint — compaction is the heartbeat's \
-                 automatic internal splice, not a composer action.",
-            ),
-            description: "Compact the conversation context (heartbeat-internal today).".into(),
-        }, // routes_core.py (no /compact) + orchestrator/compaction.py
+        orch(
+            "compact",
+            OrchTarget::Compact,
+            Classification::polyfill("orchestrator/compaction.py"),
+            "Compact the conversation context (forced heartbeat splice).",
+        ), // routes_core.py POST /conv/<id>/compact (dogfood 2026-07-08)
     ]
 }
 

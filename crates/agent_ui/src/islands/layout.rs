@@ -20,15 +20,22 @@ pub struct ClusterAnchor {
     pub right: f32,
 }
 
+/// Clearance for a right-dock panel HEADER row (uniformity audit 2026-07-06):
+/// the pill is right-anchored over the workspace, and when a right dock is
+/// open its header ("Constellation" + arrange button, ~56px of title row) is
+/// TALLER than the tab bar — the pill was landing on the dock's header
+/// buttons (audit-2's buried Graph button). The anchor now clears both rows.
+pub const DOCK_HEADER_CLEARANCE: f32 = 44.;
+
 /// Fold the tab-bar row height + insets into the cluster anchor.
 ///
-/// The head drops below the tab-bar row (`tab_bar_h`) plus the corner inset,
-/// so the right-anchored pill clears the tab bar's right-corner `+` / split
-/// buttons at ANY window width (both are right-pinned; the clearance is a full
-/// vertical row, independent of width) and at any UI-font zoom (`tab_bar_h`
-/// scales with the same spacing token the tab bar uses). The stack sits one
+/// The head drops below the tab-bar row (`tab_bar_h`), the dock-header
+/// clearance, and the corner inset, so the right-anchored pill clears BOTH
+/// the tab bar's right-corner `+` / split buttons AND an open right dock's
+/// header row at ANY window width and any UI-font zoom (`tab_bar_h` scales
+/// with the same spacing token the tab bar uses). The stack sits one
 /// pill-plus-gap below the head. When the tab bar is hidden the caller passes
-/// `tab_bar_h == 0.` and the head returns to the plain `corner_inset` anchor.
+/// `tab_bar_h == 0.` and the head anchors at clearance + inset.
 pub fn cluster_anchor(tab_bar_h: f32, corner_inset: f32, stack_gap: f32) -> ClusterAnchor {
     // Negative/NaN heights can't push the pill UP into the chrome.
     let tab_bar_h = if tab_bar_h.is_finite() {
@@ -36,7 +43,7 @@ pub fn cluster_anchor(tab_bar_h: f32, corner_inset: f32, stack_gap: f32) -> Clus
     } else {
         0.
     };
-    let head_top = tab_bar_h + corner_inset;
+    let head_top = tab_bar_h + DOCK_HEADER_CLEARANCE + corner_inset;
     ClusterAnchor {
         head_top,
         stack_top: head_top + stack_gap,
@@ -65,8 +72,8 @@ mod tests {
                  pill never overlaps the corner buttons",
                 anchor.head_top
             );
-            // And it must clear it by the full corner inset, not just touch.
-            assert_eq!(anchor.head_top, tab_bar_h + INSET);
+            // And it must clear the dock header + corner inset, not just touch.
+            assert_eq!(anchor.head_top, tab_bar_h + DOCK_HEADER_CLEARANCE + INSET);
         }
     }
 
@@ -93,11 +100,15 @@ mod tests {
     }
 
     #[test]
-    fn hidden_tab_bar_falls_back_to_the_plain_corner_anchor() {
-        // No tab bar → the head returns to the original 14px corner anchor.
+    fn hidden_tab_bar_still_clears_the_dock_header() {
+        // No tab bar → the head anchors at clearance + inset (the dock-header
+        // clearance is unconditional — a right dock's header row exists
+        // whether or not the center pane shows a tab bar). NOTE: the corner
+        // cluster is retired (2026-07-08, composer island home) — this module
+        // is the reference implementation; the pin tracks its actual math.
         let anchor = cluster_anchor(0., INSET, GAP);
-        assert_eq!(anchor.head_top, INSET);
-        assert_eq!(anchor.stack_top, INSET + GAP);
+        assert_eq!(anchor.head_top, DOCK_HEADER_CLEARANCE + INSET);
+        assert_eq!(anchor.stack_top, DOCK_HEADER_CLEARANCE + INSET + GAP);
     }
 
     #[test]

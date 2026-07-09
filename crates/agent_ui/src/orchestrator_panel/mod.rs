@@ -25,6 +25,7 @@ mod send_circle;
 mod transcript;
 mod typeahead;
 mod typeahead_menu;
+mod usage_strip;
 
 #[cfg(test)]
 mod typeahead_dispatch_tests;

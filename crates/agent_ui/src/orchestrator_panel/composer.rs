@@ -22,12 +22,30 @@ use settings::Settings as _;
 use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
+use crate::agent_accents::{ACCENT_AGY, ACCENT_CLAUDE, ACCENT_CODEX, ACCENT_GEMINI};
 use crate::bridge::{BRIDGE_BASE_URL, post_json};
+use crate::commands::Vendor;
 use crate::task_board::motion::{STATE_FADE, mix};
 use crate::task_board::style::{HAIRLINE_HI, SURFACE_2, SURFACE_2B};
 
 use super::panel::{OrchestratorPanel, Send};
 use super::send_circle::SendCircle;
+use super::typeahead::forced_vendor;
+
+/// The vendor's identity accent (3-provider ruling 2026-07-08) — the color
+/// the composer adopts when a task targets that vendor.
+fn vendor_accent(vendor: Vendor) -> gpui::Hsla {
+    match vendor {
+        Vendor::Claude => ACCENT_CLAUDE.into(),
+        Vendor::Codex => ACCENT_CODEX.into(),
+        Vendor::Agy => ACCENT_AGY.into(),
+        Vendor::Gemini => ACCENT_GEMINI.into(),
+    }
+}
+
+/// The usage strip's horizontal-extend duration — a spatial reveal (~500px
+/// of detail), so longer than the 150ms effects fades.
+const USAGE_STRIP_MORPH: std::time::Duration = std::time::Duration::from_millis(260);
 
 /// The hint strip's force tokens: (label, inserted prefix).
 const HINTS: [(&str, &str); 5] = [
@@ -90,6 +108,12 @@ pub(super) struct Composer {
     /// Written each render from `render_typeahead_menu().is_some()`, read by
     /// the addon when the editor rebuilds its key context.
     pub(super) menu_open: MenuOpenFlag,
+    /// Whether the deck's usage cluster is horizontally extended (user
+    /// ruling 2026-07-08: the per-pool detail extends sideways on click).
+    pub(super) usage_open: bool,
+    /// Whether the target-selector menu (the working brain pill, user
+    /// ruling 2026-07-08) is open.
+    pub(super) target_menu_open: bool,
     _editor_subscription: Subscription,
 }
 
@@ -127,6 +151,8 @@ impl Composer {
             send_circle: SendCircle::new(),
             send_task: None,
             menu_open,
+            usage_open: false,
+            target_menu_open: false,
             _editor_subscription,
         }
     }
@@ -185,6 +211,64 @@ impl OrchestratorPanel {
     /// Enter / send-circle click: POST the trimmed text on the background
     /// executor, then canonicalize the conversation + refetch the
     /// transcript (the web's `send()` + immediate `loop()`).
+    /// The attach button (dogfood 2026-07-08): native multi-file picker →
+    /// the chosen paths splice into the editor at the caret, quoted when
+    /// they carry spaces. Vendor-unified: paths ride the task TEXT, which
+    /// every worker already reads — no per-vendor upload plumbing.
+    fn pick_attachments(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            if paths.is_empty() {
+                return;
+            }
+            let joined = paths
+                .iter()
+                .map(|path| {
+                    let s = path.display().to_string();
+                    if s.contains(' ') { format!("\"{s}\"") } else { s }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            this.update_in(cx, |this, window, cx| {
+                this.composer.editor.update(cx, |editor, cx| {
+                    editor.insert(&format!(" {joined} "), window, cx);
+                });
+                window.focus(&this.composer.editor.read(cx).focus_handle(cx), cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// POST the turn abort for the conversation on screen. Fire-and-forget
+    /// on the background executor — the transcript poll (900ms busy cadence)
+    /// carries the aborted reply back; no client-side state to unwind.
+    fn abort_turn(&mut self, cx: &mut gpui::Context<Self>) {
+        let conv = {
+            let store = self.store.read(cx);
+            store
+                .transcript
+                .as_ref()
+                .map(|snapshot| snapshot.id.clone())
+                .or_else(|| store.transcript_conv.clone())
+        };
+        let Some(conv) = conv else { return };
+        let client = cx.http_client();
+        cx.background_spawn(async move {
+            let url = format!("{BRIDGE_BASE_URL}/conv/{conv}/abort");
+            post_json(client.as_ref(), &url, "{}".to_string()).await.ok();
+        })
+        .detach();
+    }
+
     pub(super) fn send_message(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
         // Enter while the `/` typeahead is open ACCEPTS the highlighted command
         // (splices `/name ` into the editor) instead of sending — the menu owns
@@ -194,7 +278,12 @@ impl OrchestratorPanel {
             return;
         }
         if self.busy {
-            return; // stop is a no-op until a real abort endpoint lands (banked)
+            // The stop circle (dogfood 2026-07-08): a real turn abort now —
+            // POST /conv/<id>/abort kills the in-flight turn's child runs
+            // (vendor-unified) and stops the loop at its next seam; the busy
+            // transcript poll then lands the "(turn aborted by user)" reply.
+            self.abort_turn(cx);
+            return;
         }
         let text = self.composer.editor.read(cx).text(cx);
         let text = text.trim().to_string();
@@ -293,6 +382,18 @@ impl OrchestratorPanel {
         let mut key_context = gpui::KeyContext::new_with_defaults();
         key_context.add("OrchestratorComposer");
 
+        // The forced @vendor prefix drives the composer's ACCENT (user
+        // ruling 2026-07-08: "for whichever vendor task we do, we utilise
+        // the vendor colour as the accent colour") — border first; parsed
+        // per keystroke from the live editor text.
+        let editor_text = self.composer.editor.read(cx).text(cx);
+        let forced = forced_vendor(&editor_text);
+        let vendor_tint = forced.map(vendor_accent);
+        // The usage cluster is built before the deck (it needs `&mut self`
+        // for the extend morph's StateFades).
+        let usage_cluster = self.render_usage_strip(cx);
+        let target_menu = self.render_target_menu(cx);
+
         let colors = cx.theme().colors();
         let focused = self
             .composer
@@ -306,6 +407,13 @@ impl OrchestratorPanel {
         let focus_id = ElementId::Name("composer-focus".into());
         self.fades.set(focus_id.clone(), focused, STATE_FADE);
         let focus_t = self.fades.t(&focus_id);
+        // Vendor accent outranks the neutral focus tint: a forced target
+        // keeps the deck lit in that vendor's color even unfocused (dimmer),
+        // brightening with focus.
+        let deck_border = match vendor_tint {
+            Some(accent) => mix(colors.border, accent, 0.45 + 0.35 * focus_t),
+            None => mix(colors.border, HAIRLINE_HI.into(), focus_t),
+        };
 
         let deck = v_flex()
             .key_context(key_context)
@@ -326,7 +434,7 @@ impl OrchestratorPanel {
             .rounded(px(16.))
             .bg(SURFACE_2)
             .border_1()
-            .border_color(mix(colors.border, HAIRLINE_HI.into(), focus_t))
+            .border_color(deck_border)
             .overflow_hidden()
             .child(
                 // textarea: padding 15px 17px 4px, 15px/1.55 UI font.
@@ -336,7 +444,7 @@ impl OrchestratorPanel {
                     .pb(px(4.))
                     .child(self.render_editor(cx)),
             )
-            .child(self.render_controls_row(has_text, busy, cx))
+            .child(self.render_controls_row(has_text, busy, forced, usage_cluster, cx))
             .child(self.render_foot(cx));
 
         h_flex()
@@ -349,15 +457,70 @@ impl OrchestratorPanel {
                     .w_full()
                     .max_w(px(780.))
                     .px(px(32.))
+                    // The dynamic-island home (user ruling 2026-07-07): the
+                    // toast stack floats above the deck in a ZERO-HEIGHT
+                    // strip — bottom-anchored, growing UPWARD over the
+                    // transcript, never displacing the deck while the user
+                    // types. Replaces the retired top-right corner cluster.
+                    .child(self.render_island_home(cx))
                     // §4.9 composer anchor slot: the running-tasks island
                     // (Task 4) emerges ABOVE the typing pill, in flow.
                     .children(self.render_tasks_island_slot(cx))
                     // S1: the `/` typeahead popover — anchored above the deck,
                     // in flow (displaces the deck downward while open).
                     .children(menu)
+                    // The target-selector menu (the working brain pill) —
+                    // same in-flow displacement idiom as the typeahead.
+                    .children(target_menu)
                     .child(deck),
             )
             .into_any_element()
+    }
+
+    /// The zero-height overlay strip above the deck: the toast stack,
+    /// bottom-anchored so it grows UPWARD over the transcript and never
+    /// displaces the deck. (The usage pill that used to share this anchor
+    /// is now the deck's own usage strip — user ruling 2026-07-08.)
+    fn render_island_home(&self, _cx: &mut gpui::Context<Self>) -> AnyElement {
+        div()
+            .relative()
+            .w_full()
+            .h(px(0.))
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(8.))
+                    .right_0()
+                    .child(self.notif_stack.clone()),
+            )
+            .into_any_element()
+    }
+
+    /// The deck's usage strip (see [`super::usage_strip`]): folds the live
+    /// pool rows per frame (≤6 rows, cheap) and drives the horizontal
+    /// extend off the panel's StateFades so a mid-morph toggle re-bases.
+    fn render_usage_strip(&mut self, cx: &mut gpui::Context<Self>) -> AnyElement {
+        let rows = if crate::bridge::is_agentic_demo() {
+            crate::usage_panel_demo::demo_pools()
+        } else {
+            self.store.read(cx).usage.clone()
+        };
+        let pools = super::usage_strip::fold_pools(&rows);
+        let session = super::usage_strip::session_pct(&rows);
+        let strip_id = gpui::ElementId::Name("usage-strip-extend".into());
+        self.fades
+            .set(strip_id.clone(), self.composer.usage_open, USAGE_STRIP_MORPH);
+        let open_t = self.fades.t(&strip_id);
+        super::usage_strip::render_usage_strip(
+            &pools,
+            session,
+            open_t,
+            cx.listener(|this, _, _, cx| {
+                this.composer.usage_open = !this.composer.usage_open;
+                cx.notify();
+            }),
+            cx,
+        )
     }
 
     fn render_editor(&self, cx: &mut gpui::Context<Self>) -> AnyElement {
@@ -388,6 +551,8 @@ impl OrchestratorPanel {
         &self,
         has_text: bool,
         busy: bool,
+        forced: Option<Vendor>,
+        usage_cluster: AnyElement,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
         let colors = cx.theme().colors();
@@ -398,6 +563,13 @@ impl OrchestratorPanel {
             .as_ref()
             .and_then(|snapshot| snapshot.brain.clone())
             .unwrap_or_else(|| "idle".to_string());
+        // The pill shows the message's TARGET: the forced vendor when a
+        // `@vendor` prefix is live (with its identity dot), else the
+        // orchestrator brain ("auto" routing).
+        let (target_label, target_dot) = match forced {
+            Some(vendor) => (vendor.badge().to_string(), Some(vendor_accent(vendor))),
+            None => (brain, None),
+        };
 
         h_flex()
             .items_center()
@@ -407,10 +579,11 @@ impl OrchestratorPanel {
             .pb(px(8.))
             .pl(px(12.))
             .child({
-                // `.ghost-btn` — attach affordance (anatomy-only, like the
-                // web: no handler ships in this pass). Hover rides the
-                // .15s effects crossfade: + glyph --text-3 → --text-2,
-                // hairline → hairline-hi; web glyph is 18px.
+                // `.ghost-btn` — the attach button (dogfood 2026-07-08, was
+                // anatomy-only): opens the native file picker and inserts
+                // the chosen paths into the task text. Vendor-unified by
+                // construction — every worker (claude/codex/agy/gemini)
+                // reads file paths straight out of its task prompt.
                 let ghost_id = ElementId::Name("composer-attach".into());
                 let hover_t = self.fades.t(&ghost_id);
                 div()
@@ -426,6 +599,9 @@ impl OrchestratorPanel {
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         this.set_fade(ghost_id.clone(), *hovered, STATE_FADE, cx);
                     }))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.pick_attachments(window, cx);
+                    }))
                     .child(
                         Icon::new(IconName::Plus)
                             .size(IconSize::Custom(rems_from_px(18.)))
@@ -437,29 +613,40 @@ impl OrchestratorPanel {
                     )
             })
             .child({
-                // `.brain-pill` — store.brain or "idle" + chevron
-                // (anatomy-only; the web ships no click handler either).
-                // Hover: text --text-2 → --text, hairline → hairline-hi on
-                // the .15s effects crossfade; the 16px chevron stays --text-3.
+                // The target pill (formerly the anatomy-only brain pill —
+                // user ruling 2026-07-08 "make the gemini button work"):
+                // shows the live target (forced vendor with its identity
+                // dot, else the heartbeat brain); click opens the target-
+                // selector menu, which sets/strips the `@vendor` prefix.
                 let brain_id = ElementId::Name("composer-brain".into());
                 let hover_t = self.fades.t(&brain_id);
                 h_flex()
                     .id(brain_id.clone())
                     .items_center()
-                    .gap(px(4.))
+                    .gap(px(6.))
                     .pl(px(12.))
                     .pr(px(8.))
                     .py(px(6.))
                     .rounded_full()
                     .border_1()
-                    .border_color(mix(colors.border, HAIRLINE_HI.into(), hover_t))
+                    .border_color(match target_dot {
+                        Some(accent) => mix(colors.border, accent, 0.6),
+                        None => mix(colors.border, HAIRLINE_HI.into(), hover_t),
+                    })
                     .text_size(px(13.))
                     .text_color(mix(colors.text_muted, colors.text, hover_t))
                     .cursor_pointer()
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         this.set_fade(brain_id.clone(), *hovered, STATE_FADE, cx);
                     }))
-                    .child(SharedString::from(brain))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.composer.target_menu_open = !this.composer.target_menu_open;
+                        cx.notify();
+                    }))
+                    .children(target_dot.map(|accent| {
+                        div().flex_none().size(px(7.)).rounded_full().bg(accent)
+                    }))
+                    .child(SharedString::from(target_label))
                     .child(
                         Icon::new(IconName::ChevronDown)
                             .size(IconSize::Medium)
@@ -467,8 +654,79 @@ impl OrchestratorPanel {
                     )
             })
             .child(div().flex_1())
+            // The inline usage cluster (user ruling 2026-07-08: usage sits
+            // to the SIDE, in the controls row; detail extends leftward
+            // into the spacer).
+            .child(usage_cluster)
             .child(self.composer.send_circle.render(has_text || busy, cx))
             .into_any_element()
+    }
+
+    /// The target-selector menu (the working brain pill): auto + the four
+    /// vendors, each with its identity dot. Choosing one sets the message's
+    /// `@vendor` force prefix (auto strips it) — the same mechanics as the
+    /// foot hints, surfaced as a proper control.
+    fn render_target_menu(&mut self, cx: &mut gpui::Context<Self>) -> Option<AnyElement> {
+        if !self.composer.target_menu_open {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        let rows: [(&'static str, &'static str, Option<gpui::Hsla>); 5] = [
+            ("auto", "", None),
+            ("claude", "@claude ", Some(vendor_accent(Vendor::Claude))),
+            ("codex", "@codex ", Some(vendor_accent(Vendor::Codex))),
+            ("agy", "@agy ", Some(vendor_accent(Vendor::Agy))),
+            ("gemini", "@gemini ", Some(vendor_accent(Vendor::Gemini))),
+        ];
+        let items: Vec<AnyElement> = rows
+            .into_iter()
+            .map(|(label, prefix, dot)| {
+                h_flex()
+                    .id(ElementId::Name(format!("target-{label}").into()))
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(6.))
+                    .text_size(px(13.))
+                    .text_color(colors.text_muted)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(colors.element_hover))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.composer.target_menu_open = false;
+                        this.insert_hint(prefix, window, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(7.))
+                            .rounded_full()
+                            .when_some(dot, |el, accent| el.bg(accent))
+                            .when(dot.is_none(), |el| {
+                                el.border_1().border_color(colors.text_placeholder)
+                            }),
+                    )
+                    .child(label)
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            div()
+                .id("target-menu")
+                .mb(px(6.))
+                .w(px(180.))
+                .p(px(4.))
+                .rounded(px(10.))
+                .bg(SURFACE_2)
+                .border_1()
+                .border_color(cx.theme().colors().border)
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.composer.target_menu_open = false;
+                    cx.notify();
+                }))
+                .children(items)
+                .into_any_element(),
+        )
     }
 
     /// `.composer-foot` — the darker sub-deck env strip with the clickable

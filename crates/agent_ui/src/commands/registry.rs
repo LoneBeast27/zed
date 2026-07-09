@@ -252,16 +252,20 @@ mod tests {
     }
 
     #[test]
-    fn compact_orchestrator_row_is_honestly_disabled() {
-        // No bridge /compact endpoint → the orchestrator /compact must render
-        // disabled-with-tooltip, never as a live-but-silent no-op.
+    fn compact_orchestrator_row_is_live() {
+        // POST /conv/<id>/compact shipped (dogfood 2026-07-08): the
+        // orchestrator /compact is now a LIVE OrchEndpoint row — the old
+        // honest-disabled state is retired with the endpoint's arrival.
         let rows = seed();
         let compact = rows
             .iter()
             .find(|r| r.name == "compact" && r.kind == CommandKind::Orchestrator)
             .unwrap();
-        assert!(compact.is_disabled());
-        assert!(compact.disabled_tooltip().is_some());
+        assert!(!compact.is_disabled());
+        assert!(matches!(
+            compact.mechanism,
+            Mechanism::OrchEndpoint(OrchTarget::Compact)
+        ));
     }
 
     #[test]

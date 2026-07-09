@@ -18,7 +18,7 @@
 //! break of the action plumbing / accept semantics), NOT a regression gate for
 //! THIS bug — live-window keyboard confirmation is owed to the coordinator.
 
-use gpui::{Focusable as _, TestAppContext, VisualTestContext, px, size};
+use gpui::{AppContext as _, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use project::Project;
 use settings::KeymapFile;
 use workspace::Workspace;
@@ -63,7 +63,10 @@ async fn panel_window(
     };
 
     // Window B: the panel IS the root view → focused, rendered, dispatch-ready.
-    let (panel, cx) = cx.add_window_view(|window, cx| OrchestratorPanel::new(weak, window, cx));
+    let (panel, cx) = cx.add_window_view(|window, cx| {
+        let stack = cx.new(|cx| crate::islands::NotifStack::new(weak.clone(), cx));
+        OrchestratorPanel::new(weak, stack, window, cx)
+    });
     cx.run_until_parked();
     // A concrete size forces a real rendered frame (and thus a dispatch tree).
     cx.simulate_resize(size(px(900.), px(700.)));
