@@ -2068,6 +2068,15 @@ impl Render for MultiWorkspace {
                     .h_full()
                     .w(sidebar_width)
                     .flex_shrink_0()
+                    // Fork shape grammar (2026-07-06, Antigravity floating-
+                    // panel model): the sidebar is a rounded card on the
+                    // window layer. Container bg matches the sidebar's own
+                    // fill so square child corners can't peek past the radius.
+                    .rounded(px(10.))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .bg(cx.theme().colors().title_bar_background)
                     .child(sidebar_handle.to_any())
                     .child(resize_handle)
                     .into_any_element()
@@ -2175,6 +2184,12 @@ impl Render for MultiWorkspace {
                         ))
                     },
                 )
+                // Fork shape grammar (2026-07-06): floating-panel layout —
+                // darkest WINDOW layer behind everything, 8px outer gutter,
+                // 6px between columns; sidebar + workspace are rounded cards.
+                .bg(gpui::Hsla::from(theme::design::color::WINDOW))
+                .p(px(8.))
+                .gap(px(6.))
                 .children(activity_bar_item)
                 .children(left_sidebar)
                 .child(
@@ -2182,7 +2197,18 @@ impl Render for MultiWorkspace {
                         .flex()
                         .flex_1()
                         .size_full()
+                        // min_w_0: a flex child's min-width defaults to its
+                        // CONTENT width — with a wide persisted dock (e.g. a
+                        // 630px vault dock from a landscape session) the card
+                        // refused to shrink on a portrait monitor and pushed
+                        // its right edge (and the right-anchored corner pill)
+                        // off-screen (dogfood 2026-07-07, vertical monitor).
+                        .min_w_0()
                         .overflow_hidden()
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .bg(cx.theme().colors().background)
                         .child(self.workspace().clone()),
                 )
                 .children(right_sidebar)

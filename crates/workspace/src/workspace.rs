@@ -7834,10 +7834,19 @@ impl Workspace {
             leader_border_for_pane(follower_states, &pane, window, cx)
         });
 
+        // Fork shape grammar (2026-07-06, uniformity ruling): EVERY dock —
+        // left/right/bottom, all panels — is a rounded card floating on the
+        // workspace canvas, matching the sidebar/rail treatment. One choke
+        // point covers them all.
         let mut container = div()
             .flex()
             .overflow_hidden()
             .flex_none()
+            .m(px(4.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().panel_background)
             .child(dock.clone())
             .children(leader_border);
 
@@ -8660,12 +8669,34 @@ impl Render for Workspace {
                                                                 .when_some(paddings.0, |this, p| {
                                                                     this.child(p.border_r_1())
                                                                 })
-                                                                .child(self.center.render(
-                                                                    self.zoomed.as_ref(),
-                                                                    &pane_render_context,
-                                                                    window,
-                                                                    cx,
-                                                                ))
+                                                                .child(
+                                                                    // Fork shape grammar
+                                                                    // (uniformity ruling):
+                                                                    // the CENTER pane is a
+                                                                    // rounded card like every
+                                                                    // dock/sidebar — no flush
+                                                                    // square main surface.
+                                                                    div()
+                                                                        .flex()
+                                                                        .flex_1()
+                                                                        .min_w_0()
+                                                                        .min_h_0()
+                                                                        .overflow_hidden()
+                                                                        .m(px(4.))
+                                                                        .rounded(px(10.))
+                                                                        .border_1()
+                                                                        .border_color(
+                                                                            cx.theme()
+                                                                                .colors()
+                                                                                .border,
+                                                                        )
+                                                                        .child(self.center.render(
+                                                                            self.zoomed.as_ref(),
+                                                                            &pane_render_context,
+                                                                            window,
+                                                                            cx,
+                                                                        )),
+                                                                )
                                                                 .when_some(
                                                                     paddings.1,
                                                                     |this, p| {

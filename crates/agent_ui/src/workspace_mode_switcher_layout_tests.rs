@@ -142,7 +142,10 @@ fn install_surfaces(
         let surfaces = ModeSurfaces {
             artifact: cx.new(|cx| crate::artifact_surface::ArtifactSurface::new(cx)),
             briefing: cx.new(|cx| BriefingPanel::new(cx)),
-            orchestrator: cx.new(|cx| OrchestratorPanel::new(weak, window, cx)),
+            orchestrator: cx.new(|cx| {
+                let stack = cx.new(|cx| crate::islands::NotifStack::new(weak.clone(), cx));
+                OrchestratorPanel::new(weak.clone(), stack, window, cx)
+            }),
             task_board: cx.new(|cx| TaskBoardPanel::new(cx)),
             symphony: cx.new(|cx| SymphonyPanel::new(cx)),
             adversary: cx.new(|cx| AdversaryPanel::new(window, cx)),
@@ -178,7 +181,10 @@ fn install_surfaces_from_modes_dir(
         let surfaces = ModeSurfaces {
             artifact: cx.new(|cx| crate::artifact_surface::ArtifactSurface::new(cx)),
             briefing: cx.new(|cx| BriefingPanel::new(cx)),
-            orchestrator: cx.new(|cx| OrchestratorPanel::new(weak, window, cx)),
+            orchestrator: cx.new(|cx| {
+                let stack = cx.new(|cx| crate::islands::NotifStack::new(weak.clone(), cx));
+                OrchestratorPanel::new(weak.clone(), stack, window, cx)
+            }),
             task_board: cx.new(|cx| TaskBoardPanel::new(cx)),
             symphony: cx.new(|cx| SymphonyPanel::new(cx)),
             adversary: cx.new(|cx| AdversaryPanel::new(window, cx)),

@@ -2006,6 +2006,9 @@ impl Sidebar {
             .pl_2()
             .pr_1p5()
             .justify_between()
+            // Fork shape grammar (2026-07-06): rounded hover/focus wash on
+            // project headers, matching the thread rows' tile treatment.
+            .rounded(px(6.))
             .border_1()
             .map(|this| {
                 if is_focused {
@@ -5514,9 +5517,17 @@ impl Sidebar {
     }
 
     fn render_filter_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Fork shape grammar (2026-07-06): inputs round at 8px — the search
+        // field is a rounded rect with a soft fill, not a bare square strip.
         div()
             .min_w_0()
             .flex_1()
+            .rounded(px(8.))
+            .bg(cx.theme().colors().element_background)
+            .border_1()
+            .border_color(cx.theme().colors().border_variant)
+            .px_2()
+            .py_0p5()
             .capture_action(
                 cx.listener(|this, _: &editor::actions::Newline, window, cx| {
                     this.editor_confirm(window, cx);
@@ -6863,6 +6874,13 @@ impl Render for Sidebar {
                                     .relative()
                                     .flex_1()
                                     .overflow_hidden()
+                                    // Fork shape grammar (2026-07-06): 4px
+                                    // horizontal inset so the rounded row
+                                    // tiles float off the panel edges (the
+                                    // inset lives HERE, not as row margins —
+                                    // w_full + mx overflows and clips the
+                                    // corners square).
+                                    .px_1()
                                     .child(
                                         list(
                                             self.list_state.clone(),

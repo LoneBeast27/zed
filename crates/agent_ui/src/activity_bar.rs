@@ -59,9 +59,11 @@ const CAPSULE_WIDTH: f32 = ITEM_SIZE + 2.0 * CAPSULE_PAD;
 const ICON_PX: f32 = 21.0;
 /// Hover magnification delta ("a whisper of dock magnification").
 const HOVER_SCALE: f32 = 0.06;
-/// Squircle corner radius — rounded enough to read squircle at 40px,
-/// visibly NOT a full circle (and NEVER a boxed outline).
-const SQUIRCLE_RADIUS: f32 = 13.0;
+/// Indicator corner radius — a ROUNDED RECT, not a capsule. User 2026-07-06:
+/// at 13px the stretched transit form read as a "double-sided toothpick";
+/// 10px (the panel-radius grammar step) keeps corner geometry constant while
+/// the length animates, so the indicator stays visibly rectangular.
+const SQUIRCLE_RADIUS: f32 = 10.0;
 /// The capsule's corner radius is the squircle's radius PLUS the uniform inset
 /// ([`CAPSULE_PAD`]) — so the capsule edge is a *concentric* offset of the
 /// active squircle: two arcs sharing one center, the gap identical (4px) on the
@@ -252,7 +254,9 @@ impl ActivityBar {
         div()
             .id(element_id)
             .size(px(ITEM_SIZE))
-            .rounded_full()
+            // Rounded rect, not a circle — matches the indicator's geometry
+            // (user 2026-07-06: no capsule/toothpick forms on the rail).
+            .rounded(px(SQUIRCLE_RADIUS))
             .flex()
             .items_center()
             .justify_center()
