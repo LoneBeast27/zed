@@ -691,11 +691,13 @@ impl RenderOnce for ButtonLike {
                 this.w(width).justify_center().text_center()
             })
             .when(is_outlined, |this| this.border_1())
+            // Fork shape grammar (2026-07-06): interactive atoms round at 6px
+            // (was rounded_*_sm) — buttons/icon-buttons match list rows.
             .when_some(self.rounding, |this, rounding| {
-                this.when(rounding.top_left, |this| this.rounded_tl_sm())
-                    .when(rounding.top_right, |this| this.rounded_tr_sm())
-                    .when(rounding.bottom_right, |this| this.rounded_br_sm())
-                    .when(rounding.bottom_left, |this| this.rounded_bl_sm())
+                this.when(rounding.top_left, |this| this.rounded_tl(gpui::px(6.)))
+                    .when(rounding.top_right, |this| this.rounded_tr(gpui::px(6.)))
+                    .when(rounding.bottom_right, |this| this.rounded_br(gpui::px(6.)))
+                    .when(rounding.bottom_left, |this| this.rounded_bl(gpui::px(6.)))
             })
             .gap(DynamicSpacing::Base04.rems(cx))
             .map(|this| match self.size {

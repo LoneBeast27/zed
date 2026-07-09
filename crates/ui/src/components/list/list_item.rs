@@ -48,6 +48,7 @@ pub struct ListItem {
     selectable: bool,
     always_show_disclosure_icon: bool,
     outlined: bool,
+    #[allow(dead_code)] // superseded: rows always round (fork shape grammar)
     rounded: bool,
     overflow_x: bool,
     focused: Option<bool>,
@@ -265,7 +266,11 @@ impl RenderOnce for ListItem {
                         })
                 })
             })
-            .when(self.rounded, |this| this.rounded_sm())
+            // Fork shape grammar (2026-07-06): rows ALWAYS round at 6px — the
+            // hover/selection wash reads as a soft rounded rect everywhere
+            // (sidebars, pickers, menus). `self.rounded` is kept as a no-op
+            // opt-in so existing callers stay source-compatible.
+            .rounded(gpui::px(6.))
             .when_some(self.on_hover, |this, on_hover| this.on_hover(on_hover))
             .child(
                 h_flex()

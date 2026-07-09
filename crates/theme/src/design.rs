@@ -36,17 +36,22 @@ pub mod color {
     use super::rgba_hex;
     use gpui::Rgba;
 
-    // ── Surfaces: opaque elevation ramp (agy OLED, near-black base) ──
+    // ── Surfaces: opaque elevation ramp (MONOCHROME ruling 2026-07-06, user:
+    //    "just blacks greys or whites" — every neutral is pure R=G=B; the agy
+    //    zinc ramp read bluish on the user's OLED) ──
+    /// The window chrome BEHIND the floating panels — the darkest layer,
+    /// visible only through the gutters (Antigravity floating-panel model).
+    pub const WINDOW: Rgba = rgba_hex(0x030303ff);
     /// Near-black app background. NOT pure `#000` — avoids AMOLED pixel smear.
-    pub const SURFACE_BASE: Rgba = rgba_hex(0x09090bff);
+    pub const SURFACE_BASE: Rgba = rgba_hex(0x0a0a0aff);
     /// Panels, sidebars.
-    pub const SURFACE_RAISED: Rgba = rgba_hex(0x111114ff);
+    pub const SURFACE_RAISED: Rgba = rgba_hex(0x121212ff);
     /// Dropdowns, popovers.
-    pub const SURFACE_OVERLAY: Rgba = rgba_hex(0x18181bff);
+    pub const SURFACE_OVERLAY: Rgba = rgba_hex(0x191919ff);
     /// Modals, command palette (floating layers).
-    pub const SURFACE_FLOATING: Rgba = rgba_hex(0x1f1f23ff);
+    pub const SURFACE_FLOATING: Rgba = rgba_hex(0x202020ff);
     /// Tooltips, highest z-layer.
-    pub const SURFACE_TOP: Rgba = rgba_hex(0x27272aff);
+    pub const SURFACE_TOP: Rgba = rgba_hex(0x282828ff);
 
     // ── Translucent overlays: tints that ride ON a surface (web app.css) ──
     /// `--surface-1` white·0.05 — idle-pill fill, seg-toggle active.
@@ -54,42 +59,47 @@ pub mod color {
     /// `--hover` white·0.06 — hover wash on chrome.
     pub const HOVER: Rgba = rgba_hex(0xffffff0f);
 
-    // ── Borders / hairlines ──
-    pub const BORDER: Rgba = rgba_hex(0x27272aff);
-    pub const BORDER_SUBTLE: Rgba = rgba_hex(0x1c1c1fff);
-    pub const BORDER_STRONG: Rgba = rgba_hex(0x3f3f46ff);
-    /// Keyboard-focus ring (doubles as `--accent`).
-    pub const BORDER_FOCUS: Rgba = rgba_hex(0x8ab4f8ff);
+    // ── Borders / hairlines (pure neutrals) ──
+    pub const BORDER: Rgba = rgba_hex(0x282828ff);
+    pub const BORDER_SUBTLE: Rgba = rgba_hex(0x1d1d1dff);
+    pub const BORDER_STRONG: Rgba = rgba_hex(0x424242ff);
+    /// Keyboard-focus ring (doubles as `--accent`) — mono: bright grey-white.
+    pub const BORDER_FOCUS: Rgba = rgba_hex(0xe5e5e5ff);
     /// `--hairline` white·0.08 — where two surfaces meet.
     pub const HAIRLINE: Rgba = rgba_hex(0xffffff14);
     /// `--hairline-hi` white·0.12 — graph node borders, edges, scrollbar thumb.
     pub const HAIRLINE_HI: Rgba = rgba_hex(0xffffff1f);
 
-    // ── Text ramp (agy — opaque zinc; off-white primary kills halation) ──
+    // ── Text ramp (pure neutral greys; off-white primary kills halation) ──
     /// 15.8:1 on `SURFACE_BASE` (WCAG AAA). Never pure white on OLED.
-    pub const TEXT: Rgba = rgba_hex(0xececefff);
-    pub const TEXT_MUTED: Rgba = rgba_hex(0xa1a1aaff);
-    pub const TEXT_PLACEHOLDER: Rgba = rgba_hex(0x71717aff);
-    pub const TEXT_DISABLED: Rgba = rgba_hex(0x52525bff);
-    /// Accent text — render at weight 500 (see [`super::type_scale::LABEL`]).
-    pub const TEXT_ACCENT: Rgba = rgba_hex(0x8ab4f8ff);
-    /// Foreground on an accent fill.
-    pub const ON_ACCENT: Rgba = rgba_hex(0x09090bff);
+    pub const TEXT: Rgba = rgba_hex(0xedededff);
+    pub const TEXT_MUTED: Rgba = rgba_hex(0xa3a3a3ff);
+    pub const TEXT_PLACEHOLDER: Rgba = rgba_hex(0x757575ff);
+    pub const TEXT_DISABLED: Rgba = rgba_hex(0x565656ff);
+    /// Accent text — pure white pops one step above `TEXT`; weight 500
+    /// (see [`super::type_scale::LABEL`]).
+    pub const TEXT_ACCENT: Rgba = rgba_hex(0xffffffff);
+    /// Foreground on an accent fill (dark glyph on the light accent).
+    pub const ON_ACCENT: Rgba = rgba_hex(0x0a0a0aff);
 
-    // ── Accent chrome (single accent) ──
+    // ── Accent chrome (single accent — MONO: light grey-white, not blue) ──
     /// `--accent` — the one chrome accent (focus rings, selected, links).
-    pub const ACCENT: Rgba = rgba_hex(0x8ab4f8ff);
-    /// `--accent-fill` — deeper filled-action blue (composer send circle).
-    pub const ACCENT_FILL: Rgba = rgba_hex(0x1a73e8ff);
+    pub const ACCENT: Rgba = rgba_hex(0xe5e5e5ff);
+    /// `--accent-fill` — filled-action surface (composer send circle):
+    /// light fill + [`ON_ACCENT`] dark glyph.
+    pub const ACCENT_FILL: Rgba = rgba_hex(0xe5e5e5ff);
 
-    // ── Run-status (brand Google-dark; agy Tailwind alt in the doc header) ──
+    // ── Run-status. MONO ruling: only SAFETY signals keep hue (running green,
+    //    blocked/warning amber, error red); done/info are calm states and go
+    //    neutral — a board of done runs must not tint the app blue. ──
     pub const STATUS_RUNNING: Rgba = rgba_hex(0x81c995ff);
     pub const STATUS_BLOCKED: Rgba = rgba_hex(0xfdd663ff);
     pub const STATUS_ERROR: Rgba = rgba_hex(0xf28b82ff);
-    pub const STATUS_DONE: Rgba = rgba_hex(0x8ab4f8ff);
+    /// Settled/complete — bright neutral (distinct from the 0.45-white idle).
+    pub const STATUS_DONE: Rgba = rgba_hex(0xd4d4d4ff);
     /// white·0.45 — idle/neutral dot (degrades visibly, never vanishes).
     pub const STATUS_IDLE: Rgba = rgba_hex(0xffffff73);
-    pub const STATUS_INFO: Rgba = rgba_hex(0x8ab4f8ff);
+    pub const STATUS_INFO: Rgba = rgba_hex(0xd4d4d4ff);
     pub const STATUS_SUCCESS: Rgba = rgba_hex(0x81c995ff);
     pub const STATUS_WARNING: Rgba = rgba_hex(0xfdd663ff);
 

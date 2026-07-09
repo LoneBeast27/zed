@@ -35,7 +35,10 @@ pub fn apply_canonical(theme: &mut Theme) {
     col.toolbar_background = h(c::SURFACE_RAISED);
     col.tab_bar_background = h(c::SURFACE_BASE);
     col.tab_inactive_background = h(c::SURFACE_BASE);
-    col.tab_active_background = h(c::SURFACE_RAISED);
+    // OVERLAY (not RAISED): the active tab is a floating rounded rect on a
+    // BASE bar — RAISED-on-BASE was invisible dark-on-dark (user: "still
+    // don't see the change"); the extra elevation step makes it read.
+    col.tab_active_background = h(c::SURFACE_OVERLAY);
     col.editor_background = h(c::SURFACE_BASE);
     col.editor_gutter_background = h(c::SURFACE_BASE);
     col.terminal_background = h(c::SURFACE_BASE);
@@ -80,6 +83,14 @@ pub fn apply_canonical(theme: &mut Theme) {
     col.scrollbar_thumb_active_background = h(c::HAIRLINE_HI);
     col.scrollbar_thumb_border = h(c::HAIRLINE);
     col.scrollbar_track_border = h(c::HAIRLINE);
+
+    // ── Local player (the CARET + text selection): mono, not vendor blue —
+    //    the cyan caret was the only saturated chrome in the UI (audit
+    //    2026-07-06). Remote collaborator colors stay distinct.
+    if let Some(local) = theme.styles.player.0.first_mut() {
+        local.cursor = h(c::TEXT);
+        local.selection = h(c::TEXT).opacity(0.25);
+    }
 
     // ── Semantic status (foreground + border; backgrounds derive elsewhere) ──
     let s = &mut theme.styles.status;

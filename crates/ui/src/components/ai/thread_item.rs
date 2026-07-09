@@ -80,7 +80,9 @@ impl ThreadItem {
             selected: false,
             focused: false,
             hovered: false,
-            rounded: false,
+            // Fork shape grammar (2026-07-06): thread rows default to the
+            // rounded+inset treatment (Antigravity sidebar-row reference).
+            rounded: true,
             added: None,
             removed: None,
             project_paths: None,
@@ -396,9 +398,13 @@ impl RenderOnce for ThreadItem {
             .border_1()
             .border_color(gpui::transparent_black())
             .when(self.focused, |s| s.border_color(color.border_focused))
-            // Canonical agent-UI: floating tile feel — 8px radius + 2px horizontal inset
-            // so the hover/selected bg reads as a discrete card, not a strip.
-            .when(self.rounded, |s| s.rounded_lg().mx_1())
+            // Canonical agent-UI: floating tile feel — 8px radius; the wash
+            // reads as a discrete card, not a strip. NO margin here: this
+            // root is w_full, and w_full + mx overflows the parent in taffy,
+            // clipping the rounded corners out of view (the "square hover"
+            // bug, 2026-07-06) — the horizontal inset belongs to the LIST
+            // container's padding instead.
+            .when(self.rounded, |s| s.rounded_lg())
             .hover(|s| s.bg(hover_color))
             .on_hover(self.on_hover)
             .child(

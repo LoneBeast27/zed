@@ -1,11 +1,16 @@
-use gpui::{App, Styled, hsla};
+use gpui::{App, Styled, hsla, px};
 
 use crate::ElevationIndex;
 use crate::prelude::*;
 
+/// Fork shape grammar (2026-07-06, Antigravity reference): elevated surfaces
+/// (menus, popovers, modals, tooltips) round at 10px — the top step of the
+/// 6/8/10 escalation (atoms 6, inputs 8, surfaces 10).
+const ELEVATED_RADIUS: gpui::Pixels = px(10.);
+
 fn elevated<E: Styled>(this: E, cx: &App, index: ElevationIndex) -> E {
     this.bg(cx.theme().colors().elevated_surface_background)
-        .rounded_lg()
+        .rounded(ELEVATED_RADIUS)
         .border_1()
         .border_color(cx.theme().colors().border_variant)
         .shadow(index.shadow(cx))
@@ -13,7 +18,7 @@ fn elevated<E: Styled>(this: E, cx: &App, index: ElevationIndex) -> E {
 
 fn elevated_borderless<E: Styled>(this: E, cx: &mut App, index: ElevationIndex) -> E {
     this.bg(cx.theme().colors().elevated_surface_background)
-        .rounded_lg()
+        .rounded(ELEVATED_RADIUS)
         .shadow(index.shadow(cx))
 }
 

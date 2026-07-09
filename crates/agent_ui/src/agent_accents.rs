@@ -19,20 +19,26 @@ pub(crate) const fn rgba_hex(hex: u32) -> Rgba {
 }
 
 // ── Vendor accents (chips / nodes / meters only — never chrome) ──
+// 3-provider theming (user ruling 2026-07-08): orange = Anthropic,
+// green = OpenAI, blue = Google. agy + gemini are the SAME provider, so
+// both live in the blue family — agy light, gemini deeper — instead of
+// gemini's old purple, which read as a phantom fourth provider.
 pub const ACCENT_CLAUDE: Rgba = rgba_hex(0xd97757ff);
 pub const ACCENT_CODEX: Rgba = rgba_hex(0x10a37fff);
 pub const ACCENT_AGY: Rgba = rgba_hex(0x8ab4f8ff);
-pub const ACCENT_GEMINI: Rgba = rgba_hex(0xa78bfaff);
+pub const ACCENT_GEMINI: Rgba = rgba_hex(0x4285f4ff);
 
-/// `--accent-fill: #1a73e8` — the filled-action blue (the composer's send
-/// circle; deeper than the `--accent` chrome tint).
-pub const ACCENT_FILL: Rgba = rgba_hex(0x1a73e8ff);
+/// `--accent-fill` — the filled-action surface (the composer's send circle).
+/// MONO ruling 2026-07-06: light fill + dark glyph, no blue.
+pub const ACCENT_FILL: Rgba = rgba_hex(0xe5e5e5ff);
 
-// ── Run-status colors (Google dark palette, per the web token block) ──
+// ── Run-status colors. MONO ruling: only safety signals keep hue (running/
+//    blocked/error); done is a calm state and goes neutral — a board full of
+//    done runs must not tint the app blue. ──
 pub const STATUS_RUNNING: Rgba = rgba_hex(0x81c995ff);
 pub const STATUS_BLOCKED: Rgba = rgba_hex(0xfdd663ff);
 pub const STATUS_ERROR: Rgba = rgba_hex(0xf28b82ff);
-pub const STATUS_DONE: Rgba = rgba_hex(0x8ab4f8ff);
+pub const STATUS_DONE: Rgba = rgba_hex(0xd4d4d4ff);
 /// `rgba(255, 255, 255, 0.45)` — the idle/neutral dot.
 pub const STATUS_IDLE: Rgba = rgba_hex(0xffffff73);
 
@@ -42,10 +48,8 @@ pub const SHIMMER_HIGHLIGHT: Rgba = rgba_hex(0xfaf9f5d9);
 
 /// Vendor accent for an agent name (case-insensitive, substring-tolerant:
 /// `"claude-fable"`, `"OpenAI Codex"`, `"gemini-3"` all resolve). Unknown
-/// agents keep the web's neutral `.sw` default ([`TEXT_3`], app.css:255) —
-/// NOT a vendor color: ACCENT_AGY doubles as --accent/--done, so an
-/// unknown vendor's identity dot would be indistinguishable from
-/// Antigravity AND from chrome-accent/done-status blue.
+/// agents keep the neutral `.sw` default ([`TEXT_3`]) — NOT a vendor color,
+/// so an unknown vendor's identity dot never impersonates a known one.
 pub fn accent_for_agent(name: &str) -> Hsla {
     let name = name.to_ascii_lowercase();
     let rgba = if name.contains("claude") || name.contains("anthropic") {
@@ -62,18 +66,29 @@ pub fn accent_for_agent(name: &str) -> Hsla {
     rgba.into()
 }
 
-/// `--accent: #8ab4f8` — the single chrome accent; usage meters in the OK
-/// band fill with it (PARITY_SPEC §4.4 "accent → --blocked ≥75 → --error
-/// ≥90").
-pub const ACCENT: Rgba = rgba_hex(0x8ab4f8ff);
-/// PARITY_SPEC §1 Atmosphere — `rgba(66,133,244,0.07)`, the one fixed
-/// radial bloom behind the empty/greeting state (a struct literal: 0.07
-/// has no exact u8-alpha byte, so `rgba_hex` can't express it).
+/// Constellation identity color (user ruling 2026-07-08): in the agent
+/// constellation, HUE carries WHO (the 3-provider orange/green/blue) and
+/// the checkpoint-dot SHAPE carries lifecycle (hollow/arc/solid). Safety
+/// stays loud: failed/killed keep the error red regardless of vendor.
+pub fn constellation_node_color(agent: &str, status: &str) -> Hsla {
+    let status = status.to_ascii_lowercase();
+    if matches!(status.as_str(), "error" | "failed" | "dead" | "killed") {
+        return STATUS_ERROR.into();
+    }
+    accent_for_agent(agent)
+}
+
+/// `--accent` — the single chrome accent; usage meters in the OK band fill
+/// with it ("accent → --blocked ≥75 → --error ≥90"). MONO ruling 2026-07-06:
+/// bright grey-white, not blue.
+pub const ACCENT: Rgba = rgba_hex(0xe5e5e5ff);
+/// Atmosphere — the one fixed radial bloom behind the empty/greeting state.
+/// MONO: a soft white bloom (was blue rgba(66,133,244,0.07)).
 pub const GREET_BLOOM: Rgba = Rgba {
-    r: 66. / 255.,
-    g: 133. / 255.,
-    b: 244. / 255.,
-    a: 0.07,
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.05,
 };
 /// `--text-3: rgba(255,255,255,0.38)` — the unknown/stale meter tone.
 pub const TEXT_3: Rgba = rgba_hex(0xffffff61);
@@ -146,6 +161,31 @@ mod tests {
         // Unknown vendor keeps the web's neutral .sw default (--text-3) —
         // never a vendor color (ACCENT_AGY is also --accent/--done).
         assert_eq!(accent_for_agent("mystery-agent"), TEXT_3.into());
+    }
+
+    #[test]
+    fn constellation_color_is_vendor_hue_except_safety_red() {
+        // Identity by hue, lifecycle by shape — but failure is always red.
+        assert_eq!(
+            constellation_node_color("claude-fable", "running"),
+            ACCENT_CLAUDE.into()
+        );
+        assert_eq!(
+            constellation_node_color("codex", "completed"),
+            ACCENT_CODEX.into()
+        );
+        assert_eq!(
+            constellation_node_color("gemini-3", "pending"),
+            ACCENT_GEMINI.into()
+        );
+        assert_eq!(
+            constellation_node_color("claude", "failed"),
+            STATUS_ERROR.into()
+        );
+        assert_eq!(
+            constellation_node_color("agy", "killed"),
+            STATUS_ERROR.into()
+        );
     }
 
     #[test]

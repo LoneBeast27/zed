@@ -109,10 +109,10 @@ impl ParentElement for Tab {
 impl RenderOnce for Tab {
     #[allow(refining_impl_trait)]
     fn render(self, _: &mut Window, cx: &mut App) -> Stateful<Div> {
-        let (text_color, tab_bg, _tab_hover_bg, _tab_active_bg) = match self.selected {
+        let (text_color, tab_bg, tab_hover_bg, _tab_active_bg) = match self.selected {
             false => (
                 cx.theme().colors().text_muted,
-                cx.theme().colors().tab_inactive_background,
+                gpui::transparent_black().into(),
                 cx.theme().colors().ghost_element_hover,
                 cx.theme().colors().ghost_element_active,
             ),
@@ -141,35 +141,28 @@ impl RenderOnce for Tab {
             }
         };
 
+        // Fork shape grammar (2026-07-06, Antigravity reference): tabs are
+        // FLOATING rounded rects inside the bar — 6px radius, 4px vertical
+        // inset, 2px inter-tab gap, active = filled elevation lift, no
+        // underline/side borders (position-based border logic dropped; the
+        // tab bar draws its own frame). `self.position` stays in the API for
+        // callers but no longer changes rendering.
+        let _ = self.position;
         self.div
             .h(Tab::container_height(cx))
-            .bg(tab_bg)
-            .border_color(cx.theme().colors().border)
-            .map(|this| match self.position {
-                TabPosition::First => {
-                    if self.selected {
-                        this.pl_px().border_r_1().pb_px()
-                    } else {
-                        this.pl_px().pr_px().border_b_1()
-                    }
-                }
-                TabPosition::Last => {
-                    if self.selected {
-                        this.border_l_1().border_r_1().pb_px()
-                    } else {
-                        this.pl_px().border_b_1().border_r_1()
-                    }
-                }
-                TabPosition::Middle(Ordering::Equal) => this.border_l_1().border_r_1().pb_px(),
-                TabPosition::Middle(Ordering::Less) => this.border_l_1().pr_px().border_b_1(),
-                TabPosition::Middle(Ordering::Greater) => this.border_r_1().pl_px().border_b_1(),
-            })
+            .px(px(2.))
+            .py(px(4.))
             .cursor_pointer()
             .child(
                 h_flex()
                     .group("")
                     .relative()
-                    .h(Tab::content_height(cx))
+                    .h_full()
+                    .rounded(px(6.))
+                    .bg(tab_bg)
+                    .when(!self.selected, |this| {
+                        this.hover(|style| style.bg(tab_hover_bg))
+                    })
                     .px(DynamicSpacing::Base04.px(cx))
                     .gap(DynamicSpacing::Base04.rems(cx))
                     .text_color(text_color)
