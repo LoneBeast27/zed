@@ -159,7 +159,10 @@ impl TranscriptView {
 pub(super) fn meta_vendor(brain: Option<&str>, runs: &[TranscriptRun]) -> Option<String> {
     let forced_agent = runs.iter().find_map(|run| {
         let reason = run.chip.as_deref()?.split('·').nth(1)?.trim().to_ascii_lowercase();
-        ((reason.contains("forced target") || reason.contains("user override"))
+        // The raw bridge chip reads "forced @vendor target (short-circuit)" —
+        // NOT the display rewrite "forced target" — so match the stable stem
+        // (live-miss caught by the 2026-07-10 playtest: meta rendered bare).
+        ((reason.contains("forced") || reason.contains("override"))
             && !run.agent.is_empty())
         .then(|| format!("@{}", run.agent))
     });

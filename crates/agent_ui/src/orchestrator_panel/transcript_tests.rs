@@ -245,13 +245,21 @@ fn forced_turn_meta_credits_the_run_agent_not_the_brain() {
     let forced = [
         run("claude", Some("claude · Forced target · 100%")),
         run("gemini", Some("gemini · user override")),
+        // The RAW bridge chip (live shape, caught by the 2026-07-10 playtest:
+        // "forced target" as a contiguous substring never matched it).
+        run("codex", Some("codex · forced @vendor target (short-circuit) · 100%")),
     ];
     assert_eq!(
         meta_vendor(Some("gemini"), &forced[..1]),
         Some("@claude".into()),
         "a forced turn shows the agent that ran it, never the brain"
     );
-    assert_eq!(meta_vendor(None, &forced[1..]), Some("@gemini".into()));
+    assert_eq!(meta_vendor(None, &forced[1..2]), Some("@gemini".into()));
+    assert_eq!(
+        meta_vendor(Some("gemini"), &forced[2..]),
+        Some("@codex".into()),
+        "the raw bridge chip shape must also detect as forced"
+    );
 }
 
 #[test]
