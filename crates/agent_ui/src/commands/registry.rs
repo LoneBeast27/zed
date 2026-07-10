@@ -166,9 +166,18 @@ fn in_scope(row: &CommandEntry, forced_vendor: Option<Vendor>) -> bool {
         // strategy) — always in the unforced menu.
         CommandKind::Skill => true,
         // A vendor built-in / custom command is in scope only under its
-        // forcing `@vendor`.
-        CommandKind::Builtin | CommandKind::Custom => row.vendor == forced_vendor,
+        // forcing `@vendor` — where gemini + agy are ONE lane (2026-07-10
+        // swap: gemini = the display name, agy = the CLI underneath), so
+        // forcing either name joins both row sets.
+        CommandKind::Builtin | CommandKind::Custom => match (row.vendor, forced_vendor) {
+            (Some(rv), Some(fv)) => rv == fv || (is_google(rv) && is_google(fv)),
+            _ => row.vendor == forced_vendor,
+        },
     }
+}
+
+fn is_google(vendor: Vendor) -> bool {
+    matches!(vendor, Vendor::Gemini | Vendor::Agy)
 }
 
 /// Sort rank: prefix matches (0) before mid-string matches (1); empty query is

@@ -330,7 +330,6 @@ pub(super) fn render_greeting(cx: &App) -> AnyElement {
                 .child("Force a target with")
                 .child(hint_token("@claude"))
                 .child(hint_token("@codex"))
-                .child(hint_token("@agy"))
                 .child(hint_token("@gemini"))
                 .child(", or open a tri-model debate with")
                 .child(hint_token("/adversary")),

@@ -47,11 +47,13 @@ fn vendor_accent(vendor: Vendor) -> gpui::Hsla {
 /// of detail), so longer than the 150ms effects fades.
 const USAGE_STRIP_MORPH: std::time::Duration = std::time::Duration::from_millis(260);
 
-/// The hint strip's force tokens: (label, inserted prefix).
-const HINTS: [(&str, &str); 5] = [
+/// The hint strip's force tokens: (label, inserted prefix). ONE google chip
+/// (2026-07-10 swap): "@gemini" is the lane's display name — the agy CLI
+/// underneath; typing "@agy" still parses as an input alias, it just has no
+/// chip of its own.
+const HINTS: [(&str, &str); 4] = [
     ("@claude", "@claude "),
     ("@codex", "@codex "),
-    ("@agy", "@agy "),
     ("@gemini", "@gemini "),
     ("/adversary", "/adversary "),
 ];
@@ -671,11 +673,12 @@ impl OrchestratorPanel {
             return None;
         }
         let colors = cx.theme().colors();
-        let rows: [(&'static str, &'static str, Option<gpui::Hsla>); 5] = [
+        // ONE google row (2026-07-10 swap): gemini = the lane's display name,
+        // the agy CLI underneath ("@agy" still parses as an input alias).
+        let rows: [(&'static str, &'static str, Option<gpui::Hsla>); 4] = [
             ("auto", "", None),
             ("claude", "@claude ", Some(vendor_accent(Vendor::Claude))),
             ("codex", "@codex ", Some(vendor_accent(Vendor::Codex))),
-            ("agy", "@agy ", Some(vendor_accent(Vendor::Agy))),
             ("gemini", "@gemini ", Some(vendor_accent(Vendor::Gemini))),
         ];
         let items: Vec<AnyElement> = rows
@@ -776,11 +779,14 @@ impl OrchestratorPanel {
             .bg(SURFACE_2B)
             .text_size(px(13.))
             .text_color(placeholder);
-        for (label, ins) in &HINTS[..4] {
+        // Vendor chips lead, "/adversary" (the last HINTS entry) trails the
+        // "to force" label — index math derived from the array, not hardcoded.
+        let (adversary, vendors) = HINTS.split_last().expect("HINTS non-empty");
+        for (label, ins) in vendors {
             foot = foot.child(hint(label, ins, cx));
         }
         foot.child(div().opacity(0.7).child("to force"))
-            .child(hint(HINTS[4].0, HINTS[4].1, cx))
+            .child(hint(adversary.0, adversary.1, cx))
             .into_any_element()
     }
 

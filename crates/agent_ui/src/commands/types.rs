@@ -18,8 +18,13 @@ use gpui::SharedString;
 pub enum Vendor {
     Claude,
     Codex,
+    /// The google lane's display name (2026-07-10 swap: executed by the agy
+    /// CLI underneath — the original REST lane is permanently dead).
     Gemini,
-    /// Antigravity (`agy`) — the live Google worker for this user's Pro auth.
+    /// Antigravity (`agy`) — the CLI under the gemini lane. Survives as a
+    /// row-vendor tag (its command rows) and input alias; same lane as
+    /// [`Vendor::Gemini`] for scoping (see `registry::in_scope`), no chip of
+    /// its own.
     Agy,
 }
 
