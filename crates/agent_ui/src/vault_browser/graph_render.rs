@@ -86,11 +86,14 @@ pub(super) fn field_view(
 
     // Map doc id → its doc for the node chips + hover cards.
     let by_id: HashMap<&str, &VaultDoc> = docs.iter().map(|d| (d.id.as_str(), *d)).collect();
-    // Density-aware labels (user report 2026-07-10: every node labeled =
-    // unreadable collisions): small graphs label everything; past the
-    // threshold only the anchors of meaning keep a resting label — project
-    // hubs, the index, big nodes — and hover reveals the rest.
-    let dense = field.nodes.len() > LABEL_DENSE_N;
+    // Label budget is PER CLUSTER, not global ("the dots look lost" — user,
+    // 2026-07-10 round 2: the blunt global gate starved meaning). A roomy
+    // cluster labels everything; a crowded one keeps its anchors (hub /
+    // index / big / hovered) and the caption carries the group's meaning.
+    let mut cluster_n: HashMap<&str, usize> = HashMap::new();
+    for n in &field.nodes {
+        *cluster_n.entry(n.project.as_str()).or_default() += 1;
+    }
     let nodes: Vec<gpui::AnyElement> = field
         .nodes
         .iter()
@@ -98,7 +101,10 @@ pub(super) fn field_view(
         .map(|(n, doc)| {
             let is_hovered = hovered == Some(n.id.as_str());
             let size = node_size(doc);
-            let labeled = !dense
+            let roomy = cluster_n
+                .get(n.project.as_str())
+                .is_none_or(|&count| count <= LABEL_DENSE_N);
+            let labeled = roomy
                 || is_hovered
                 || matches!(doc.kind, DocKind::Project | DocKind::Index)
                 || size >= LABEL_MIN_SIZE;
@@ -115,6 +121,37 @@ pub(super) fn field_view(
         })
         .collect();
 
+    // Cluster captions: the project name floats above each cluster's top so
+    // every dot has an immediate group meaning even unlabeled.
+    let captions: Vec<gpui::AnyElement> = field
+        .clusters
+        .iter()
+        .map(|(project, cluster)| {
+            let top = field
+                .nodes
+                .iter()
+                .filter(|n| &n.project == project)
+                .map(|n| n.out_y - n.r)
+                .fold(cluster.cy, f32::min);
+            let name: SharedString = if project.is_empty() {
+                "(unassigned)".into()
+            } else {
+                project.clone().into()
+            };
+            div()
+                .absolute()
+                .left(px(cluster.cx - 80.))
+                .top(px(top - 34.))
+                .w(px(160.))
+                .text_size(px(11.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(cx.theme().colors().text_muted)
+                .text_center()
+                .child(name)
+                .into_any_element()
+        })
+        .collect();
+
     div()
         .id("vault-field-scroll")
         .size_full()
@@ -126,6 +163,7 @@ pub(super) fn field_view(
                 .w(px(field.width))
                 .h(px(field.height))
                 .child(edge_canvas)
+                .children(captions)
                 .children(nodes),
         )
         .into_any_element()

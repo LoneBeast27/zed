@@ -21,7 +21,7 @@ use crate::agent_accents::{
 
 use super::index::{DocKind, VaultDoc};
 use super::panel::VaultBrowserPanel;
-use super::style::HAIRLINE_HI;
+use super::style::{HAIRLINE_HI, SURFACE_1};
 
 /// A resolved edge between two doc indices (into the `docs` slice passed to
 /// [`resolve_edges`]).
@@ -311,7 +311,52 @@ pub fn graph_view(
         .size_full()
         .child(body)
         .child(overlay)
+        // The KEY ("can't see what these dots mean" — user, 2026-07-10):
+        // color = doc type (sessions wear their vendor accent), size = how
+        // much lives inside. Floats bottom-left, always on.
+        .child(legend(cx))
         .into_any_element()
+}
+
+/// The dot legend — one row per node color, floated bottom-left.
+fn legend(cx: &App) -> gpui::Div {
+    let colors = cx.theme().colors();
+    let dot = |color: Hsla, label: &'static str| {
+        h_flex()
+            .items_center()
+            .gap(px(5.))
+            .child(div().size(px(7.)).rounded_full().bg(color))
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(colors.text_muted)
+                    .child(label),
+            )
+    };
+    h_flex()
+        .absolute()
+        .bottom(px(10.))
+        .left(px(12.))
+        .items_center()
+        .flex_wrap()
+        .gap(px(10.))
+        .px(px(10.))
+        .py(px(5.))
+        .rounded(px(8.))
+        .bg(SURFACE_1)
+        .border_1()
+        .border_color(colors.border)
+        .child(dot(color_for_status("completed"), "run digest"))
+        .child(dot(STATUS_DONE.into(), "project"))
+        .child(dot(STATUS_RUNNING.into(), "routine"))
+        .child(dot(rgba_hex(0xffffff8a).into(), "note/brief"))
+        .child(dot(crate::agent_accents::ACCENT_CLAUDE.into(), "session (vendor color)"))
+        .child(
+            div()
+                .text_size(px(10.))
+                .text_color(colors.text_placeholder)
+                .child("size = messages/body · lines: link · project · supersedes"),
+        )
 }
 
 /// A small honest banner chip (surface fill, hairline, muted) floated over the
