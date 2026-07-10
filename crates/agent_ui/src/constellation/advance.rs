@@ -175,22 +175,38 @@ impl Sim {
                 r: node.mass_cur / 2.,
                 dragged: dragging == Some(node.run_id.as_str()),
             }));
-            let hot = dragging.is_some()
+            let tweening = dragging.is_some()
                 || now < self.wake_until
                 || conv.root_anim.is_some()
                 || conv
                     .nodes
                     .iter()
-                    .any(|n| n.arranging.is_some() || n.absorbing.is_some() || n.mass_anim.is_some())
-                || physics::any_hot(&self.scratch);
+                    .any(|n| n.arranging.is_some() || n.absorbing.is_some() || n.mass_anim.is_some());
+            let momentum = physics::any_hot(&self.scratch);
+            let hot = tweening || momentum;
             if hot {
                 physics::step(&mut self.scratch, root.0, root.1, root_r, dt);
+                // Momentum-only hot cap: residual momentum with nothing
+                // driving it past MOMENTUM_CAP_MS is a collide-floor limit
+                // cycle (the bistable alternation the user reported
+                // 2026-07-10), not a settle in progress — freeze it.
+                if tweening {
+                    self.momentum_only_since = None;
+                } else {
+                    let since = *self.momentum_only_since.get_or_insert(now);
+                    if now - since > super::sim::MOMENTUM_CAP_MS {
+                        physics::freeze(&mut self.scratch);
+                        self.momentum_only_since = None;
+                    }
+                }
                 for (node, body) in conv.nodes.iter_mut().zip(self.scratch.iter()) {
                     node.dx = body.dx;
                     node.dy = body.dy;
                     node.vx = body.vx;
                     node.vy = body.vy;
                 }
+            } else {
+                self.momentum_only_since = None;
             }
 
             // Outputs: anchor + physics + drift + spawn flight offset. A

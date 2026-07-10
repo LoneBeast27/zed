@@ -92,6 +92,21 @@ pub fn any_hot(bodies: &[PhysBody]) -> bool {
     bodies.iter().any(|b| b.vx.abs() + b.vy.abs() > 1.5)
 }
 
+/// Kill all momentum in place (positions hold). The limit-cycle breaker: a
+/// dense cluster can sustain a collide-floor oscillation above the sleep
+/// threshold FOREVER (spring pulls into the floor, the shove kicks back out —
+/// the user-observed bistable alternation, 2026-07-10). An equilibrium the
+/// stepper hasn't reached within a caller's hot-cap is a limit cycle, not a
+/// layout in progress — freezing where it stands IS the settle. Deviation
+/// from graph.js noted: the web sim shipped the same cycle; parity yields to
+/// the bug report here.
+pub fn freeze(bodies: &mut [PhysBody]) {
+    for b in bodies {
+        b.vx = 0.;
+        b.vy = 0.;
+    }
+}
+
 /// One physics step over `bodies` around a root at `(root_x, root_y)` with
 /// radius `root_r`. `dt` is in seconds — callers clamp it to the web's
 /// [0.008, 0.033] window. In-place, allocation-free, deterministic.

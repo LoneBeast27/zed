@@ -7,7 +7,7 @@
 //! stepper that breaks the constellation's contract fails HERE.
 
 pub use crate::field_physics::{
-    DAMP_C, GAP, PhysBody, RANGE, REPEL, ROOT_GAP, SPRING_K, any_hot, step,
+    DAMP_C, GAP, PhysBody, RANGE, REPEL, ROOT_GAP, SPRING_K, any_hot, freeze, step,
 };
 
 #[cfg(test)]

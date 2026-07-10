@@ -3,7 +3,7 @@
 
 use crate::bridge::{RunRow, RunTokens};
 
-use super::super::sim::{ABSORB_MS, LINGER_MS, Sim};
+use super::super::sim::{ABSORB_MS, LINGER_MS, MOMENTUM_CAP_MS, Sim, WAKE_MS};
 use super::*;
 
 fn run(id: &str, status: &str) -> RunRow {
@@ -130,6 +130,35 @@ fn physics_separates_crowded_nodes_then_the_field_sleeps() {
         .map(|n| n.vx.abs() + n.vy.abs())
         .fold(0. , f32::max);
     assert!(displaced < 1.5, "momentum bled off, max |v| sum {displaced}");
+}
+
+#[test]
+fn momentum_only_limit_cycle_freezes_at_the_cap() {
+    // THE user-reported constellation bug (2026-07-10): a dense sibling
+    // cluster sustains a collide-floor oscillation above the sleep threshold
+    // forever ("bistable medium it alternates between and doesn't settle").
+    // Twelve fat nodes into a 340px panel = every slot deep inside its
+    // neighbors' floors. Whatever the cycle does, momentum-only heat must
+    // not outlive WAKE_MS + MOMENTUM_CAP_MS (+ slack): the field freezes.
+    let mut sim = Sim::default();
+    let board: Vec<RunRow> = (0..12).map(|i| run(&format!("r{i}"), "running")).collect();
+    sim.fold(&board, &[], 340., 0.);
+    let deadline = WAKE_MS + MOMENTUM_CAP_MS + 1500.;
+    pump(&mut sim, 0., deadline);
+    let conv = &sim.convs[0];
+    let hottest = conv
+        .nodes
+        .iter()
+        .map(|n| n.vx.abs() + n.vy.abs())
+        .fold(0., f32::max);
+    assert!(
+        hottest < 1.5,
+        "momentum-only heat outlived the cap — limit cycle not frozen, \
+         max |v| sum {hottest}"
+    );
+    for n in &conv.nodes {
+        assert!(n.out_x.is_finite() && n.out_y.is_finite());
+    }
 }
 
 #[test]

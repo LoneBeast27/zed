@@ -37,6 +37,10 @@ pub const SPAWN_STEP_DELAY_MS: f32 = 70.;
 pub const WAKE_MS: f32 = 1500.;
 /// Mass-retarget physics wake window (ms) — radii moved, resolve overlaps.
 pub const MASS_WAKE_MS: f32 = 900.;
+/// Momentum-only hot cap (ms): residual momentum with no wake/tween/drag
+/// alive past this is a collide-floor limit cycle, not a settle in progress
+/// — the field freezes (see `Sim::momentum_only_since`).
+pub const MOMENTUM_CAP_MS: f32 = 4000.;
 /// Anchor re-slot threshold (px): closer than this stays put.
 const RESLOT_EPS: f32 = 2.;
 /// Layout width bucket (px): the fan re-aims only when the measured width
@@ -225,6 +229,12 @@ pub struct Sim {
     absorbed: HashSet<String>,
     /// Physics sleep gate: the field runs only while hot.
     pub(super) wake_until: f32,
+    /// Sim-ms since the field has been hot on residual MOMENTUM alone (no
+    /// wake window, no tween, no drag). A dense sibling cluster can sustain
+    /// a collide-floor limit cycle above the sleep threshold forever (the
+    /// user-observed bistable alternation, 2026-07-10) — past
+    /// [`MOMENTUM_CAP_MS`] the field freezes where it stands.
+    pub(super) momentum_only_since: Option<f32>,
     pub(super) dragging: Option<String>,
     /// Scratch physics buffer (reused every frame — no per-frame allocation
     /// in the hot loop).
@@ -244,6 +254,7 @@ impl Default for Sim {
             completed_at: HashMap::new(),
             absorbed: HashSet::new(),
             wake_until: 0.,
+            momentum_only_since: None,
             dragging: None,
             scratch: Vec::new(),
         }
