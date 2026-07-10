@@ -30,10 +30,13 @@ use workspace::{
 
 use super::axioms::AxiomsState;
 use super::field::VaultField;
+use super::importers_ops::ImportersState;
 use super::index::{VaultIndex, VaultRoot, build_index};
 use super::new_note::NewNoteState;
 use super::panel_graph::GraphDrag;
 use super::promote::PromoteState;
+use super::routines::RoutinesState;
+use super::writeback_state::WritebackState;
 
 actions!(
     vault_browser,
@@ -48,12 +51,31 @@ actions!(
 const STALE_AFTER: Duration = Duration::from_secs(60);
 
 /// Which body is showing — mirrors the board's Graph/Grid seg-toggle.
-/// AXIOMS is the third segment (bridge-fed candidate review, not vault fs).
+/// AXIOMS is the third segment (bridge-fed candidate review, not vault fs);
+/// ROUTINES is the fourth (the bridge's croniter table — definitions ARE
+/// vault files, but the live schedule/consent state lives on the bridge);
+/// WRITEBACK is the fifth (run→note candidates + import conflicts, the
+/// bridge's promote-on-read staging); IMPORT is the sixth (the importers
+/// trigger/progress surface the staging empty-state hint points at — see
+/// `importers.rs` for the discovered two-family contract).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VaultView {
     List,
     Graph,
     Axioms,
+    Routines,
+    Writeback,
+    Import,
+}
+
+impl VaultView {
+    /// The bridge-fed bodies (no fs index, no vault filter box).
+    pub(super) fn is_bridge_fed(self) -> bool {
+        matches!(
+            self,
+            VaultView::Axioms | VaultView::Routines | VaultView::Writeback | VaultView::Import
+        )
+    }
 }
 
 /// GRAPH edge filter (galaxy backlog 2026-07-08): declutter by isolating
@@ -70,8 +92,9 @@ pub struct VaultBrowserPanel {
     focus_handle: FocusHandle,
     pub(super) workspace: WeakEntity<Workspace>,
     pub(super) fs: Arc<dyn Fs>,
-    /// The built index, `None` until the first background walk lands.
-    index: Option<VaultIndex>,
+    /// The built index, `None` until the first background walk lands
+    /// (pub(super) for `panel_body`'s take/put borrow-sever swap).
+    pub(super) index: Option<VaultIndex>,
     /// True while a walk is in flight (drives the header spinner label).
     indexing: bool,
     /// When the current index finished building (staleness gate).
@@ -81,19 +104,28 @@ pub struct VaultBrowserPanel {
     edges: EdgeMode,
     filter_editor: Entity<Editor>,
     /// Collapsed tree-section keys (session-local, the Obsidian folder state).
-    collapsed: HashSet<SharedString>,
+    pub(super) collapsed: HashSet<SharedString>,
     /// Per-bundle promote UI state.
     pub(super) promote: PromoteState,
     /// AXIOMS view state (bridge snapshot + fetch lifecycle + in-flight
     /// approve/reject marks) — owned by `axioms.rs`, stored here.
     pub(super) axioms: AxiomsState,
+    /// ROUTINES view state (bridge snapshot + fetch lifecycle + in-flight
+    /// action marks + verbatim action notes) — owned by `routines.rs`.
+    pub(super) routines: RoutinesState,
+    /// WRITEBACK view state (run→note candidates + import conflicts + the
+    /// conflict modal) — owned by `writeback_state.rs`, stored here.
+    pub(super) writeback: WritebackState,
+    /// IMPORT view state (importer snapshot + compose + the watched job) —
+    /// owned by `importers_ops.rs`, stored here.
+    pub(super) importers: ImportersState,
     /// "+ New note" compose state — owned by `new_note.rs`, stored here.
     pub(super) new_note: NewNoteState,
     /// Open reading-view tabs by absolute path (dedup — a re-click activates
     /// the existing tab instead of stacking; see `open_doc.rs`).
     pub(super) previews: HashMap<PathBuf, WeakEntity<MarkdownPreviewView>>,
     /// GRAPH view scroll position.
-    graph_scroll: gpui::ScrollHandle,
+    pub(super) graph_scroll: gpui::ScrollHandle,
     /// Field sim-clock origin (ms are measured from here).
     pub(super) field_epoch: Instant,
     /// The GRAPH view's physics field (shared constellation stepper) — built
@@ -144,6 +176,9 @@ impl VaultBrowserPanel {
             collapsed: HashSet::default(),
             promote: PromoteState::default(),
             axioms: AxiomsState::default(),
+            routines: RoutinesState::default(),
+            writeback: WritebackState::default(),
+            importers: ImportersState::default(),
             new_note: NewNoteState::default(),
             previews: HashMap::default(),
             graph_scroll: gpui::ScrollHandle::new(),
@@ -183,12 +218,16 @@ impl VaultBrowserPanel {
     }
 
     /// Manual refresh (header button, post-promote, post-note-create) —
-    /// always rebuilds (and refetches the bridge axioms when that view is up,
-    /// so refresh means refresh there too).
+    /// always rebuilds (and refetches the active bridge-fed view — axioms or
+    /// routines — so refresh means refresh there too).
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.start_index(cx);
-        if self.view == VaultView::Axioms {
-            self.fetch_axioms(cx);
+        match self.view {
+            VaultView::Axioms => self.fetch_axioms(cx),
+            VaultView::Routines => self.fetch_routines(cx),
+            VaultView::Writeback => self.fetch_writeback(cx),
+            VaultView::Import => self.fetch_importers(cx),
+            VaultView::List | VaultView::Graph => {}
         }
         cx.notify();
     }
@@ -215,12 +254,16 @@ impl VaultBrowserPanel {
     pub(super) fn set_view(&mut self, view: VaultView, cx: &mut Context<Self>) {
         if self.view != view {
             self.view = view;
-            // Flip-to-Axioms refreshes the candidate list — a visibility-gated
-            // one-shot, same as the briefing panel. §11-safe from the seg
-            // listener: `fetch_axioms` is a state flip + `cx.spawn` (schedules,
-            // never re-enters this update).
-            if view == VaultView::Axioms {
-                self.fetch_axioms(cx);
+            // Flip-to-a-bridge-fed-view refreshes its snapshot — a
+            // visibility-gated one-shot, same as the briefing panel. §11-safe
+            // from the seg listener: both fetches are a state flip + `cx.spawn`
+            // (schedules, never re-enters this update).
+            match view {
+                VaultView::Axioms => self.fetch_axioms(cx),
+                VaultView::Routines => self.fetch_routines(cx),
+                VaultView::Writeback => self.fetch_writeback(cx),
+                VaultView::Import => self.fetch_importers(cx),
+                VaultView::List | VaultView::Graph => {}
             }
             cx.notify();
         }
@@ -311,128 +354,6 @@ impl Render for VaultBrowserPanel {
     }
 }
 
-impl VaultBrowserPanel {
-    /// Build the body element (returns the element, whether a frame pump is
-    /// needed, and whether the graph is the active surface — for drag wiring).
-    /// The indexing placeholder shows until the first walk lands.
-    fn render_body_element(&mut self, cx: &mut Context<Self>) -> (gpui::AnyElement, bool, bool) {
-        // AXIOMS is bridge-fed, not vault-fs — it renders regardless of the
-        // index state (an unindexed vault must not blank the axioms review).
-        if self.view == VaultView::Axioms {
-            return (self.axioms_view(cx), false, false);
-        }
-        let filter = self.filter_editor.read(cx).text(cx);
-        // Take the index out to sever the `&self.index` borrow across the
-        // `&mut self` body-building call, then put it back (a cheap swap).
-        let Some(index) = self.index.take() else {
-            let el = super::style::empty_state(
-                IconName::Sparkle,
-                "Indexing the vault…",
-                "Walking the live vault and import staging.",
-                cx,
-            )
-            .into_any_element();
-            return (el, false, false);
-        };
-        let out = self.render_body(&index, &filter, cx);
-        self.index = Some(index);
-        out
-    }
-
-    /// The list/graph body for the active root, plus the honest empty states
-    /// when a root's directory is missing (spec §6). Returns `(element,
-    /// animating, graph_active)`.
-    fn render_body(
-        &mut self,
-        index: &VaultIndex,
-        filter: &str,
-        cx: &mut Context<Self>,
-    ) -> (gpui::AnyElement, bool, bool) {
-        let present = match self.root {
-            VaultRoot::Vault => index.vault_present,
-            VaultRoot::Staging => index.staging_present,
-        };
-        if !present {
-            let (headline, copy) = match self.root {
-                VaultRoot::Vault => (
-                    "Vault not found",
-                    "Looked for the live vault at L:\\Projects\\atlas-vault.",
-                ),
-                VaultRoot::Staging => (
-                    "No staged sessions",
-                    "Looked in vault-import-staging — run `import run` to stage sessions.",
-                ),
-            };
-            let el = super::style::empty_state(IconName::FolderOpen, headline, copy, cx)
-                .into_any_element();
-            return (el, false, false);
-        }
-
-        let docs = index.docs_for(self.root);
-        // Staging with zero docs → the "run import run" hint (spec §6).
-        if docs.is_empty() && self.root == VaultRoot::Staging {
-            let el = super::style::empty_state(
-                IconName::Envelope,
-                "No staged sessions",
-                "Run `import run` to stage sessions here for review.",
-                cx,
-            )
-            .into_any_element();
-            return (el, false, false);
-        }
-
-        match self.view {
-            // Handled before the index gate in `render_body_element` (bridge
-            // data, not vault fs) — kept here for match exhaustiveness.
-            VaultView::Axioms => (self.axioms_view(cx), false, false),
-            VaultView::List => {
-                let reveal = self.take_graph_reveal();
-                let weak = cx.weak_entity();
-                let el = super::list::list_view(
-                    &docs,
-                    self.root,
-                    filter,
-                    &self.collapsed,
-                    &self.promote,
-                    reveal.as_deref(),
-                    weak,
-                    cx,
-                );
-                (el, false, false)
-            }
-            VaultView::Graph => {
-                // Fold: (re)build the field when the doc set (identity) changed
-                // — a promote re-indexes and the fold picks it up with no jump
-                // (§3); pins + live displacement carry across. Below the field
-                // ceiling only (the static fallback needs no field).
-                let now = self.field_now();
-                let degraded = docs.len() > super::field::FIELD_MAX_NODES;
-                let animating = if degraded {
-                    false
-                } else {
-                    if !self.graph_field.matches(&docs) {
-                        self.graph_field
-                            .rebuild(&docs, super::graph::node_size, now);
-                    }
-                    self.graph_field.advance(now)
-                };
-                let hovered = self.graph_hovered.clone();
-                let weak = cx.weak_entity();
-                let el = super::graph::graph_view(
-                    &self.graph_field,
-                    &docs,
-                    &self.graph_scroll,
-                    hovered.as_deref(),
-                    self.edges,
-                    weak,
-                    cx,
-                );
-                (el, animating, true)
-            }
-        }
-    }
-}
-
 impl Focusable for VaultBrowserPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -469,12 +390,17 @@ impl Panel for VaultBrowserPanel {
 
     fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
         // On re-open (becoming active), re-index if the last build is stale
-        // (>60s) — spec §5. No fs watcher in v1. The AXIOMS view refetches on
-        // the same visibility edge (its data lives on the bridge, not the fs).
+        // (>60s) — spec §5. No fs watcher in v1. The bridge-fed views refetch
+        // on the same visibility edge (their data lives on the bridge, not
+        // the fs).
         if active {
             self.reindex_if_stale(cx);
-            if self.view == VaultView::Axioms {
-                self.fetch_axioms(cx);
+            match self.view {
+                VaultView::Axioms => self.fetch_axioms(cx),
+                VaultView::Routines => self.fetch_routines(cx),
+                VaultView::Writeback => self.fetch_writeback(cx),
+                VaultView::Import => self.fetch_importers(cx),
+                VaultView::List | VaultView::Graph => {}
             }
         }
     }

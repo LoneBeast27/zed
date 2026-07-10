@@ -1,9 +1,9 @@
 //! The vault-browser panel header (a `VaultBrowserPanel` impl split out to
 //! keep `panel.rs` under the 500-line ceiling — single concern: the chrome
 //! row). Title · build note · "+ new note" · refresh · root switcher
-//! (Vault ⇄ Staging) · List/Graph/Axioms toggle · filter box · the inline
-//! new-note compose row. The board seg-toggle idiom (hairline, flat, no
-//! boxes — PARITY_SPEC §4.2).
+//! (Vault ⇄ Staging) · List/Graph/Axioms/Routines toggle · filter box · the
+//! inline new-note compose row. The board seg-toggle idiom (hairline, flat,
+//! no boxes — PARITY_SPEC §4.2).
 //!
 //! The old Kind/Recent sort toggle is GONE (vault-UX pass 2026-07-10): the
 //! LIST is a folder tree with a permanent Recent section on top, so the
@@ -101,17 +101,21 @@ impl VaultBrowserPanel {
                     .gap(px(8.))
                     .child(self.render_root_switcher(cx))
                     // Contextual control: the GRAPH view filters edges; LIST
-                    // (the folder tree) and AXIOMS carry none.
+                    // (the folder tree) and the bridge-fed views carry none.
                     .child(match self.view() {
                         VaultView::Graph => self.render_edges_toggle(cx),
-                        VaultView::List | VaultView::Axioms => div(),
+                        VaultView::List
+                        | VaultView::Axioms
+                        | VaultView::Routines
+                        | VaultView::Writeback
+                        | VaultView::Import => div(),
                     })
                     .child(self.render_view_toggle(cx)),
             )
             // The filter box searches the INDEXED VAULT (title/tag/path) — it
-            // does not apply to the bridge axioms list, so it hides there
-            // rather than sit dead (honest chrome).
-            .when(self.view() != VaultView::Axioms, |this| {
+            // does not apply to the bridge-fed lists (axioms/routines), so it
+            // hides there rather than sit dead (honest chrome).
+            .when(!self.view().is_bridge_fed(), |this| {
                 this.child(self.render_filter(cx))
             })
             // The inline "+ new note" compose row (new_note.rs).
@@ -157,7 +161,8 @@ impl VaultBrowserPanel {
         )
     }
 
-    /// The List/Graph/Axioms view toggle (mirrors the board seg-toggle).
+    /// The List/Graph/Axioms/Routines/Writeback view toggle (the board
+    /// seg-toggle).
     fn render_view_toggle(&self, cx: &mut Context<Self>) -> gpui::Div {
         let view = self.view();
         self.segmented(
@@ -169,6 +174,21 @@ impl VaultBrowserPanel {
                     "Axioms",
                     view == VaultView::Axioms,
                     RootOrView::View(VaultView::Axioms),
+                ),
+                (
+                    "Routines",
+                    view == VaultView::Routines,
+                    RootOrView::View(VaultView::Routines),
+                ),
+                (
+                    "Writeback",
+                    view == VaultView::Writeback,
+                    RootOrView::View(VaultView::Writeback),
+                ),
+                (
+                    "Import",
+                    view == VaultView::Import,
+                    RootOrView::View(VaultView::Import),
                 ),
             ],
             cx,
