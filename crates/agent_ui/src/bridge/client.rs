@@ -53,6 +53,39 @@ const SSE_BACKOFF_STEP: Duration = Duration::from_secs(1);
 /// …capped here.
 const SSE_BACKOFF_CAP: Duration = Duration::from_secs(5);
 
+/// Boot the bridge if nothing answers on 4530 (2026-07-10: the app was
+/// CONNECT-ONLY — every session silently depended on a manually-started
+/// `python -m bridge.serve`, and the day one wasn't running every surface
+/// sat offline). One spawn attempt per app run: detached, fire-and-forget —
+/// the connection loop's normal backoff picks it up as it comes alive. The
+/// bridge repo comes from `AGENTIC_BRIDGE_ROOT` (dev-box default compiled
+/// in); a missing python/repo degrades to today's behavior (offline poll +
+/// honest offline UI), logged.
+fn ensure_bridge_process() {
+    let root = std::env::var("AGENTIC_BRIDGE_ROOT")
+        .unwrap_or_else(|_| r"L:\Projects\agentic-ide".to_string());
+    if !std::path::Path::new(&root).join("bridge").is_dir() {
+        log::warn!("bridge autostart: no bridge/ under {root} — skipping spawn");
+        return;
+    }
+    let mut cmd = std::process::Command::new("python");
+    cmd.args(["-m", "bridge.serve"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // DETACHED_PROCESS | CREATE_NO_WINDOW: outlives the app, no console.
+        cmd.creation_flags(0x0000_0008 | 0x0800_0000);
+    }
+    match cmd.spawn() {
+        Ok(child) => log::info!("bridge autostart: spawned pid {} in {root}", child.id()),
+        Err(err) => log::warn!("bridge autostart failed ({root}): {err}"),
+    }
+}
+
 pub(super) async fn connection_loop(
     http_client: Arc<dyn HttpClient>,
     this: WeakEntity<BridgeStore>,
@@ -62,6 +95,18 @@ pub(super) async fn connection_loop(
     // The 12s usage schedule (None = due immediately) — owned here so it
     // spans backoff windows instead of resetting with each one.
     let mut last_usage_fetch: Option<Instant> = None;
+    // Bridge autostart: one probe, one spawn attempt, before the loop. A
+    // healthy bridge answers and nothing is spawned.
+    {
+        let client = http_client.clone();
+        let alive = cx
+            .background_spawn(async move { connect_sse(client.as_ref()).await })
+            .await
+            .is_ok();
+        if !alive {
+            ensure_bridge_process();
+        }
+    }
     loop {
         let client = http_client.clone();
         let attached = cx
