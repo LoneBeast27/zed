@@ -22,8 +22,11 @@
 //!                 project clusters; the v2 upgrade over the static fallback).
 //! - [`graph`]   — edge resolution + the GRAPH renderer (field or static).
 //! - [`promote`] — staging→vault bundle move (collision-safe) + its UI state.
+//! - [`axioms`]  — the AXIOMS view (bridge `GET /axioms` + user-gated
+//!                 approve/reject), the one bridge-fed body in this panel.
 //! - [`style`]   — vault chips + age formatting (re-uses task_board tokens).
 
+pub mod axioms;
 pub mod field;
 pub mod graph;
 mod graph_render;
