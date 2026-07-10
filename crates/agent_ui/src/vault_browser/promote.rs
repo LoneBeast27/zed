@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use fs::{Fs, RenameOptions};
+use gpui::AppContext as _;
 
 /// The live vault root the promote target is anchored under.
 const VAULT_ROOT: &str = r"L:\Projects\atlas-vault";
@@ -178,6 +179,60 @@ async fn collision_free_async(fs: &dyn Fs, target: &Path) -> PathBuf {
 /// stray file collision still counts.
 async fn path_exists(fs: &dyn Fs, path: &Path) -> bool {
     fs.metadata(path).await.ok().flatten().is_some()
+}
+
+// ── panel interaction handlers (split from panel.rs — single concern) ──
+
+impl super::panel::VaultBrowserPanel {
+    /// First promote click → arm (show Confirm/Cancel). Pure state flip.
+    pub fn arm_promote(&mut self, key: String, cx: &mut gpui::Context<Self>) {
+        self.promote.set(key, BundleState::Armed);
+        cx.notify();
+    }
+
+    /// Dismiss the armed affordance. Pure state flip.
+    pub fn cancel_promote(&mut self, key: String, cx: &mut gpui::Context<Self>) {
+        self.promote.set(key, BundleState::Rest);
+        cx.notify();
+    }
+
+    /// Confirm → run the fs move on the background executor, re-index on
+    /// success. The move is a filesystem mutation reached from a click; mark
+    /// in-flight synchronously (immediate feedback), spawn the move (already
+    /// off the listener — `cx.spawn` schedules, does not re-enter).
+    pub fn confirm_promote(&mut self, key: String, bundle_dir: PathBuf, cx: &mut gpui::Context<Self>) {
+        self.promote.set(key.clone(), BundleState::InFlight);
+        cx.notify();
+        let fs = self.fs.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move { promote_bundle(fs, bundle_dir).await })
+                .await;
+            this.update(cx, |this, cx| {
+                match outcome {
+                    Ok(o) => this.promote.set(
+                        key,
+                        BundleState::Promoted {
+                            collided: o.renamed_for_collision,
+                        },
+                    ),
+                    Err(e) => this
+                        .promote
+                        .set(key, BundleState::Failed(short_error(&e.to_string()))),
+                }
+                // Rebuild so the bundle leaves staging + appears in the vault.
+                this.refresh(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+/// Trim an fs error to a short inline string (drop the noisy path suffix).
+fn short_error(msg: &str) -> String {
+    msg.lines().next().unwrap_or(msg).chars().take(48).collect()
 }
 
 #[cfg(test)]

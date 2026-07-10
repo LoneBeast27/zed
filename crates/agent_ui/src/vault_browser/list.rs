@@ -1,97 +1,58 @@
-//! The LIST view — the task-board list idiom (`uniform_list`, virtualized)
-//! over OKF documents grouped by kind (sessions by vendor, notes by type,
-//! runs). Each row: title · type chip · vendor chip · updated-age ·
-//! redactions count (sessions) · promote action (staged sessions). Click →
-//! open the md in a center editor tab (deferred by the panel per §11).
+//! The LIST view — an Obsidian-style folder tree (`uniform_list`, virtualized)
+//! over OKF documents: a Recent section on top, then the vault's real
+//! hierarchy as collapsible sections with counts (see [`super::tree`]).
+//! Machine dirs never reach the tree (the walker skips them). Row click →
+//! the RENDERED reading view; the pencil → raw source (see [`super::row`]).
 //!
-//! Groups are flattened into a single row vec (section-header rows + doc rows)
-//! so one `uniform_list` virtualizes the whole thing — rows stay fixed-height,
+//! Everything is flattened into a single row vec (header rows + doc rows) so
+//! one `uniform_list` virtualizes the whole tree — rows stay fixed-height,
 //! render cost is bounded by the viewport (RUST_PORT_NOTES §8 / principle 4).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{AnyElement, ElementId, FontWeight, SharedString, WeakEntity, uniform_list};
 use ui::prelude::*;
 
-use super::index::{DocKind, VaultDoc, VaultRoot, group_by_kind};
+use super::index::{VaultDoc, VaultRoot};
 use super::panel::VaultBrowserPanel;
 use super::promote::PromoteState;
-use super::style::{redactions_badge, type_chip, updated_age, vendor_chip};
+use super::row::{INDENT, ROW_HEIGHT, doc_row};
+use super::tree::{Row, flatten_rows};
 
-/// Fixed row height for EVERY row — headers included. `uniform_list`
-/// measures one item and gives all items that slot, so mixed heights
-/// (the old 30px header / 56px doc split) silently overlap: every doc
-/// overflowed its short slot and painted over the next section (dogfood
-/// 2026-07-07, the vault dock's overdrawn headers). Headers bottom-anchor
-/// their label inside the uniform slot, which reads as section spacing.
-const ROW_HEIGHT: f32 = 56.;
-
-/// A flattened list row: a group header or a document.
-#[derive(Clone)]
-enum Row {
-    Header { label: SharedString, count: usize },
-    Doc(Arc<VaultDoc>),
-}
-
-/// Build the virtualized document list for `root`, filtered by `filter`
-/// (lowercased substring over the precomputed search key). `promote` reflects
-/// per-bundle arm/promoted state for the staged-session row action.
+/// Build the virtualized document tree for `root`, filtered by `filter`
+/// (lowercased substring over the precomputed search key — title, tags, path
+/// segments, run id — so the one box filters across EVERY section live).
+/// `collapsed` is the panel's session-local folder state; a live filter
+/// auto-expands and hides Recent (matches show in place).
 pub fn list_view(
     docs: &[&VaultDoc],
     root: VaultRoot,
     filter: &str,
-    sort: super::panel::SortMode,
+    collapsed: &HashSet<SharedString>,
     promote: &PromoteState,
     reveal: Option<&str>,
     panel: WeakEntity<VaultBrowserPanel>,
     cx: &App,
 ) -> AnyElement {
     let filter = filter.trim().to_lowercase();
+    let filtering = !filter.is_empty();
     let filtered: Vec<&VaultDoc> = docs
         .iter()
         .copied()
-        .filter(|d| filter.is_empty() || d.search_key.contains(&filter))
+        .filter(|d| !filtering || d.search_key.contains(&filter))
         .collect();
 
     if filtered.is_empty() {
-        let (headline, copy) = if filter.is_empty() {
-            ("No documents", "This root has no OKF notes to list.")
-        } else {
+        let (headline, copy) = if filtering {
             ("No matches", "No documents match the filter.")
+        } else {
+            ("No documents", "This root has no OKF notes to list.")
         };
         return super::style::empty_state(IconName::Filter, headline, copy, cx).into_any_element();
     }
 
-    // Flatten into header + doc rows. Kind = the stable OKF section order;
-    // Recent (galaxy backlog 2026-07-08) = one stream, newest ISO first
-    // (undated docs sink to the tail).
-    let mut rows: Vec<Row> = Vec::with_capacity(filtered.len() + 4);
-    match sort {
-        super::panel::SortMode::Kind => {
-            let groups = group_by_kind(&filtered);
-            for (kind, group_docs) in &groups {
-                rows.push(Row::Header {
-                    label: kind.group_label().into(),
-                    count: group_docs.len(),
-                });
-                for doc in group_docs {
-                    rows.push(Row::Doc(Arc::new((*doc).clone())));
-                }
-            }
-        }
-        super::panel::SortMode::Updated => {
-            let mut recent = filtered.clone();
-            recent.sort_by(|a, b| b.updated.cmp(&a.updated).then(a.title.cmp(&b.title)));
-            rows.push(Row::Header {
-                label: "Recent".into(),
-                count: recent.len(),
-            });
-            for doc in recent {
-                rows.push(Row::Doc(Arc::new(doc.clone())));
-            }
-        }
-    }
-    let rows = Arc::new(rows);
+    let rows = Arc::new(flatten_rows(&filtered, root, filtering, collapsed));
     let promote = promote.clone();
     let reveal: Option<SharedString> = reveal.map(SharedString::from);
 
@@ -101,12 +62,24 @@ pub fn list_view(
         move |range, _window, cx| {
             range
                 .map(|ix| match &rows[ix] {
-                    Row::Header { label, count } => {
-                        header_row(label.clone(), *count, cx).into_any_element()
-                    }
-                    Row::Doc(doc) => {
+                    Row::Header {
+                        key,
+                        label,
+                        count,
+                        depth,
+                        collapsed,
+                    } => header_row(
+                        key.clone(),
+                        label.clone(),
+                        *count,
+                        *depth,
+                        *collapsed,
+                        panel.clone(),
+                        cx,
+                    ),
+                    Row::Doc(doc, depth) => {
                         let revealed = reveal.as_deref() == Some(doc.id.as_str());
-                        doc_row(doc, root, &promote, revealed, panel.clone(), cx)
+                        doc_row(doc, *depth, root, &promote, revealed, panel.clone(), cx)
                     }
                 })
                 .collect()
@@ -119,255 +92,59 @@ pub fn list_view(
     .into_any_element()
 }
 
-/// A section header (`DocKind::group_label` · count), muted uppercase-ish.
-fn header_row(label: SharedString, count: usize, cx: &mut App) -> Div {
+/// A collapsible section header: disclosure chevron · label · count. Click
+/// toggles the fold (a pure entity-state flip on the panel — §11-safe from
+/// the listener; the tree re-flattens on the notify). Bottom-anchored inside
+/// the uniform slot (the single-row-height law — see [`super::row`]).
+fn header_row(
+    key: SharedString,
+    label: SharedString,
+    count: usize,
+    depth: usize,
+    collapsed: bool,
+    panel: WeakEntity<VaultBrowserPanel>,
+    cx: &mut App,
+) -> AnyElement {
     let colors = cx.theme().colors();
+    let hover_color = colors.text_muted;
+    let chevron = if collapsed {
+        IconName::ChevronRight
+    } else {
+        IconName::ChevronDown
+    };
+    let toggle_key = key.clone();
     h_flex()
+        .id(ElementId::Name(format!("vault-section-{key}").into()))
         .h(px(ROW_HEIGHT))
         .w_full()
         .items_end()
-        .gap(px(6.))
+        .gap(px(5.))
+        .pl(px(depth as f32 * INDENT))
         .pb(px(8.))
+        .cursor_pointer()
+        .text_color(colors.text_placeholder)
+        .hover(move |s| s.text_color(hover_color))
+        .on_click(move |_, _, cx| {
+            let k = toggle_key.clone();
+            panel
+                .update(cx, |panel, cx| panel.toggle_section(k, cx))
+                .ok();
+        })
+        .child(
+            Icon::new(chevron)
+                .size(ui::IconSize::XSmall)
+                .color(Color::Custom(colors.text_placeholder)),
+        )
         .child(
             div()
                 .text_size(px(11.))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(colors.text_placeholder)
                 .child(label),
         )
         .child(
             div()
                 .text_size(px(11.))
-                .text_color(colors.text_placeholder)
                 .child(SharedString::from(format!("({count})"))),
         )
-}
-
-/// One document row: title + meta line (type/vendor chips, age, redactions),
-/// plus a promote affordance for staged sessions.
-fn doc_row(
-    doc: &VaultDoc,
-    root: VaultRoot,
-    promote: &PromoteState,
-    revealed: bool,
-    panel: WeakEntity<VaultBrowserPanel>,
-    cx: &mut App,
-) -> AnyElement {
-    let colors = cx.theme().colors();
-    let hover_bg = colors.element_hover;
-    let title: SharedString = doc.title.clone().into();
-    let age = updated_age(&doc.updated);
-    let abs_path = doc.abs_path.clone();
-
-    let mut meta = h_flex()
-        .items_center()
-        .gap(px(8.))
-        .text_size(px(13.))
-        .text_color(colors.text_muted);
-    meta = meta.children(type_chip(&doc.doc_type, cx));
-    meta = meta.children(vendor_chip(&doc.vendor, cx));
-    if doc.kind == DocKind::Session {
-        meta = meta.children(redactions_badge(doc.redactions, cx));
-    }
-    if !age.is_empty() {
-        meta = meta.child(
-            div()
-                .text_color(colors.text_placeholder)
-                .child(SharedString::from(age)),
-        );
-    }
-    // Link-scan truncation is an honest per-node flag (spec §5): note it.
-    if doc.link_scan_truncated {
-        meta = meta.child(
-            div()
-                .text_color(colors.text_placeholder)
-                .child(SharedString::from("· links partial")),
-        );
-    }
-
-    let open_path = abs_path;
-    let open_panel = panel.clone();
-    let mut row = h_flex()
-        .id(ElementId::Name(SharedString::from(doc.id.clone())))
-        .w_full()
-        .h(px(ROW_HEIGHT))
-        .items_center()
-        .gap(px(12.))
-        .px(px(10.))
-        .border_b_1()
-        .border_color(colors.border)
-        .cursor_pointer()
-        // A reveal-from-graph highlights the row once (a soft accent wash).
-        .when(revealed, |r| r.bg(colors.element_selected))
-        .hover(move |s| s.bg(hover_bg))
-        .on_click(move |_, window, cx| {
-            let path = open_path.clone();
-            open_panel
-                .update(cx, |panel, cx| panel.request_open(path, window, cx))
-                .ok();
-        })
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap(px(4.))
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(colors.text)
-                        .truncate()
-                        .child(title),
-                )
-                .child(meta),
-        );
-
-    // "Show in graph" affordance (§3): a small icon button that flips to the
-    // graph view (the node is already present in the field).
-    let graph_panel = panel.clone();
-    row = row.child(
-        div()
-            .id(ElementId::Name(format!("show-in-graph-{}", doc.id).into()))
-            .flex_none()
-            .p(px(4.))
-            .rounded(px(6.))
-            .cursor_pointer()
-            .text_color(colors.text_placeholder)
-            .hover(|s| s.text_color(colors.text_muted))
-            .on_click(move |_, _, cx| {
-                graph_panel
-                    .update(cx, |panel, cx| panel.show_in_graph(cx))
-                    .ok();
-            })
-            .child(
-                Icon::new(IconName::GitBranch)
-                    .size(ui::IconSize::XSmall)
-                    .color(Color::Custom(colors.text_placeholder)),
-            ),
-    );
-
-    // Staged sessions get the promote affordance on the right rail.
-    let row = if root == VaultRoot::Staging && doc.bundle_dir.is_some() {
-        row.child(promote_affordance(doc, promote, panel, cx))
-    } else {
-        row
-    };
-
-    row.into_any_element()
-}
-
-/// The two-click arm/confirm promote affordance (no modal — the spec's inline
-/// confirm). Rest = "Promote"; armed = "Confirm" (accent) + a dismiss;
-/// promoted = a done chip; in-flight = "Promoting…".
-fn promote_affordance(
-    doc: &VaultDoc,
-    promote: &PromoteState,
-    panel: WeakEntity<VaultBrowserPanel>,
-    cx: &App,
-) -> AnyElement {
-    use super::promote::BundleState;
-    let colors = cx.theme().colors();
-    let Some(bundle_dir) = doc.bundle_dir.clone() else {
-        return div().into_any_element();
-    };
-    let key = doc.id.clone();
-
-    match promote.state_for(&key) {
-        BundleState::Promoted { collided } => {
-            let label = if collided { "Promoted (renamed)" } else { "Promoted" };
-            div()
-                .flex_none()
-                .px(px(9.))
-                .py(px(4.))
-                .rounded(px(8.))
-                .text_size(px(12.))
-                .text_color(crate::agent_accents::STATUS_DONE)
-                .child(label)
-                .into_any_element()
-        }
-        BundleState::InFlight => div()
-            .flex_none()
-            .px(px(9.))
-            .py(px(4.))
-            .text_size(px(12.))
-            .text_color(colors.text_muted)
-            .child("Promoting…")
-            .into_any_element(),
-        BundleState::Failed(msg) => div()
-            .flex_none()
-            .px(px(9.))
-            .py(px(4.))
-            .text_size(px(12.))
-            .text_color(crate::agent_accents::STATUS_ERROR)
-            .child(SharedString::from(format!("Failed: {msg}")))
-            .into_any_element(),
-        BundleState::Armed => {
-            let confirm_key = key.clone();
-            let confirm_dir = bundle_dir;
-            let confirm_panel = panel.clone();
-            let cancel_key = key.clone();
-            let cancel_panel = panel;
-            h_flex()
-                .flex_none()
-                .items_center()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .id(ElementId::Name(format!("promote-confirm-{key}").into()))
-                        .px(px(9.))
-                        .py(px(4.))
-                        .rounded(px(8.))
-                        .bg(crate::agent_accents::ACCENT_FILL)
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(gpui::white())
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            let (k, d) = (confirm_key.clone(), confirm_dir.clone());
-                            confirm_panel
-                                .update(cx, |panel, cx| panel.confirm_promote(k, d, cx))
-                                .ok();
-                        })
-                        .child("Confirm"),
-                )
-                .child(
-                    div()
-                        .id(ElementId::Name(format!("promote-cancel-{key}").into()))
-                        .px(px(6.))
-                        .py(px(4.))
-                        .text_size(px(12.))
-                        .text_color(colors.text_placeholder)
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            let k = cancel_key.clone();
-                            cancel_panel
-                                .update(cx, |panel, cx| panel.cancel_promote(k, cx))
-                                .ok();
-                        })
-                        .child("Cancel"),
-                )
-                .into_any_element()
-        }
-        BundleState::Rest => {
-            let arm_key = key.clone();
-            div()
-                .id(ElementId::Name(format!("promote-arm-{key}").into()))
-                .flex_none()
-                .px(px(9.))
-                .py(px(4.))
-                .rounded(px(8.))
-                .border_1()
-                .border_color(colors.border)
-                .text_size(px(12.))
-                .text_color(colors.text_muted)
-                .cursor_pointer()
-                .hover(|s| s.border_color(colors.border_variant))
-                .on_click(move |_, _, cx| {
-                    let k = arm_key.clone();
-                    panel.update(cx, |panel, cx| panel.arm_promote(k, cx)).ok();
-                })
-                .child("Promote")
-                .into_any_element()
-        }
-    }
+        .into_any_element()
 }

@@ -1,5 +1,6 @@
 //! The vault index — the data model (`VaultDoc`, `DocKind`, `VaultRoot`) and
-//! the background filesystem walker that builds it.
+//! the background filesystem walker that builds it. Doc parsing/classification
+//! lives in [`super::docmeta`].
 //!
 //! I/O-first (RUST_PORT_NOTES §8, CLAUDE.md I/O-first law): the walk runs on a
 //! `cx.background_spawn` task off the UI thread; `Render` only ever reads the
@@ -7,14 +8,14 @@
 //! are NEVER slurped — the frontmatter block + first `LINK_SCAN_CAP` bytes are
 //! read for link extraction, and the node records the truncation.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fs::Fs;
 use futures::StreamExt as _;
 
-use super::parser::{self, LinkTarget};
+use super::docmeta::build_doc;
+use super::parser::LinkTarget;
 
 /// Cap on bytes scanned for wikilinks/relations in a note body (spec §5: "cap
 /// link-scan at 256KB and note truncation on the node"). Frontmatter is always
@@ -44,8 +45,9 @@ impl VaultRoot {
     }
 }
 
-/// The coarse grouping used by the LIST view (task-board list idiom groups by
-/// type/dir). Derived from the OKF `type:` field, falling back to the path.
+/// The doc's coarse kind — drives per-kind row meta (run id / schedule /
+/// vendor chips) and the graph idiom. Derived from the OKF `type:` field,
+/// falling back to the path (see [`super::docmeta`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DocKind {
     /// `type: session` — an imported vendor session bundle.
@@ -63,19 +65,7 @@ pub enum DocKind {
 }
 
 impl DocKind {
-    /// Section header text for the grouped list.
-    pub fn group_label(self) -> &'static str {
-        match self {
-            DocKind::Session => "Sessions",
-            DocKind::Run => "Runs",
-            DocKind::Project => "Projects",
-            DocKind::Routine => "Routines",
-            DocKind::Note => "Notes",
-            DocKind::Index => "Index",
-        }
-    }
-
-    /// Stable sort order for section headers.
+    /// Stable sort order (sessions first — the staging review flow).
     pub fn order(self) -> u8 {
         match self {
             DocKind::Session => 0,
@@ -99,6 +89,9 @@ pub struct VaultDoc {
     pub kind: DocKind,
     /// OKF `id:` if present, else derived from `rel_path` (stable node key).
     pub id: String,
+    /// The HUMAN title (docmeta title law: frontmatter title → run outcome →
+    /// first heading → humanised filename). Never a bare hash when the doc
+    /// carries anything better.
     pub title: String,
     /// OKF `type:` verbatim (chip text), empty if none.
     pub doc_type: String,
@@ -106,6 +99,15 @@ pub struct VaultDoc {
     pub vendor: String,
     /// OKF `project:` — frontmatter grouping relation (a graph edge source).
     pub project: String,
+    /// Run digests: the run id ("claude-1a1cfefd83") — SECONDARY meta, not
+    /// the title. Empty for other kinds.
+    pub run_id: String,
+    /// Frontmatter `status:` (runs: succeeded/failed; routines:
+    /// active/disabled). Empty if none.
+    pub status: String,
+    /// Routines: the frontmatter `schedule:` ("daily 23:00") — shown as the
+    /// next-fire meta. Empty for other kinds.
+    pub schedule: String,
     /// `updated`/`timestamp` ISO string, empty if none.
     pub updated: String,
     /// `message_count` for sessions (0 otherwise) — graph node sizing.
@@ -116,7 +118,8 @@ pub struct VaultDoc {
     pub body_len: u64,
     /// True if the body scan hit `LINK_SCAN_CAP` (link set may be incomplete).
     pub link_scan_truncated: bool,
-    /// Lowercased title + tags, precomputed for the filter box.
+    /// Lowercased title + tags + path segments + run id, precomputed for the
+    /// filter box (matches across every tree section).
     pub search_key: String,
     /// Raw outbound link targets from the body (wikilinks + md links).
     pub links: Vec<LinkTarget>,
@@ -179,8 +182,14 @@ pub fn root_paths() -> [(VaultRoot, PathBuf); 2] {
     ]
 }
 
-/// Directory names skipped during the walk (dotfiles + the vault's derived
-/// stores). `.git`/`.index`/`.raw`/`.bridge` carry no OKF notes.
+/// The live vault root path (promote target root; new-note open base).
+pub fn vault_root_path() -> PathBuf {
+    PathBuf::from(r"L:\Projects\atlas-vault")
+}
+
+/// Directory names skipped during the walk — the machine dirs. Dotfile dirs
+/// (`.git`/`.index`/`.raw`/`.bridge`) carry no OKF notes and NEVER show in
+/// the tree (note-app law: machine-optimised stores stay invisible).
 fn is_skipped_dir(name: &str) -> bool {
     name.starts_with('.')
 }
@@ -231,10 +240,10 @@ async fn walk_root(
             }
             continue;
         }
-        if name.ends_with(".md") {
-            if let Some(doc) = read_doc(fs.clone(), root, root_path, &entry).await {
-                out.push(doc);
-            }
+        if name.ends_with(".md")
+            && let Some(doc) = read_doc(fs.clone(), root, root_path, &entry).await
+        {
+            out.push(doc);
         }
     }
     // Recurse depth-first (order-stable; the list re-sorts anyway).
@@ -288,222 +297,10 @@ async fn read_prefix(fs: &dyn Fs, path: &Path, cap: u64) -> Option<(String, bool
     Some((text, filled as u64 >= cap))
 }
 
-/// Parse `text` (frontmatter + body prefix) into a `VaultDoc`.
-fn build_doc(
-    root: VaultRoot,
-    root_path: &Path,
-    abs_path: &Path,
-    body_len: u64,
-    truncated: bool,
-    text: &str,
-) -> VaultDoc {
-    let fm = parser::parse_frontmatter(text);
-    let body = &text[fm.body_offset.min(text.len())..];
-    let links = parser::extract_links(body);
-
-    let rel_path = abs_path
-        .strip_prefix(root_path)
-        .unwrap_or(abs_path)
-        .to_string_lossy()
-        .replace('\\', "/");
-
-    let file_name = abs_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default();
-
-    let kind = classify(&fm, file_name, &rel_path);
-
-    let title = fm
-        .get("title")
-        .map(str::to_string)
-        .filter(|t| !t.is_empty())
-        .or_else(|| fm.get("name").map(str::to_string).filter(|n| !n.is_empty()))
-        .unwrap_or_else(|| default_title(file_name, &rel_path));
-
-    let id = fm
-        .get("id")
-        .map(str::to_string)
-        .filter(|i| !i.is_empty())
-        .unwrap_or_else(|| format!("{}:{}", root.label(), rel_path));
-
-    let doc_type = fm.get("type").unwrap_or_default().to_string();
-    let vendor = fm.get("vendor").unwrap_or_default().to_string();
-    let project = fm.get("project").unwrap_or_default().to_string();
-    let updated = fm
-        .get("updated")
-        .or_else(|| fm.get("timestamp"))
-        .unwrap_or_default()
-        .to_string();
-    let message_count = fm.get("message_count").and_then(parse_u64).unwrap_or(0);
-    let redactions = fm.get("redactions").and_then(parse_u64).unwrap_or(0);
-    let supersedes = parse_refs(&fm);
-
-    let mut search_terms = title.to_lowercase();
-    for tag in fm.list("tags") {
-        search_terms.push(' ');
-        search_terms.push_str(&tag.to_lowercase());
-    }
-
-    // A staging session's promote unit is its bundle directory (the parent of
-    // `session.md`).
-    let bundle_dir = (root == VaultRoot::Staging && kind == DocKind::Session)
-        .then(|| abs_path.parent().map(Path::to_path_buf))
-        .flatten();
-
-    VaultDoc {
-        abs_path: abs_path.to_path_buf(),
-        rel_path,
-        root,
-        kind,
-        id,
-        title,
-        doc_type,
-        vendor,
-        project,
-        updated,
-        message_count,
-        redactions,
-        body_len,
-        link_scan_truncated: truncated,
-        search_key: search_terms,
-        links,
-        supersedes,
-        bundle_dir,
-    }
-}
-
-/// Classify a doc by OKF type first, path second.
-fn classify(fm: &parser::Frontmatter, file_name: &str, rel_path: &str) -> DocKind {
-    if file_name == "index.md" && !fm.has_frontmatter {
-        return DocKind::Index;
-    }
-    match fm.get("type").unwrap_or_default() {
-        "session" => DocKind::Session,
-        "project" => DocKind::Project,
-        "hack" | "routine" => DocKind::Routine,
-        _ => {
-            // Path-based fallbacks for notes without a type field.
-            if rel_path.contains("artifacts/runs/") && file_name == "digest.md" {
-                DocKind::Run
-            } else if rel_path.contains("routines/") {
-                DocKind::Routine
-            } else if file_name == "index.md" {
-                DocKind::Index
-            } else {
-                DocKind::Note
-            }
-        }
-    }
-}
-
-/// A frontmatter-less / title-less doc falls back to a humanised filename.
-fn default_title(file_name: &str, rel_path: &str) -> String {
-    // Run digests live in `artifacts/runs/<id>/digest.md` — surface the id.
-    if file_name == "digest.md" {
-        if let Some(id) = rel_path
-            .rsplit('/')
-            .nth(1)
-            .filter(|s| !s.is_empty())
-        {
-            return id.to_string();
-        }
-    }
-    file_name.trim_end_matches(".md").replace(['-', '_'], " ")
-}
-
-/// Parse a scalar u64 (frontmatter values are unquoted by the parser).
-fn parse_u64(s: &str) -> Option<u64> {
-    s.trim().parse().ok()
-}
-
-/// Collect `supersedes:` refs (scalar `[[id]]` or a list). Wiki-bracket
-/// wrapping is stripped to the bare ref.
-fn parse_refs(fm: &parser::Frontmatter) -> Vec<String> {
-    let mut refs: Vec<String> = fm
-        .list("supersedes")
-        .iter()
-        .map(|r| strip_wiki(r))
-        .filter(|r| !r.is_empty())
-        .collect();
-    if refs.is_empty() {
-        if let Some(single) = fm.get("supersedes").filter(|s| !s.is_empty()) {
-            let cleaned = strip_wiki(single);
-            if !cleaned.is_empty() {
-                refs.push(cleaned);
-            }
-        }
-    }
-    refs
-}
-
-/// `[[ref]]` → `ref`; `ref` → `ref`.
-fn strip_wiki(raw: &str) -> String {
-    raw.trim()
-        .trim_start_matches("[[")
-        .trim_end_matches("]]")
-        .trim()
-        .to_string()
-}
-
-/// Group docs by kind for the sectioned list. Preserves the sort order of the
-/// input slice within each group.
-pub fn group_by_kind<'a>(docs: &[&'a VaultDoc]) -> BTreeMap<DocKind, Vec<&'a VaultDoc>> {
-    let mut groups: BTreeMap<DocKind, Vec<&'a VaultDoc>> = BTreeMap::new();
-    for doc in docs {
-        groups.entry(doc.kind).or_default().push(doc);
-    }
-    groups
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn doc_from(root: VaultRoot, rel: &str, text: &str) -> VaultDoc {
-        let root_path = Path::new(r"L:\root");
-        let abs = root_path.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-        build_doc(root, root_path, &abs, text.len() as u64, false, text)
-    }
-
-    #[test]
-    fn classifies_session_bundle() {
-        let text = "---\ntype: session\ntitle: Build sudoku\nvendor: claude_code\n\
-                    message_count: 1959\nredactions: 0\nproject: docker-speed-drive\n---\nbody";
-        let doc = doc_from(VaultRoot::Staging, "imported/claude_code/x/session.md", text);
-        assert_eq!(doc.kind, DocKind::Session);
-        assert_eq!(doc.vendor, "claude_code");
-        assert_eq!(doc.message_count, 1959);
-        assert_eq!(doc.project, "docker-speed-drive");
-        // A staging session carries its bundle dir (promote unit).
-        assert!(doc.bundle_dir.is_some());
-    }
-
-    #[test]
-    fn frontmatterless_index_is_index_kind() {
-        let doc = doc_from(VaultRoot::Vault, "index.md", "# atlas-vault — index\n\n- a\n");
-        assert_eq!(doc.kind, DocKind::Index);
-        // Reserved index has no frontmatter → title falls back to filename.
-        assert_eq!(doc.title, "index");
-    }
-
-    #[test]
-    fn run_digest_classified_by_path() {
-        let text = "---\nrun_id: claude-1a1c\nstatus: succeeded\n---\n## Outcome\n";
-        let doc = doc_from(VaultRoot::Vault, "artifacts/runs/claude-1a1c/digest.md", text);
-        assert_eq!(doc.kind, DocKind::Run);
-        // Title falls back to the run id dir.
-        assert_eq!(doc.title, "claude-1a1c");
-    }
-
-    #[test]
-    fn search_key_includes_tags() {
-        let text = "---\ntitle: Night Anchor\ntags: [console, hack, claude]\n---\nbody";
-        let doc = doc_from(VaultRoot::Vault, "global/routines/console/x.md", text);
-        assert!(doc.search_key.contains("night anchor"));
-        assert!(doc.search_key.contains("console"));
-        assert!(doc.search_key.contains("claude"));
-    }
+    use crate::vault_browser::docmeta::doc_from;
 
     #[test]
     fn truncation_flag_propagates_and_counts() {
@@ -521,18 +318,6 @@ mod tests {
         index.docs.push(doc);
         index.truncated_count = index.docs.iter().filter(|d| d.link_scan_truncated).count();
         assert_eq!(index.truncated_count, 1);
-    }
-
-    #[test]
-    fn supersedes_relation_parses_scalar_and_list() {
-        let scalar = "---\ntype: note\ntitle: New\nsupersedes: \"[[old-id]]\"\n---\nb";
-        let doc = doc_from(VaultRoot::Vault, "n.md", scalar);
-        assert_eq!(doc.supersedes, vec!["old-id".to_string()]);
-
-        let list = "---\ntype: note\ntitle: New\nsupersedes: [[[a]], [[b]]]\n---\nb";
-        let doc2 = doc_from(VaultRoot::Vault, "n2.md", list);
-        assert!(doc2.supersedes.contains(&"a".to_string()));
-        assert!(doc2.supersedes.contains(&"b".to_string()));
     }
 
     #[test]
