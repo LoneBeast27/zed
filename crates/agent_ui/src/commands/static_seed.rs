@@ -117,6 +117,13 @@ fn orchestrator_native() -> Vec<CommandEntry> {
             "Escalate a plan for this conversation (judgment-tier decomposition).",
         ), // routes_core.py POST /plan/escalate
         orch(
+            "wave",
+            OrchTarget::WaveSpawn,
+            Classification::Passthrough, // deterministic linkage via /plan/wave/spawn
+            "Run a plan wave: /wave <n> [@vendor] — spawns every ready subtask \
+             with deterministic plan linkage.",
+        ), // routes_core.py POST /plan/wave/spawn (2026-07-10)
+        orch(
             "board",
             OrchTarget::OpenBoard,
             Classification::polyfill("task_board"),

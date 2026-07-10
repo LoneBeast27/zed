@@ -41,7 +41,10 @@ use gpui::{
 use ui::prelude::*;
 
 use crate::agent_accents::ACCENT;
-use crate::bridge::{self, BridgeStore, PlanSnapshot, PlanSubtask, PlanWatch, UnlinkedRun};
+use crate::bridge::{
+    self, BRIDGE_BASE_URL, BridgeStore, PlanSnapshot, PlanSubtask, PlanWatch, UnlinkedRun,
+    post_json,
+};
 use crate::task_board::motion::DECEL;
 use crate::task_board::style::{HAIRLINE_HI, SURFACE_1, agent_chip, empty_state, plan_status_pill};
 
@@ -155,9 +158,10 @@ impl SymphonyPanel {
     /// bordered cards — RUST_PORT_NOTES §4.3). Waves are bridge-derived
     /// (`PlanSnapshot::waves`); each card checks off from its subtask's live
     /// status.
-    fn render_score(&self, plan: &PlanSnapshot, cx: &App) -> AnyElement {
+    fn render_score(&self, plan: &PlanSnapshot, cx: &mut Context<Self>) -> AnyElement {
         let plan_ix = 0usize; // one live plan at a time off /plan
-        let colors = cx.theme().colors();
+        // Owned: render_wave takes `&mut cx` per band (the Run-wave listener).
+        let colors = cx.theme().colors().clone();
         let summary = if plan.summary.is_empty() {
             "plan".to_string()
         } else {
@@ -183,6 +187,36 @@ impl SymphonyPanel {
             .children(waves)
             .children(self.render_unlinked(&plan.unlinked_runs, cx))
             .into_any_element()
+    }
+
+    /// POST `/plan/wave/spawn {"wave", "conv"}` — every ready subtask of the
+    /// wave spawns with its subtask_id explicit (the check-off's linkage is
+    /// structural, never text-matched). Fire-and-forget: the plan poll lands
+    /// the Queued→Running flips; a refused spawn (deps unready, already
+    /// linked) simply leaves the pills unchanged, honestly.
+    fn run_wave_clicked(&mut self, wave: u32, cx: &mut Context<Self>) {
+        let conv = self
+            .store
+            .read(cx)
+            .transcript_conv
+            .clone()
+            .unwrap_or_default();
+        let client = cx.http_client();
+        cx.spawn(async move |_this, cx| {
+            let _ = cx
+                .background_spawn(async move {
+                    let body =
+                        serde_json::json!({ "wave": wave, "conv": conv }).to_string();
+                    post_json(
+                        client.as_ref(),
+                        &format!("{BRIDGE_BASE_URL}/plan/wave/spawn"),
+                        body,
+                    )
+                    .await
+                })
+                .await;
+        })
+        .detach();
     }
 
     /// A footer banner for runs the bridge could not bind to a subtask (P6):
@@ -241,10 +275,20 @@ impl SymphonyPanel {
         plan_ix: usize,
         wave_ix: usize,
         wave: &[PlanSubtask],
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        let colors = cx.theme().colors();
+        // Owned copy: the Run-wave listener needs `&mut cx` while the band
+        // builder still reads colors.
+        let colors = cx.theme().colors().clone();
         let active = wave_ix == 0;
+        // "Run wave" rides any band still holding spawnable work (pending +
+        // unlinked) — the deterministic /plan/wave/spawn path (2026-07-10:
+        // linkage never depends on the brain echoing task text). Demo plans
+        // have no bridge conversation to spawn into.
+        let runnable = !crate::bridge::is_agentic_demo()
+            && wave
+                .iter()
+                .any(|task| task.status == "pending" && task.run_id.is_none());
         let cards: Vec<AnyElement> = wave
             .iter()
             .enumerate()
@@ -277,12 +321,38 @@ impl SymphonyPanel {
                 )
             })
             .child(
-                div()
+                h_flex()
                     .mb(px(10.))
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors.text_placeholder)
-                    .child(SharedString::from(format!("Wave {}", wave_ix + 1))),
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors.text_placeholder)
+                            .child(SharedString::from(format!("Wave {}", wave_ix + 1))),
+                    )
+                    .when(runnable, |row| {
+                        row.child(
+                            div()
+                                .id(ElementId::Name(
+                                    format!("run-wave-{plan_ix}-{wave_ix}").into(),
+                                ))
+                                .px(px(10.))
+                                .py(px(3.))
+                                .rounded(px(7.))
+                                .text_size(px(12.))
+                                .text_color(colors.text_muted)
+                                .border_1()
+                                .border_color(colors.border)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(colors.element_hover))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.run_wave_clicked(wave_ix as u32 + 1, cx)
+                                }))
+                                .child("Run wave"),
+                        )
+                    }),
             )
             .child(
                 // `.wave-cards`: auto-fill minmax(240px, 1fr) emulated as

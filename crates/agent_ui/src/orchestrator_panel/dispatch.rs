@@ -108,6 +108,7 @@ impl OrchestratorPanel {
     ) {
         match target {
             OrchTarget::PlanEscalate => self.dispatch_plan(args, cx),
+            OrchTarget::WaveSpawn => self.dispatch_wave(args, cx),
             OrchTarget::OpenAdversary => self.dispatch_adversary(args, window, cx),
             OrchTarget::OpenBoard => self.defer_open_board(window, cx),
             OrchTarget::OpenUsage => self.defer_open_usage(window, cx),
@@ -147,6 +148,50 @@ impl OrchestratorPanel {
                     .await
                 })
                 .await;
+            let _ = store.update(cx, |store, cx| store.refetch_transcript_soon(cx));
+        })
+        .detach();
+    }
+
+    /// `/wave <n> [@vendor]` → `POST /plan/wave/spawn {"wave", "agent"?,
+    /// "conv"}` — deterministic wave execution (explicit subtask linkage, no
+    /// brain; the 2026-07-10 mislink fix). Malformed args → no-op (the
+    /// composer text stays, the user corrects); errors surface via the
+    /// transcript refetch (the bridge appends nothing on 4xx — the symphony's
+    /// unlinked banner + Queued pills stay honest either way).
+    fn dispatch_wave(&mut self, args: String, cx: &mut gpui::Context<Self>) {
+        let mut parts = args.split_whitespace();
+        let Some(wave) = parts.next().and_then(|w| w.parse::<u32>().ok()) else {
+            return;
+        };
+        let agent = parts
+            .next()
+            .and_then(|a| a.strip_prefix('@'))
+            .map(str::to_string);
+        let conv = self
+            .store
+            .read(cx)
+            .transcript_conv
+            .clone()
+            .unwrap_or_default();
+        let http_client = cx.http_client();
+        let store = self.store.clone();
+        cx.spawn(async move |_this, cx| {
+            let _ = cx
+                .background_spawn(async move {
+                    let mut body = serde_json::json!({ "wave": wave, "conv": conv });
+                    if let Some(agent) = agent {
+                        body["agent"] = serde_json::Value::String(agent);
+                    }
+                    post_json(
+                        http_client.as_ref(),
+                        &format!("{BRIDGE_BASE_URL}/plan/wave/spawn"),
+                        body.to_string(),
+                    )
+                    .await
+                })
+                .await;
+            // The spawned runs + linkage land via the plan/transcript polls.
             let _ = store.update(cx, |store, cx| store.refetch_transcript_soon(cx));
         })
         .detach();

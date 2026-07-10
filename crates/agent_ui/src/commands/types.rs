@@ -158,6 +158,10 @@ impl Mechanism {
 pub enum OrchTarget {
     /// `/plan <text>` → `POST /plan/escalate {"request": text, "conv": conv}`.
     PlanEscalate,
+    /// `/wave <n> [@vendor]` → `POST /plan/wave/spawn {"wave": n, "agent"?,
+    /// "conv"}` — deterministic wave execution (explicit subtask linkage,
+    /// no brain, 2026-07-10).
+    WaveSpawn,
     /// `/board` → open/activate the task-board center surface.
     OpenBoard,
     /// `/usage` → open/activate the usage center surface.
