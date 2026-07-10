@@ -149,6 +149,23 @@ impl TranscriptView {
     }
 }
 
+/// The meta line's attribution vendor (§4.1): a FORCED turn credits the
+/// agent that actually RAN it (`@claude`) — the routing brain never touched
+/// a forced message (`orchestrator/loop.py` `FORCE_RE` bypass), so showing
+/// `brain` there misattributes the reply. Routed turns keep the brain.
+/// Forced detection reads the run chip's reason segment — the same
+/// "forced target" / "user override" markers
+/// [`crate::task_board::style::chip_reason`] rewrites.
+pub(super) fn meta_vendor(brain: Option<&str>, runs: &[TranscriptRun]) -> Option<String> {
+    let forced_agent = runs.iter().find_map(|run| {
+        let reason = run.chip.as_deref()?.split('·').nth(1)?.trim().to_ascii_lowercase();
+        ((reason.contains("forced target") || reason.contains("user override"))
+            && !run.agent.is_empty())
+        .then(|| format!("@{}", run.agent))
+    });
+    forced_agent.or_else(|| brain.map(str::to_string))
+}
+
 fn build_view(message: &TranscriptMessage, cx: &mut App) -> MessageView {
     let text = SharedString::from(message.text.clone());
     MessageView {

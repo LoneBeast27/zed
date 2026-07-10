@@ -230,6 +230,50 @@ fn shrink_rebuilds_views_and_list(cx: &mut gpui::TestAppContext) {
     });
 }
 
+fn run(agent: &str, chip: Option<&str>) -> TranscriptRun {
+    TranscriptRun {
+        run_id: "r-1".into(),
+        agent: agent.into(),
+        chip: chip.map(str::to_string),
+    }
+}
+
+#[test]
+fn forced_turn_meta_credits_the_run_agent_not_the_brain() {
+    // The live chip shapes (task_board::style::chip_reason fixtures): the
+    // reason segment carries "Forced target" / "user override".
+    let forced = [
+        run("claude", Some("claude · Forced target · 100%")),
+        run("gemini", Some("gemini · user override")),
+    ];
+    assert_eq!(
+        meta_vendor(Some("gemini"), &forced[..1]),
+        Some("@claude".into()),
+        "a forced turn shows the agent that ran it, never the brain"
+    );
+    assert_eq!(meta_vendor(None, &forced[1..]), Some("@gemini".into()));
+}
+
+#[test]
+fn routed_turn_meta_keeps_the_brain() {
+    let routed = [run("claude", Some("claude · code-heavy task · 92%"))];
+    assert_eq!(meta_vendor(Some("qwen"), &routed), Some("qwen".into()));
+    // Chip-less and solo-chip runs are not forced either.
+    assert_eq!(meta_vendor(Some("qwen"), &[run("claude", None)]), Some("qwen".into()));
+    assert_eq!(
+        meta_vendor(Some("qwen"), &[run("claude", Some("solo"))]),
+        Some("qwen".into())
+    );
+    // No brain, no forced run — no vendor segment at all (never a blank).
+    assert_eq!(meta_vendor(None, &routed), None);
+    // A forced chip with an EMPTY agent falls back to the brain (a bare
+    // "@" would be worse than the misattribution).
+    assert_eq!(
+        meta_vendor(Some("qwen"), &[run("", Some("x · forced target"))]),
+        Some("qwen".into())
+    );
+}
+
 #[gpui::test]
 fn growth_while_busy_keeps_the_shimmer_last(cx: &mut gpui::TestAppContext) {
     // Growth with busy held true: the splice past the stable prefix

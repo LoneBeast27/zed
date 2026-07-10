@@ -18,7 +18,7 @@ use crate::task_board::style::{HAIRLINE_HI, SURFACE_1, ago_now, chip_reason, rel
 use markdown::MarkdownElement;
 
 use super::panel::OrchestratorPanel;
-use super::transcript::{FRESH_WINDOW, MessageView, prose_style};
+use super::transcript::{FRESH_WINDOW, MessageView, meta_vendor, prose_style};
 
 /// User-card rise (web `.msg { animation: rise .3s var(--decel-curve) }`).
 const RISE: Duration = Duration::from_millis(300);
@@ -333,9 +333,10 @@ fn render_step_row(
         .into_any_element()
 }
 
-/// `.msg-meta`: timestamp (+ brain) left, hover-revealed copy/👍/👎 trio
-/// right — the reveal rides the panel's tracked hover (150ms effects fade,
-/// §0 "hovers are gentle fades", same idiom as the board rows).
+/// `.msg-meta`: timestamp (+ vendor — the RUN agent for forced turns, the
+/// routing brain otherwise) left, hover-revealed copy/👍/👎 trio right —
+/// the reveal rides the panel's tracked hover (150ms effects fade, §0
+/// "hovers are gentle fades", same idiom as the board rows).
 fn render_meta_row(
     view: &MessageView,
     ix: usize,
@@ -359,11 +360,13 @@ fn render_meta_row(
     } else {
         String::new()
     };
-    if let Some(brain) = &view.brain {
+    // Forced turns credit the agent that RAN the turn ("now · @claude"),
+    // not the routing brain — see [`super::transcript::meta_vendor`].
+    if let Some(vendor) = meta_vendor(view.brain.as_deref(), &view.runs) {
         if !ts_label.is_empty() {
             ts_label.push_str(" · ");
         }
-        ts_label.push_str(brain);
+        ts_label.push_str(&vendor);
     }
     // `.meta-actions .ic { transition: color/background .15s }`: 16px glyph
     // at --text-3 rest → --text + hover wash, each button fading
