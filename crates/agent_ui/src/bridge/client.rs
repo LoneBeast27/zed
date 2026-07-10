@@ -472,15 +472,37 @@ pub(super) async fn plan_poll_loop(
 /// (the web's `post()` helper from app.js). Background-executor only, like
 /// [`fetch_json`].
 pub async fn post_json(client: &dyn HttpClient, url: &str, body: String) -> Result<String> {
+    let (status, raw) = post_json_status(client, url, body).await?;
+    if !(200..300).contains(&status) {
+        // The bridge's own {"error": …} message VERBATIM — "bridge returned
+        // 409" ate the reason the endpoint exists to give (2026-07-10: two
+        // panels had grown local copies of this extraction; upstreamed).
+        anyhow::bail!(error_message(status, &raw));
+    }
+    Ok(raw)
+}
+
+/// The raw POST: transport failures are `Err`; any HTTP status returns
+/// `(status, body)` so callers that BRANCH on refusal codes (the routines
+/// consent law) can, while [`post_json`] keeps the ergonomic path.
+pub async fn post_json_status(
+    client: &dyn HttpClient,
+    url: &str,
+    body: String,
+) -> Result<(u16, String)> {
     let mut response = client.post_json(url, AsyncBody::from(body)).await?;
     let mut raw = String::new();
     response.body_mut().read_to_string(&mut raw).await?;
-    anyhow::ensure!(
-        response.status().is_success(),
-        "bridge returned {} for {url}",
-        response.status().as_u16()
-    );
-    Ok(raw)
+    Ok((response.status().as_u16(), raw))
+}
+
+/// The bridge's `{"error": …}` body, else an honest status line.
+pub fn error_message(status: u16, body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| format!("bridge returned {status}"))
 }
 
 pub async fn fetch_json(client: &dyn HttpClient, url: &str) -> Result<String> {

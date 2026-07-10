@@ -8,31 +8,21 @@
 //! Consent affordance with NO Fire-now, and `routine_action` re-guards with
 //! [`fire_allowed`] before any I/O (defense in depth).
 
-use futures::AsyncReadExt as _;
 use gpui::{AnyElement, AppContext as _, Context, ElementId, FontWeight, SharedString};
-use http_client::{AsyncBody, HttpClient};
 use ui::prelude::*;
 
 use crate::agent_accents::STATUS_BLOCKED;
-use crate::bridge::{BRIDGE_BASE_URL, fetch_json};
+// post_json_status: `Ok((status, body))` whenever the HTTP round-trip
+// completed (2xx or a refusal), `Err` only on transport failure — so a 409
+// refusal renders its reason instead of masquerading as "bridge unreachable"
+// (upstreamed from this file's local copy, 2026-07-10).
+use crate::bridge::{BRIDGE_BASE_URL, fetch_json, post_json_status};
 
 use super::panel::VaultBrowserPanel;
 use super::routines::{
     RoutineAction, RoutineRow, RoutinesSnapshot, consent_required, fire_allowed, fire_result_note,
     refusal_note, toggle_allowed,
 };
-
-/// POST with the status code surfaced: `Ok((status, body))` whenever the
-/// HTTP round-trip completed (2xx or a refusal), `Err` only on transport
-/// failure — so a 409 refusal renders its reason instead of masquerading as
-/// "bridge unreachable" (which `bridge::post_json`'s ensure would collapse
-/// it into).
-async fn post_for_status(client: &dyn HttpClient, url: &str) -> anyhow::Result<(u16, String)> {
-    let mut response = client.post_json(url, AsyncBody::empty()).await?;
-    let mut raw = String::new();
-    response.body_mut().read_to_string(&mut raw).await?;
-    Ok((response.status().as_u16(), raw))
-}
 
 impl VaultBrowserPanel {
     /// One-shot `GET /routines` — visibility-gated (view flip, header
@@ -104,7 +94,7 @@ impl VaultBrowserPanel {
                         "{BRIDGE_BASE_URL}/routines/{post_id}/{}",
                         action.endpoint()
                     );
-                    post_for_status(client.as_ref(), &url).await
+                    post_json_status(client.as_ref(), &url, "{}".to_string()).await
                 })
                 .await;
             this.update(cx, |this, cx| {

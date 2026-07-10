@@ -32,7 +32,7 @@ pub use adversary::{
     AdversaryJobs, AdversaryPhase, AdversaryResult, AdversaryWatch, SynthesisSections,
     VENDOR_COLUMNS, parse_synthesis_sections,
 };
-pub use client::{BRIDGE_BASE_URL, fetch_json, post_json};
+pub use client::{BRIDGE_BASE_URL, error_message, fetch_json, post_json, post_json_status};
 pub use demo::is_agentic_demo;
 pub use protocol::{
     BridgeEvent, ChannelEventRow, ChannelRow, ConversationRow, OverlapRow, PlanSnapshot,

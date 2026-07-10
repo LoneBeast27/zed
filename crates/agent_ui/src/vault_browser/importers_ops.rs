@@ -17,15 +17,11 @@
 use std::time::Duration;
 
 use editor::Editor;
-use futures::AsyncReadExt as _;
 use gpui::{AppContext as _, ClipboardItem, Context, Entity, Focusable as _, Task, Window};
-use http_client::{AsyncBody, HttpClient};
 
 use crate::bridge::{BRIDGE_BASE_URL, fetch_json};
 
-use super::importers::{
-    ImportJob, ImportersSnapshot, StartedImport, error_from_body,
-};
+use super::importers::{ImportJob, ImportersSnapshot, StartedImport};
 use super::index::VaultRoot;
 use super::panel::{VaultBrowserPanel, VaultView};
 
@@ -70,18 +66,8 @@ pub struct ImportersState {
     pub(super) _job_task: Option<Task<()>>,
 }
 
-/// POST returning the response body, with non-2xx surfacing the bridge's
-/// `{"error": …}` VERBATIM (the shared `post_json` drops the body on error,
-/// which would eat the 400/404/409 messages this view exists to show).
-async fn post_verbatim(client: &dyn HttpClient, url: &str, body: String) -> anyhow::Result<String> {
-    let mut response = client.post_json(url, AsyncBody::from(body)).await?;
-    let mut raw = String::new();
-    response.body_mut().read_to_string(&mut raw).await?;
-    if !response.status().is_success() {
-        anyhow::bail!(error_from_body(response.status().as_u16(), &raw));
-    }
-    Ok(raw)
-}
+// (The local `post_verbatim` copy retired 2026-07-10 — the shared
+// `bridge::post_json` now carries the {"error": …} body verbatim itself.)
 
 impl VaultBrowserPanel {
     /// One-shot `GET /importers` — visibility-gated (view flip, header
@@ -220,7 +206,7 @@ impl VaultBrowserPanel {
                     let url = format!("{BRIDGE_BASE_URL}/importers/{vendor}/import");
                     let body =
                         serde_json::json!({ "path": path, "project": project }).to_string();
-                    let raw = post_verbatim(client.as_ref(), &url, body).await?;
+                    let raw = crate::bridge::post_json(client.as_ref(), &url, body).await?;
                     anyhow::Ok(serde_json::from_str::<StartedImport>(&raw)?)
                 })
                 .await;
@@ -273,7 +259,7 @@ impl VaultBrowserPanel {
                         None => serde_json::json!({}),
                     }
                     .to_string();
-                    let raw = post_verbatim(client.as_ref(), &url, body).await?;
+                    let raw = crate::bridge::post_json(client.as_ref(), &url, body).await?;
                     anyhow::Ok(serde_json::from_str::<StartedImport>(&raw)?)
                 })
                 .await;
@@ -323,7 +309,7 @@ impl VaultBrowserPanel {
             let outcome = cx
                 .background_spawn(async move {
                     let url = format!("{BRIDGE_BASE_URL}/importers/job/{id}/cancel");
-                    post_verbatim(client.as_ref(), &url, String::new()).await
+                    crate::bridge::post_json(client.as_ref(), &url, String::new()).await
                 })
                 .await;
             this.update(cx, |this, cx| {
