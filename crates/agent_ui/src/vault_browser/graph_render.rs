@@ -86,17 +86,29 @@ pub(super) fn field_view(
 
     // Map doc id → its doc for the node chips + hover cards.
     let by_id: HashMap<&str, &VaultDoc> = docs.iter().map(|d| (d.id.as_str(), *d)).collect();
+    // Density-aware labels (user report 2026-07-10: every node labeled =
+    // unreadable collisions): small graphs label everything; past the
+    // threshold only the anchors of meaning keep a resting label — project
+    // hubs, the index, big nodes — and hover reveals the rest.
+    let dense = field.nodes.len() > LABEL_DENSE_N;
     let nodes: Vec<gpui::AnyElement> = field
         .nodes
         .iter()
         .filter_map(|n| by_id.get(n.id.as_str()).map(|doc| (n, *doc)))
         .map(|(n, doc)| {
+            let is_hovered = hovered == Some(n.id.as_str());
+            let size = node_size(doc);
+            let labeled = !dense
+                || is_hovered
+                || matches!(doc.kind, DocKind::Project | DocKind::Index)
+                || size >= LABEL_MIN_SIZE;
             node_chip(
                 doc,
                 n.out_x,
                 n.out_y,
-                node_size(doc),
-                hovered == Some(n.id.as_str()),
+                size,
+                is_hovered,
+                labeled,
                 panel.clone(),
                 cx,
             )
@@ -120,17 +132,20 @@ pub(super) fn field_view(
 }
 
 /// Edge color by kind: links on the hairline, supersedes in the done-blue,
-/// structural spine dimmed well under both.
+/// structural spine dimmed well under both, project hub spokes faintest of
+/// all (connective tissue, never competing with semantic links).
 fn edge_color(kind: EdgeKind) -> Hsla {
     match kind {
         EdgeKind::Supersedes => Hsla::from(STATUS_DONE).opacity(0.5),
         EdgeKind::Link => HAIRLINE_HI.into(),
         EdgeKind::Structural => Hsla::from(HAIRLINE_HI).opacity(0.35),
+        EdgeKind::Project => Hsla::from(HAIRLINE_HI).opacity(0.22),
     }
 }
 
 /// Paint one edge: solid for links, dashed + an arrowhead for a directional
-/// supersedes correction, a faint thin line for the structural spine.
+/// supersedes correction, a faint thin line for the structural spine and the
+/// fainter project spokes.
 fn paint_edge(window: &mut Window, origin: Point<Pixels>, seg: &EdgeSeg) {
     let a = point(origin.x + seg.a.x, origin.y + seg.a.y);
     let b = point(origin.x + seg.b.x, origin.y + seg.b.y);
@@ -141,6 +156,7 @@ fn paint_edge(window: &mut Window, origin: Point<Pixels>, seg: &EdgeSeg) {
         }
         EdgeKind::Link => paint_line(window, a, b, seg.color, 1.),
         EdgeKind::Structural => paint_line(window, a, b, seg.color, 0.75),
+        EdgeKind::Project => paint_line(window, a, b, seg.color, 0.75),
     }
 }
 
@@ -198,16 +214,23 @@ fn paint_arrowhead(window: &mut Window, a: Point<Pixels>, b: Point<Pixels>, colo
     }
 }
 
+/// Past this node count resting labels thin out to the anchors of meaning
+/// (project hubs, index, big nodes) — hover reveals everything else.
+const LABEL_DENSE_N: usize = 25;
+/// A node at/above this dot size keeps its resting label even when dense.
+const LABEL_MIN_SIZE: f32 = 18.;
+
 /// One field node: the type/vendor-colored dot (mass-sized, bloom shadow) + a
-/// truncated title, absolutely placed at its live center. Mouse-down begins a
-/// drag; click opens the md; dblclick on a session reveals it in the list;
-/// hover raises the card.
+/// truncated title (density-gated — see `LABEL_DENSE_N`), absolutely placed
+/// at its live center. Mouse-down begins a drag; click opens the md; dblclick
+/// on a session reveals it in the list; hover raises the card.
 fn node_chip(
     doc: &VaultDoc,
     out_x: f32,
     out_y: f32,
     size: f32,
     is_hovered: bool,
+    labeled: bool,
     panel: WeakEntity<VaultBrowserPanel>,
     cx: &App,
 ) -> gpui::AnyElement {
@@ -276,8 +299,9 @@ fn node_chip(
                     blur_radius: px(12.),
                     spread_radius: px(0.),
                 }]),
-        )
-        .child(
+        );
+    if labeled {
+        chip = chip.child(
             div()
                 .max_w(px(160.))
                 .text_size(px(12.))
@@ -285,6 +309,7 @@ fn node_chip(
                 .truncate()
                 .child(title),
         );
+    }
 
     if is_hovered {
         chip = chip.child(hover_card(doc, size, cx));

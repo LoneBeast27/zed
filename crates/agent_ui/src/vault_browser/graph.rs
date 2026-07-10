@@ -42,6 +42,12 @@ pub enum EdgeKind {
     /// An `index.md` → typed-doc structural edge. Dimmed (the vault's spine,
     /// not a semantic link) — drawn faint so real links read over it.
     Structural,
+    /// A doc → its project HUB doc (the doc whose id/title names the
+    /// `project:` it belongs to). Faintest of all — the connective tissue
+    /// that makes a cluster read as one project instead of loose dots
+    /// (user report 2026-07-10: "not interlinking in terms of the overall
+    /// project connections").
+    Project,
 }
 
 /// Resolve outbound links + frontmatter relations into edges between the given
@@ -104,6 +110,18 @@ pub fn resolve_edges(docs: &[&VaultDoc]) -> Vec<Edge> {
                 push_edge(&mut edges, &mut seen, from, to, EdgeKind::Supersedes);
             }
         }
+        // Project hub spokes: a doc connects to the doc that NAMES its
+        // project (id or title match — the vault's `type: project` docs).
+        // This is the missing connective tissue: run digests / briefs /
+        // routines rarely wikilink each other, so without it a project
+        // cluster renders as unrelated dots.
+        if !doc.project.is_empty() {
+            if let Some(to) = resolve(&doc.project) {
+                if to != from {
+                    push_edge(&mut edges, &mut seen, from, to, EdgeKind::Project);
+                }
+            }
+        }
     }
     edges
 }
@@ -140,6 +158,7 @@ fn push_edge(
         EdgeKind::Link => 0,
         EdgeKind::Supersedes => 1,
         EdgeKind::Structural => 2,
+        EdgeKind::Project => 3,
     };
     if seen.insert((from, to, k)) {
         edges.push(Edge { from, to, kind });
@@ -359,6 +378,8 @@ fn static_view(
                 EdgeKind::Supersedes => Hsla::from(STATUS_DONE).opacity(0.5),
                 EdgeKind::Link => HAIRLINE_HI.into(),
                 EdgeKind::Structural => Hsla::from(HAIRLINE_HI).opacity(0.35),
+                // Faintest: connective tissue, must sit under semantic links.
+                EdgeKind::Project => Hsla::from(HAIRLINE_HI).opacity(0.22),
             };
             Some((
                 point(px(a.cx_pos), px(a.cy_pos)),
@@ -531,6 +552,32 @@ mod tests {
         a.links.push(LinkTarget::Wiki("does-not-exist".to_string()));
         let docs = [&a];
         assert!(resolve_edges(&docs).is_empty());
+    }
+
+    #[test]
+    fn project_membership_spokes_to_the_hub_doc() {
+        // The missing connective tissue (user report 2026-07-10): docs of a
+        // project connect to the doc that NAMES the project (id or title),
+        // so a cluster reads as one project instead of loose dots.
+        let mut hub = doc("agentic-ide", "projects/agentic-ide.md", "agentic-ide");
+        hub.kind = DocKind::Project;
+        let mut member = doc("run-1", "artifacts/runs/run-1/digest.md", "Echo task");
+        member.project = "agentic-ide".to_string();
+        let mut by_title = doc("note-2", "notes/n2.md", "Design notes");
+        by_title.project = "agentic-ide".to_string();
+        let mut orphan = doc("run-9", "artifacts/runs/run-9/digest.md", "Loose");
+        orphan.project = "no-such-project".to_string(); // dangling → no edge
+        let docs = [&hub, &member, &by_title, &orphan];
+        let edges = resolve_edges(&docs);
+        let spokes: Vec<_> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Project)
+            .collect();
+        assert_eq!(spokes.len(), 2, "two members spoke to the hub, orphan drops");
+        assert!(spokes.iter().all(|e| e.to == 0), "spokes land on the hub");
+        // The hub itself never self-spokes even though its project field may
+        // name itself downstream.
+        assert!(!spokes.iter().any(|e| e.from == 0));
     }
 
     #[test]
