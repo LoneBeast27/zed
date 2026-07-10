@@ -137,6 +137,23 @@ impl VaultBrowserPanel {
                     }
                     self.graph_field.advance(now)
                 };
+                // Fit-to-viewport base scale × the user's zoom (user ask
+                // 2026-07-10: the field is bounded by the window at zoom 1,
+                // ctrl+wheel / caption-clicks dive into clusters). The
+                // measured viewport lags one frame (ScrollHandle bounds —
+                // the constellation width idiom); 0 on the very first frame
+                // falls back to unscaled.
+                let bounds = self.graph_scroll.bounds().size;
+                let (vw, vh) = (bounds.width.as_f32(), bounds.height.as_f32());
+                let fit_s = if vw > 0. && vh > 0. {
+                    (vw / self.graph_field.width.max(1.))
+                        .min(vh / self.graph_field.height.max(1.))
+                        .min(1.)
+                } else {
+                    1.
+                };
+                let scale = fit_s * self.graph_zoom;
+                self.graph_scale = scale;
                 let hovered = self.graph_hovered.clone();
                 let weak = cx.weak_entity();
                 let el = super::graph::graph_view(
@@ -145,6 +162,12 @@ impl VaultBrowserPanel {
                     &self.graph_scroll,
                     hovered.as_deref(),
                     self.edges(),
+                    super::graph_render::GraphNav {
+                        scale,
+                        zoomed: self.graph_zoom > 1.001,
+                        viewport: (vw, vh),
+                        filter: filter.to_string(),
+                    },
                     weak,
                     cx,
                 );

@@ -234,12 +234,13 @@ pub(super) fn node_size(doc: &VaultDoc) -> f32 {
 /// else honestly degrades to the deterministic STATIC layout with a banner
 /// (§4 — no jank at scale). Zero-edge roots render nodes-only with a hint
 /// (§5). The panel owns the advanced [`VaultField`] and passes it in.
-pub fn graph_view(
+pub(super) fn graph_view(
     field: &super::field::VaultField,
     docs: &[&VaultDoc],
     scroll: &gpui::ScrollHandle,
     hovered: Option<&str>,
     edge_mode: super::panel::EdgeMode,
+    nav: super::graph_render::GraphNav,
     panel: WeakEntity<VaultBrowserPanel>,
     cx: &App,
 ) -> gpui::AnyElement {
@@ -271,7 +272,7 @@ pub fn graph_view(
     let body = if degraded {
         static_view(docs, &edges, scroll, panel, cx)
     } else {
-        super::graph_render::field_view(field, docs, &edges, scroll, hovered, panel, cx)
+        super::graph_render::field_view(field, docs, &edges, scroll, hovered, nav, panel, cx)
     };
 
     // Overlay the honest banners: a scale-degrade banner (§4) and a

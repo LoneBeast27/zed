@@ -45,17 +45,83 @@ impl VaultBrowserPanel {
     }
 
     pub(super) fn graph_drag_moved(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let scale = self.graph_scale.max(0.05);
         let Some(drag) = &mut self.graph_drag else {
             return;
         };
-        let dx = (position.x - drag.start_mouse.x).as_f32();
-        let dy = (position.y - drag.start_mouse.y).as_f32();
+        // Pointer deltas are VIEW pixels; anchors live in FIELD coordinates —
+        // divide by the render scale so a drag lands where the cursor is at
+        // any zoom (fit-mode s<1 included).
+        let dx = (position.x - drag.start_mouse.x).as_f32() / scale;
+        let dy = (position.y - drag.start_mouse.y).as_f32() / scale;
         if dx.abs() + dy.abs() > 4. {
             drag.moved = true;
         }
         let id = drag.id.clone();
         let (ax, ay) = (drag.start_anchor.0 + dx, drag.start_anchor.1 + dy);
         self.graph_field.drag_to(&id, ax, ay);
+        cx.notify();
+    }
+
+    /// Ctrl+wheel zoom: multiply the fit-relative zoom, clamped [1, 6] — 1 is
+    /// always "the whole field visible" (the window bound the user asked
+    /// for); plain wheel stays the scroll surface's pan.
+    pub(super) fn zoom_graph(&mut self, factor: f32, cx: &mut Context<Self>) {
+        let next = (self.graph_zoom * factor).clamp(1., 6.);
+        if (next - self.graph_zoom).abs() > f32::EPSILON {
+            self.graph_zoom = next;
+            cx.notify();
+        }
+    }
+
+    /// The "Fit" chip / background double-click: back to the whole field.
+    pub fn reset_graph_zoom(&mut self, cx: &mut Context<Self>) {
+        if self.graph_zoom != 1. {
+            self.graph_zoom = 1.;
+            cx.notify();
+        }
+    }
+
+    /// Caption click → zoom INTO that cluster: scale so its bbox fills ~80%
+    /// of the viewport and scroll it centered (the cluster navigation the
+    /// user asked for, 2026-07-10).
+    pub fn focus_graph_cluster(&mut self, project: &str, cx: &mut Context<Self>) {
+        let bounds = self.graph_scroll.bounds().size;
+        let (vw, vh) = (bounds.width.as_f32(), bounds.height.as_f32());
+        if vw <= 0. || vh <= 0. {
+            return;
+        }
+        let members: Vec<_> = self
+            .graph_field
+            .nodes
+            .iter()
+            .filter(|n| n.project == project)
+            .collect();
+        if members.is_empty() {
+            return;
+        }
+        let pad = 60.;
+        let min_x = members.iter().map(|n| n.out_x - n.r).fold(f32::MAX, f32::min) - pad;
+        let max_x = members.iter().map(|n| n.out_x + n.r).fold(f32::MIN, f32::max) + pad;
+        let min_y = members.iter().map(|n| n.out_y - n.r).fold(f32::MAX, f32::min) - pad;
+        let max_y = members.iter().map(|n| n.out_y + n.r).fold(f32::MIN, f32::max) + pad;
+        let (bw, bh) = ((max_x - min_x).max(1.), (max_y - min_y).max(1.));
+        let fit_s = (vw / self.graph_field.width.max(1.))
+            .min(vh / self.graph_field.height.max(1.))
+            .min(1.);
+        let target_s = ((vw / bw).min(vh / bh) * 0.85).clamp(fit_s, 4.);
+        self.graph_zoom = (target_s / fit_s.max(0.001)).clamp(1., 6.);
+        let s = fit_s * self.graph_zoom;
+        // Scroll so the bbox center sits at the viewport center (offsets are
+        // negative content displacement, clamped to the scrollable range).
+        let content_w = (self.graph_field.width * s).max(vw);
+        let content_h = (self.graph_field.height * s).max(vh);
+        let cx_px = ((min_x + max_x) * 0.5) * s;
+        let cy_px = ((min_y + max_y) * 0.5) * s;
+        let off_x = (cx_px - vw * 0.5).clamp(0., (content_w - vw).max(0.));
+        let off_y = (cy_px - vh * 0.5).clamp(0., (content_h - vh).max(0.));
+        self.graph_scroll
+            .set_offset(gpui::point(gpui::px(-off_x), gpui::px(-off_y)));
         cx.notify();
     }
 

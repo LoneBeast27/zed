@@ -23,7 +23,7 @@ use super::field::VaultField;
 use super::graph::{Edge, EdgeKind, node_color, node_size};
 use super::index::{DocKind, VaultDoc};
 use super::panel::VaultBrowserPanel;
-use super::style::HAIRLINE_HI;
+use super::style::{HAIRLINE_HI, SURFACE_1};
 
 /// A snapshot of one edge as screen segments, resolved from live field node
 /// positions — recomputed each frame off the sim outputs.
@@ -37,19 +37,45 @@ struct EdgeSeg {
 /// Build the physics-field graph body: the edge canvas + the node chips over a
 /// scroll surface sized to the field extent. `hovered` is the doc id whose
 /// hover card is up (owned by the panel).
+/// The graph's navigation frame (user ask 2026-07-10): `scale` = fit×zoom
+/// applied to every rendered coordinate (zoom 1 bounds the WHOLE field by
+/// the viewport); `zoomed` shows the Fit chip; `filter` dims non-matching
+/// nodes (the galaxy backlog's filter↔graph sync).
+pub(super) struct GraphNav {
+    pub scale: f32,
+    pub zoomed: bool,
+    pub viewport: (f32, f32),
+    pub filter: String,
+}
+
 pub(super) fn field_view(
     field: &VaultField,
     docs: &[&VaultDoc],
     edges: &[Edge],
     scroll: &gpui::ScrollHandle,
     hovered: Option<&str>,
+    nav: GraphNav,
     panel: WeakEntity<VaultBrowserPanel>,
     cx: &App,
 ) -> gpui::AnyElement {
-    // doc id → live visual center (from the advanced field).
+    let s = nav.scale.max(0.05);
+    // Center the scaled field inside the viewport axis-wise when it is
+    // smaller (fit mode leaves one axis short).
+    let content_w = (field.width * s).max(nav.viewport.0.max(1.));
+    let content_h = (field.height * s).max(nav.viewport.1.max(1.));
+    let off = (
+        (content_w - field.width * s) * 0.5,
+        (content_h - field.height * s) * 0.5,
+    );
+    let filter = nav.filter.trim().to_lowercase();
+
+    // doc id → live visual center (from the advanced field), view-space.
     let mut pos: HashMap<&str, (f32, f32)> = HashMap::with_capacity(field.nodes.len());
     for node in &field.nodes {
-        pos.insert(node.id.as_str(), (node.out_x, node.out_y));
+        pos.insert(
+            node.id.as_str(),
+            (node.out_x * s + off.0, node.out_y * s + off.1),
+        );
     }
 
     // Resolve edges to live segments (docs[from]/docs[to] → their node pos).
@@ -94,27 +120,36 @@ pub(super) fn field_view(
     for n in &field.nodes {
         *cluster_n.entry(n.project.as_str()).or_default() += 1;
     }
+    // Labels need room to read: below ~0.7× the captions carry the meaning
+    // and per-node labels rest (hover still reveals everything).
+    let labels_visible = s >= 0.7;
     let nodes: Vec<gpui::AnyElement> = field
         .nodes
         .iter()
         .filter_map(|n| by_id.get(n.id.as_str()).map(|doc| (n, *doc)))
         .map(|(n, doc)| {
             let is_hovered = hovered == Some(n.id.as_str());
-            let size = node_size(doc);
+            let size = (node_size(doc) * s).max(4.);
             let roomy = cluster_n
                 .get(n.project.as_str())
                 .is_none_or(|&count| count <= LABEL_DENSE_N);
-            let labeled = roomy
-                || is_hovered
-                || matches!(doc.kind, DocKind::Project | DocKind::Index)
-                || size >= LABEL_MIN_SIZE;
+            let labeled = is_hovered
+                || (labels_visible
+                    && (roomy
+                        || matches!(doc.kind, DocKind::Project | DocKind::Index)
+                        || size >= LABEL_MIN_SIZE));
+            // Filter↔graph sync (galaxy backlog): non-matches DIM, never
+            // vanish — the layout stays stable while the eye finds matches.
+            let dimmed = !filter.is_empty() && !doc.search_key.contains(&filter);
+            let (vx, vy) = pos.get(n.id.as_str()).copied().unwrap_or((0., 0.));
             node_chip(
                 doc,
-                n.out_x,
-                n.out_y,
+                vx,
+                vy,
                 size,
                 is_hovered,
                 labeled,
+                dimmed,
                 panel.clone(),
                 cx,
             )
@@ -122,7 +157,8 @@ pub(super) fn field_view(
         .collect();
 
     // Cluster captions: the project name floats above each cluster's top so
-    // every dot has an immediate group meaning even unlabeled.
+    // every dot has an immediate group meaning even unlabeled. Clicking one
+    // ZOOMS INTO that cluster (the navigation handle).
     let captions: Vec<gpui::AnyElement> = field
         .clusters
         .iter()
@@ -131,41 +167,111 @@ pub(super) fn field_view(
                 .nodes
                 .iter()
                 .filter(|n| &n.project == project)
-                .map(|n| n.out_y - n.r)
-                .fold(cluster.cy, f32::min);
+                .map(|n| (n.out_y - n.r) * s + off.1)
+                .fold(cluster.cy * s + off.1, f32::min);
             let name: SharedString = if project.is_empty() {
                 "(unassigned)".into()
             } else {
                 project.clone().into()
             };
+            let any_match = filter.is_empty()
+                || field.nodes.iter().any(|n| {
+                    &n.project == project
+                        && by_id
+                            .get(n.id.as_str())
+                            .is_some_and(|d| d.search_key.contains(&filter))
+                });
+            let caption_panel = panel.clone();
+            let caption_project = project.clone();
             div()
+                .id(ElementId::Name(format!("cluster-cap-{project}").into()))
                 .absolute()
-                .left(px(cluster.cx - 80.))
+                .left(px(cluster.cx * s + off.0 - 80.))
                 .top(px(top - 34.))
                 .w(px(160.))
                 .text_size(px(11.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(cx.theme().colors().text_muted)
                 .text_center()
+                .when(!any_match, |el| el.opacity(0.25))
+                .cursor_pointer()
+                .tooltip(ui::Tooltip::text("Zoom into this cluster"))
+                .on_click(move |_, _, cx| {
+                    caption_panel
+                        .update(cx, |panel, cx| {
+                            panel.focus_graph_cluster(&caption_project, cx)
+                        })
+                        .ok();
+                })
                 .child(name)
                 .into_any_element()
         })
         .collect();
 
+    // Ctrl+wheel = zoom (plain wheel stays the scroll surface's pan).
+    let wheel_panel = panel.clone();
+    // "Fit" chip — back to the whole-field view whenever zoomed in.
+    let fit_chip = nav.zoomed.then(|| {
+        let colors = cx.theme().colors();
+        let fit_panel = panel.clone();
+        div()
+            .id("graph-fit")
+            .absolute()
+            .top(px(10.))
+            .right(px(14.))
+            .px(px(10.))
+            .py(px(4.))
+            .rounded(px(8.))
+            .bg(SURFACE_1)
+            .border_1()
+            .border_color(colors.border)
+            .text_size(px(11.))
+            .text_color(colors.text_muted)
+            .cursor_pointer()
+            .hover(|el| el.bg(colors.element_hover))
+            .on_click(move |_, _, cx| {
+                fit_panel
+                    .update(cx, |panel, cx| panel.reset_graph_zoom(cx))
+                    .ok();
+            })
+            .child("Fit")
+    });
+
     div()
-        .id("vault-field-scroll")
+        .relative()
         .size_full()
-        .overflow_scroll()
-        .track_scroll(scroll)
         .child(
             div()
-                .relative()
-                .w(px(field.width))
-                .h(px(field.height))
-                .child(edge_canvas)
-                .children(captions)
-                .children(nodes),
+                .id("vault-field-scroll")
+                .size_full()
+                .overflow_scroll()
+                .track_scroll(scroll)
+                .on_scroll_wheel(move |event, _, cx| {
+                    if event.modifiers.control {
+                        let dy = match event.delta {
+                            gpui::ScrollDelta::Lines(delta) => delta.y,
+                            gpui::ScrollDelta::Pixels(delta) => delta.y.as_f32() / 40.,
+                        };
+                        if dy != 0. {
+                            let factor = if dy > 0. { 1.15 } else { 1. / 1.15 };
+                            wheel_panel
+                                .update(cx, |panel, cx| panel.zoom_graph(factor, cx))
+                                .ok();
+                            cx.stop_propagation();
+                        }
+                    }
+                })
+                .child(
+                    div()
+                        .relative()
+                        .w(px(content_w))
+                        .h(px(content_h))
+                        .child(edge_canvas)
+                        .children(captions)
+                        .children(nodes),
+                ),
         )
+        .children(fit_chip)
         .into_any_element()
 }
 
@@ -269,6 +375,7 @@ fn node_chip(
     size: f32,
     is_hovered: bool,
     labeled: bool,
+    dimmed: bool,
     panel: WeakEntity<VaultBrowserPanel>,
     cx: &App,
 ) -> gpui::AnyElement {
@@ -292,6 +399,8 @@ fn node_chip(
         .absolute()
         .left(px(out_x - size * 0.5))
         .top(px(out_y - size * 0.5))
+        // Filter dim (galaxy backlog: dim non-matches, never remove).
+        .when(dimmed, |el| el.opacity(0.15))
         .items_center()
         .gap(px(9.))
         .cursor_pointer()

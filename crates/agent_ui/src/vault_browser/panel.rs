@@ -134,6 +134,13 @@ pub struct VaultBrowserPanel {
     pub(super) graph_field: VaultField,
     /// The doc id whose graph hover card is up.
     pub(super) graph_hovered: Option<SharedString>,
+    /// GRAPH zoom multiplier over the fit-to-viewport base scale (1 = fit —
+    /// the whole field visible; ctrl+wheel and caption-clicks move it;
+    /// user ask 2026-07-10: bounded by the window, zoom into clusters).
+    pub(super) graph_zoom: f32,
+    /// The EFFECTIVE render scale of the last graph frame (fit × zoom) —
+    /// drag handlers divide pointer deltas by it.
+    pub(super) graph_scale: f32,
     /// An in-flight graph node drag (pointer re-aims the anchor 1:1).
     pub(super) graph_drag: Option<GraphDrag>,
     /// A drag that moved suppresses the click it lands on.
@@ -185,6 +192,8 @@ impl VaultBrowserPanel {
             field_epoch: Instant::now(),
             graph_field: VaultField::default(),
             graph_hovered: None,
+            graph_zoom: 1.,
+            graph_scale: 1.,
             graph_drag: None,
             graph_suppress_click: false,
             graph_reveal: None,
