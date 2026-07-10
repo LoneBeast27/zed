@@ -42,6 +42,7 @@ impl VaultBrowserPanel {
                 .child(live_action(
                     "import-run-all",
                     "Import all",
+                    self.importers.start_in_flight,
                     cx.listener(|this, _, _, cx| this.start_session_import(None, cx)),
                     cx,
                 )),
@@ -116,6 +117,7 @@ impl VaultBrowserPanel {
                     .child(live_action(
                         ElementId::Name(format!("import-session-{vendor}").into()),
                         "Import",
+                        self.importers.start_in_flight,
                         cx.listener(move |this, _, _, cx| {
                             this.start_session_import(Some(vendor), cx)
                         }),
@@ -193,30 +195,35 @@ pub(super) fn section_label(text: &'static str, cx: &App) -> Div {
         .child(text)
 }
 
-/// A bordered action that is honestly DISABLED (no endpoint) — the tooltip
-/// carries the reason; the cursor never lies.
 /// The live session-import pill (was `disabled_action` until the bridge grew
 /// POST /import/run, 2026-07-10 — the honest-fallback branch retired).
+/// `busy` renders the in-flight state ("Importing…", no cursor/click) so a
+/// pressed pill never reads as a silent no-op (review nit).
 pub(super) fn live_action(
     id: impl Into<ElementId>,
     label: &'static str,
+    busy: bool,
     listener: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let colors = cx.theme().colors();
-    div()
+    let pill = div()
         .id(id)
         .px(px(9.))
         .py(px(3.))
         .rounded(px(8.))
         .border_1()
         .border_color(colors.border)
-        .text_size(px(12.))
-        .text_color(colors.text_muted)
-        .cursor_pointer()
-        .hover(|s| s.bg(colors.element_hover))
-        .on_click(listener)
-        .child(label)
+        .text_size(px(12.));
+    if busy {
+        pill.text_color(colors.text_placeholder).child("Importing…")
+    } else {
+        pill.text_color(colors.text_muted)
+            .cursor_pointer()
+            .hover(|s| s.bg(colors.element_hover))
+            .on_click(listener)
+            .child(label)
+    }
 }
 
 /// A small text-link action (cancel / jump affordances).

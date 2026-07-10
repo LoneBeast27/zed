@@ -234,6 +234,10 @@ pub struct Sim {
     absorbed: HashSet<String>,
     /// Physics sleep gate: the field runs only while hot.
     pub(super) wake_until: f32,
+    /// Whether the LAST advance frame had any hot source (tween / momentum /
+    /// ring) — the frame-pump signal (`animating`), replacing the old
+    /// "any nodes exist" that pumped forever over a frozen field.
+    pub(super) last_frame_hot: bool,
     pub(super) dragging: Option<String>,
     /// Scratch physics buffer (reused every frame — no per-frame allocation
     /// in the hot loop).
@@ -253,6 +257,7 @@ impl Default for Sim {
             completed_at: HashMap::new(),
             absorbed: HashSet::new(),
             wake_until: 0.,
+            last_frame_hot: false,
             dragging: None,
             scratch: Vec::new(),
         }

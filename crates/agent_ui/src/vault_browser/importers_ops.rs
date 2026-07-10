@@ -162,7 +162,28 @@ impl VaultBrowserPanel {
                         Err(_) => {
                             misses += 1;
                             this.importers.stale = true;
-                            misses < JOB_POLL_MAX_MISSES && this.view() == VaultView::Import
+                            let keep = misses < JOB_POLL_MAX_MISSES
+                                && this.view() == VaultView::Import;
+                            if misses >= JOB_POLL_MAX_MISSES {
+                                // Jobs are process-lifetime on the bridge — a
+                                // restart 404s the id forever. Terminalize the
+                                // local copy honestly instead of reading
+                                // "running" until the end of time while every
+                                // snapshot fetch re-attaches a doomed watch
+                                // (2026-07-10 review find #5).
+                                if let Some(job) = this.importers.job.as_mut() {
+                                    if job.status == "running" {
+                                        job.status = "error".to_string();
+                                        job.errors.push(serde_json::Value::String(
+                                            "job lost — the bridge restarted \
+                                             mid-import (jobs are process-\
+                                             lifetime); re-run the import"
+                                                .to_string(),
+                                        ));
+                                    }
+                                }
+                            }
+                            keep
                         }
                     };
                     if !keep {

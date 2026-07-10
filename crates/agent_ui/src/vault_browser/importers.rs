@@ -272,16 +272,8 @@ pub(super) fn record_error_line(value: &serde_json::Value) -> String {
     }
 }
 
-/// Verbatim bridge error from a non-2xx body — the bridge answers
-/// `{"error": msg}` (serve.py); fall back to the bare status code when the
-/// body isn't that shape.
-pub(super) fn error_from_body(status: u16, body: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| format!("bridge returned {status}"))
-}
+// (error_from_body retired 2026-07-10 — the shared `bridge::error_message`
+// carries the verbatim-{"error"} extraction for every caller now.)
 
 /// Elapsed seconds for a job row (ended-anchored once terminal).
 pub(super) fn elapsed_s(job: &ImportJob, now: f64) -> f64 {
@@ -389,12 +381,15 @@ mod tests {
 
     #[test]
     fn bridge_errors_surface_verbatim_with_status_fallback() {
+        // The shared extraction (upstreamed 2026-07-10) — pinned from here
+        // because this panel's UX depends on the verbatim 409 reason.
+        use crate::bridge::error_message;
         assert_eq!(
-            error_from_body(409, r#"{"error": "an import for chatgpt → myproj is already running (job abc)"}"#),
+            error_message(409, r#"{"error": "an import for chatgpt → myproj is already running (job abc)"}"#),
             "an import for chatgpt → myproj is already running (job abc)"
         );
-        assert_eq!(error_from_body(500, "<html>boom</html>"), "bridge returned 500");
-        assert_eq!(error_from_body(400, r#"{"error": ""}"#), "bridge returned 400");
+        assert_eq!(error_message(500, "<html>boom</html>"), "bridge returned 500");
+        assert_eq!(error_message(400, r#"{"error": ""}"#), "bridge returned 400");
     }
 
     #[test]

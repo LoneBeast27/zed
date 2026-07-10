@@ -216,11 +216,18 @@ pub fn error_message(status: u16, body: &str) -> String {
 /// Cap a note body for the conflict modal's side panes (first ~24 lines /
 /// 1600 chars) — a preview, not the file.
 pub fn side_preview(body: &str) -> String {
+    // Truncation judged by COUNTS, never byte lengths — `lines()` strips
+    // \r\n, so a CRLF vault file always measured "shorter than the body" and
+    // every complete preview grew a spurious trailing … (2026-07-10 review
+    // nit; Windows vaults are CRLF-likely).
+    let total_lines = body.lines().count();
     let mut preview: String = body.lines().take(24).collect::<Vec<_>>().join("\n");
+    let mut truncated = total_lines > 24;
     if preview.chars().count() > 1600 {
         preview = preview.chars().take(1600).collect();
+        truncated = true;
     }
-    if preview.len() < body.trim_end().len() {
+    if truncated {
         preview.push('…');
     }
     preview

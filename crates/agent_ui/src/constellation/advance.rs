@@ -75,12 +75,15 @@ pub fn exhale_scale(exhales: &[f32], now: f32) -> f32 {
 
 impl Sim {
     /// Step the sim to `now` (sim ms). Returns `true` while anything on
-    /// stage needs further frames (drift keeps a populated constellation
-    /// perpetually alive — the panel stops pumping only when empty).
+    /// stage needs further frames. (Since the drift gate, a settled populated
+    /// constellation is perfectly still — `frame_hot` tracks the real hot
+    /// sources per frame instead of "any nodes exist", which pumped
+    /// scratch-rebuild frames forever on a provably frozen field.)
     pub fn advance(&mut self, now: f32) -> bool {
         let dt = ((now - self.last_tick) / 1000.).clamp(0.008, 0.033);
         self.last_tick = now;
         self.channels.tick(now);
+        let mut frame_hot = false;
 
         let mut gobbled: Vec<(usize, usize)> = Vec::new();
         for (conv_ix, conv) in self.convs.iter_mut().enumerate() {
@@ -184,6 +187,10 @@ impl Sim {
                     .any(|n| n.arranging.is_some() || n.absorbing.is_some() || n.mass_anim.is_some());
             let momentum = physics::any_hot(&self.scratch);
             let hot = tweening || momentum;
+            frame_hot |= hot
+                || !conv.pulses.is_empty()
+                || !conv.exhales.is_empty()
+                || conv.gulp_at.is_some();
             if hot {
                 physics::step(&mut self.scratch, root.0, root.1, root_r, dt);
                 // Momentum-only hot cap: residual momentum with nothing
@@ -258,14 +265,17 @@ impl Sim {
             self.wake_until = self.wake_until.max(now + super::sim::WAKE_MS);
         }
 
+        self.last_frame_hot = frame_hot;
         self.animating()
     }
 
-    /// Whether anything on stage needs frames: a populated constellation
-    /// breathes forever (drift); channels animate while particles/retracts
-    /// are in flight.
+    /// Whether anything on stage needs frames: a hot field / live tween /
+    /// ring this frame, channel particles/retracts in flight, or a gobble
+    /// linger pending. A settled populated constellation is STILL (the drift
+    /// gate) — "any nodes exist" used to pump frames forever over a frozen
+    /// field (2026-07-10 review nit).
     pub fn animating(&self) -> bool {
-        self.convs.iter().any(|conv| !conv.nodes.is_empty())
+        self.last_frame_hot
             || self.channels.animating()
             || !self.completed_at.is_empty()
     }

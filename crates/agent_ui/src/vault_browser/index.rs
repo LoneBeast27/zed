@@ -183,8 +183,14 @@ pub fn root_paths() -> [(VaultRoot, PathBuf); 2] {
 }
 
 /// The live vault root path (promote target root; new-note open base).
+/// Honors `AGENTIC_VAULT` like the bridge does (bridge/vault.py) — a
+/// hardcoded root silently diverged from a bridge pointed elsewhere, so the
+/// writeback modal could show the WRONG file bodies while accept/dismiss
+/// acted on the real ones server-side (2026-07-10 review find #10).
 pub fn vault_root_path() -> PathBuf {
-    PathBuf::from(r"L:\Projects\atlas-vault")
+    std::env::var("AGENTIC_VAULT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(r"L:\Projects\atlas-vault"))
 }
 
 /// Directory names skipped during the walk — the machine dirs. Dotfile dirs
