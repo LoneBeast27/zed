@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use editor::{Addon, Editor, EditorElement, EditorEvent, EditorStyle};
 use gpui::{
-    AnyElement, App, AsyncApp, Entity, Focusable as _, KeyContext, SharedString, Subscription,
-    Task, TextStyle, Window,
+    AnyElement, App, AsyncApp, Entity, Focusable as _, KeyContext, MouseButton, SharedString,
+    Subscription, Task, TextStyle, Window,
 };
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
@@ -438,6 +438,17 @@ impl OrchestratorPanel {
             .border_1()
             .border_color(deck_border)
             .overflow_hidden()
+            // Whole-deck focus law (playtest 2026-07-10: clicks landing a few
+            // px below the single text line hit deck padding and did NOTHING
+            // — an hour of ghost inputs). Any press inside the deck focuses
+            // the editor; interactive children still receive their own
+            // events (focus is idempotent and never swallows a click).
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.focus(&this.composer.editor.read(cx).focus_handle(cx), cx);
+                }),
+            )
             .child(
                 // textarea: padding 15px 17px 4px, 15px/1.55 UI font.
                 div()
