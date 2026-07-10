@@ -35,8 +35,8 @@ pub use adversary::{
 pub use client::{BRIDGE_BASE_URL, fetch_json, post_json};
 pub use demo::is_agentic_demo;
 pub use protocol::{
-    BridgeEvent, ChannelRow, ConversationRow, OverlapRow, PlanSnapshot, PlanSubtask, PoolRow,
-    ProjectRow, RunRow, RunTokens, ScrapeMeta, TranscriptMessage, TranscriptRun,
-    TranscriptSnapshot, UnlinkedRun, UsageMeta, VendorLiveness,
+    BridgeEvent, ChannelEventRow, ChannelRow, ConversationRow, OverlapRow, PlanSnapshot,
+    PlanSubtask, PoolRow, ProjectRow, RunRow, RunTokens, ScrapeMeta, TranscriptMessage,
+    TranscriptRun, TranscriptSnapshot, UnlinkedRun, UsageMeta, VendorLiveness,
 };
 pub use store::{BridgeStore, PlanWatch, Transport, TranscriptWatch, global_store, init};

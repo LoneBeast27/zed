@@ -21,7 +21,8 @@ use http_client::HttpClient;
 use serde::Deserialize;
 
 use crate::bridge::{
-    BRIDGE_BASE_URL, BridgeEvent, ChannelRow, OverlapRow, ProjectRow, RunRow, fetch_json,
+    BRIDGE_BASE_URL, BridgeEvent, ChannelEventRow, ChannelRow, OverlapRow, ProjectRow, RunRow,
+    fetch_json,
 };
 
 use super::panel::ConstellationPanel;
@@ -31,12 +32,14 @@ const FEED_INTERVAL: Duration = Duration::from_secs(2);
 /// The panel counts as visible if it rendered within this window.
 pub(super) const VISIBLE_WINDOW: Duration = Duration::from_secs(3);
 
-/// `GET /channels` response: channel rows + overlap venn rows (the arrange
-/// weights). `events` is served too but unused here.
+/// `GET /channels` response: channel rows + the Tier-0 receipt feed + overlap
+/// venn rows (arrange weights + the channels detail section).
 #[derive(Debug, Default, Deserialize)]
 struct ChannelsResponse {
     #[serde(default)]
     channels: Vec<ChannelRow>,
+    #[serde(default)]
+    events: Vec<ChannelEventRow>,
     #[serde(default)]
     overlap: Vec<OverlapRow>,
 }
@@ -56,6 +59,7 @@ struct ProjectsResponse {
 struct FeedFrame {
     board: Vec<RunRow>,
     channels: Vec<ChannelRow>,
+    events: Vec<ChannelEventRow>,
     overlap: Vec<OverlapRow>,
     projects: Vec<ProjectRow>,
 }
@@ -71,6 +75,7 @@ async fn fetch_frame(client: &dyn HttpClient) -> Result<FeedFrame> {
     Ok(FeedFrame {
         board: board.board,
         channels: channels.channels,
+        events: channels.events,
         overlap: channels.overlap,
         projects: projects.projects,
     })
@@ -112,7 +117,8 @@ pub(super) async fn feed_loop(
                         );
                         store.apply_projects(frame.projects, cx);
                     });
-                    panel.set_overlap(frame.overlap);
+                    panel.set_overlap(frame.overlap, cx);
+                    panel.set_channel_events(frame.events, cx);
                 }
                 // Fetch failure = the web's silent catch: keep the last
                 // representation, retry next tick.

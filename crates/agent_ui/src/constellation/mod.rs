@@ -25,13 +25,18 @@
 //! - feed — the supplemental visibility-gated poll (SSE digest gaps).
 //! - demo — the staged design scenario (shared agentic-demo gate; also the
 //!   board's demo-board source, so it is `pub`).
+//! - header — the panel head (title · stats · legend · toggles).
+//! - channels_section — the T2 channels observe surface (below-graph
+//!   detail: grants, receipts, overlap; observe-only until T2 grants).
 
 mod advance;
+mod channels_section;
 pub mod demo;
 mod draw;
 mod draw_node;
 pub mod edges;
 mod feed;
+mod header;
 pub mod layout;
 pub mod mass;
 pub mod panel;
