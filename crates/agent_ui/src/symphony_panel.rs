@@ -73,6 +73,11 @@ pub struct SymphonyPanel {
     /// (`ModeSurface::set_surface_active`) — its presence keeps the `/plan`
     /// poll alive (the SSE-fallback path).
     plan_watch: Option<PlanWatch>,
+    /// A Run-wave POST is in flight (double-clicks must not double-spawn —
+    /// 2026-07-10 review find #7).
+    wave_in_flight: bool,
+    /// The last Run-wave refusal, verbatim — rendered under the score.
+    wave_error: Option<SharedString>,
     _store_subscription: Subscription,
 }
 
@@ -84,6 +89,8 @@ impl SymphonyPanel {
             focus_handle: cx.focus_handle(),
             store,
             plan_watch: None,
+            wave_in_flight: false,
+            wave_error: None,
             _store_subscription,
         }
     }
@@ -186,24 +193,44 @@ impl SymphonyPanel {
             )
             .children(waves)
             .children(self.render_unlinked(&plan.unlinked_runs, cx))
+            // The last Run-wave refusal, verbatim (bridge 4xx or a missing
+            // conv) — a silently-swallowed error read as a dead button.
+            .children(self.wave_error.clone().map(|error| {
+                div()
+                    .text_size(px(12.))
+                    .text_color(gpui::Hsla::from(
+                        crate::agent_accents::color_for_status("blocked"),
+                    ))
+                    .child(error)
+            }))
             .into_any_element()
     }
 
     /// POST `/plan/wave/spawn {"wave", "conv"}` — every ready subtask of the
     /// wave spawns with its subtask_id explicit (the check-off's linkage is
-    /// structural, never text-matched). Fire-and-forget: the plan poll lands
-    /// the Queued→Running flips; a refused spawn (deps unready, already
-    /// linked) simply leaves the pills unchanged, honestly.
+    /// structural, never text-matched). The conv is the PLAN's conversation
+    /// (`store.plan_conv`) — never a transcript fallback, which resolved
+    /// server-side to whatever conversation was most recent and could spawn
+    /// the wrong plan's wave (2026-07-10 review find #4). In-flight guarded
+    /// (find #7); a refusal lands in `wave_error` and renders under the
+    /// score instead of vanishing.
     fn run_wave_clicked(&mut self, wave: u32, cx: &mut Context<Self>) {
-        let conv = self
-            .store
-            .read(cx)
-            .transcript_conv
-            .clone()
-            .unwrap_or_default();
+        if self.wave_in_flight {
+            return;
+        }
+        let conv = self.store.read(cx).plan_conv.clone();
+        if conv.is_empty() {
+            self.wave_error =
+                Some("plan has no conversation attribution — cannot spawn".into());
+            cx.notify();
+            return;
+        }
+        self.wave_in_flight = true;
+        self.wave_error = None;
+        cx.notify();
         let client = cx.http_client();
-        cx.spawn(async move |_this, cx| {
-            let _ = cx
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
                 .background_spawn(async move {
                     let body =
                         serde_json::json!({ "wave": wave, "conv": conv }).to_string();
@@ -215,6 +242,13 @@ impl SymphonyPanel {
                     .await
                 })
                 .await;
+            let _ = this.update(cx, |this, cx| {
+                this.wave_in_flight = false;
+                if let Err(error) = outcome {
+                    this.wave_error = Some(error.to_string().into());
+                }
+                cx.notify();
+            });
         })
         .detach();
     }

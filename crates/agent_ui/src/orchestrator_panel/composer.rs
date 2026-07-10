@@ -279,6 +279,8 @@ impl OrchestratorPanel {
         if self.typeahead_accept(window, cx) {
             return;
         }
+        // A fresh submission clears the previous /wave refusal note.
+        self.wave_note = None;
         if self.busy {
             // The stop circle (dogfood 2026-07-08): a real turn abort now —
             // POST /conv/<id>/abort kills the in-flight turn's child runs
@@ -485,6 +487,19 @@ impl OrchestratorPanel {
                     // The target-selector menu (the working brain pill) —
                     // same in-flow displacement idiom as the typeahead.
                     .children(target_menu)
+                    // `/wave` refusal note (usage hint / bridge error
+                    // verbatim) — in flow above the deck, cleared on the
+                    // next submission (2026-07-10 review find #8).
+                    .children(self.wave_note.clone().map(|note| {
+                        div()
+                            .px(px(14.))
+                            .pb(px(6.))
+                            .text_size(px(12.))
+                            .text_color(gpui::Hsla::from(
+                                crate::agent_accents::color_for_status("blocked"),
+                            ))
+                            .child(note)
+                    }))
                     .child(deck),
             )
             .into_any_element()

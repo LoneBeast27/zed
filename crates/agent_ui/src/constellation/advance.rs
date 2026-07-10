@@ -189,14 +189,17 @@ impl Sim {
                 // Momentum-only hot cap: residual momentum with nothing
                 // driving it past MOMENTUM_CAP_MS is a collide-floor limit
                 // cycle (the bistable alternation the user reported
-                // 2026-07-10), not a settle in progress — freeze it.
+                // 2026-07-10), not a settle in progress — freeze it. The
+                // timer is PER CONV (review find #3: a single Sim-level
+                // field was reset every frame by any cold sibling conv, so
+                // the cap never fired on multi-conversation boards).
                 if tweening {
-                    self.momentum_only_since = None;
+                    conv.momentum_only_since = None;
                 } else {
-                    let since = *self.momentum_only_since.get_or_insert(now);
+                    let since = *conv.momentum_only_since.get_or_insert(now);
                     if now - since > super::sim::MOMENTUM_CAP_MS {
                         physics::freeze(&mut self.scratch);
-                        self.momentum_only_since = None;
+                        conv.momentum_only_since = None;
                     }
                 }
                 for (node, body) in conv.nodes.iter_mut().zip(self.scratch.iter()) {
@@ -206,7 +209,7 @@ impl Sim {
                     node.vy = body.vy;
                 }
             } else {
-                self.momentum_only_since = None;
+                conv.momentum_only_since = None;
             }
 
             // Outputs: anchor + physics + drift + spawn flight offset. A

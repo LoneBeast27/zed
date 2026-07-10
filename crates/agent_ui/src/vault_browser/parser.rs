@@ -197,13 +197,17 @@ fn unquote(value: &str) -> String {
     let bytes = value.as_bytes();
     if bytes.len() >= 2 {
         let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
-        let inner = &value[1..value.len() - 1];
+        // Slice ONLY after confirming ASCII quote bytes at both ends — those
+        // are guaranteed char boundaries. Slicing first panicked on any
+        // value whose first/last char is multi-byte ("title: — weekly"),
+        // killing the indexer on exactly the real-UTF-8 docs the writer fix
+        // now produces (2026-07-10 review find #2).
         if first == b'\'' && last == b'\'' {
             // Single-quoted style: '' is the only escape (a literal ').
-            return inner.replace("''", "'");
+            return value[1..value.len() - 1].replace("''", "'");
         }
         if first == b'"' && last == b'"' {
-            return decode_double_quoted(inner);
+            return decode_double_quoted(&value[1..value.len() - 1]);
         }
     }
     value.to_string()
@@ -220,8 +224,48 @@ fn decode_double_quoted(inner: &str) -> String {
         match chars.next() {
             Some('u') => {
                 let hex: String = chars.by_ref().take(4).collect();
-                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                    Some(decoded) if hex.len() == 4 => out.push(decoded),
+                match u32::from_str_radix(&hex, 16).ok() {
+                    Some(cp) if hex.len() == 4 => {
+                        // Surrogate pair (json.dumps-era emoji): a high
+                        // surrogate must combine with the following \uXXXX
+                        // low half (review find #6).
+                        if (0xD800..0xDC00).contains(&cp) {
+                            let rest: String = chars.by_ref().take(6).collect();
+                            let low = rest
+                                .strip_prefix("\\u")
+                                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                                .filter(|lo| (0xDC00..0xE000).contains(lo));
+                            match low {
+                                Some(lo) => {
+                                    let combined = 0x10000
+                                        + ((cp - 0xD800) << 10)
+                                        + (lo - 0xDC00);
+                                    match char::from_u32(combined) {
+                                        Some(decoded) => out.push(decoded),
+                                        None => {
+                                            out.push_str("\\u");
+                                            out.push_str(&hex);
+                                            out.push_str(&rest);
+                                        }
+                                    }
+                                }
+                                None => {
+                                    // Lone/malformed surrogate — verbatim.
+                                    out.push_str("\\u");
+                                    out.push_str(&hex);
+                                    out.push_str(&rest);
+                                }
+                            }
+                        } else {
+                            match char::from_u32(cp) {
+                                Some(decoded) => out.push(decoded),
+                                None => {
+                                    out.push_str("\\u");
+                                    out.push_str(&hex);
+                                }
+                            }
+                        }
+                    }
                     _ => {
                         // Malformed — keep the original bytes verbatim.
                         out.push_str("\\u");

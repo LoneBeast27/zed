@@ -85,6 +85,15 @@ pub fn resolve_edges(docs: &[&VaultDoc]) -> Vec<Edge> {
             .or_else(|| by_title.get(&t.to_lowercase()))
             .copied()
     };
+    // `type: project` docs by id AND title — the preferred hub targets for
+    // project spokes (review find #9).
+    let mut project_hubs: HashMap<&str, usize> = HashMap::new();
+    for (i, doc) in docs.iter().enumerate() {
+        if doc.kind == DocKind::Project {
+            project_hubs.entry(doc.id.as_str()).or_insert(i);
+            project_hubs.entry(doc.title.as_str()).or_insert(i);
+        }
+    }
 
     let mut edges: Vec<Edge> = Vec::new();
     let mut seen: std::collections::HashSet<(usize, usize, u8)> = std::collections::HashSet::new();
@@ -111,12 +120,17 @@ pub fn resolve_edges(docs: &[&VaultDoc]) -> Vec<Edge> {
             }
         }
         // Project hub spokes: a doc connects to the doc that NAMES its
-        // project (id or title match — the vault's `type: project` docs).
-        // This is the missing connective tissue: run digests / briefs /
-        // routines rarely wikilink each other, so without it a project
-        // cluster renders as unrelated dots.
+        // project. This is the missing connective tissue: run digests /
+        // briefs / routines rarely wikilink each other, so without it a
+        // project cluster renders as unrelated dots.
         if !doc.project.is_empty() {
-            if let Some(to) = resolve(&doc.project) {
+            // A `type: project` doc wins over the generic resolve chain —
+            // any note merely FILED or TITLED like the project name could
+            // steal the hub via first-wins by_base/by_title (2026-07-10
+            // review find #9).
+            let hub = project_hubs.get(doc.project.as_str()).copied()
+                .or_else(|| resolve(&doc.project));
+            if let Some(to) = hub {
                 if to != from {
                     push_edge(&mut edges, &mut seen, from, to, EdgeKind::Project);
                 }

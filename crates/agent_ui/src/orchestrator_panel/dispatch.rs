@@ -67,6 +67,10 @@ pub(super) fn parse_submission(
 fn orchestrator_target(name: &str) -> Option<OrchTarget> {
     Some(match name {
         "plan" => OrchTarget::PlanEscalate,
+        // Missing arm = /wave silently rode to the bridge as a chat message
+        // (2026-07-10 review find #1 — the bridge's WAVE_RE short-circuit
+        // masked it; this is the intended native path).
+        "wave" => OrchTarget::WaveSpawn,
         "board" => OrchTarget::OpenBoard,
         "usage" => OrchTarget::OpenUsage,
         "adversary" => OrchTarget::OpenAdversary,
@@ -155,29 +159,61 @@ impl OrchestratorPanel {
 
     /// `/wave <n> [@vendor]` → `POST /plan/wave/spawn {"wave", "agent"?,
     /// "conv"}` — deterministic wave execution (explicit subtask linkage, no
-    /// brain; the 2026-07-10 mislink fix). Malformed args → no-op (the
-    /// composer text stays, the user corrects); errors surface via the
-    /// transcript refetch (the bridge appends nothing on 4xx — the symphony's
-    /// unlinked banner + Queued pills stay honest either way).
+    /// brain; the 2026-07-10 mislink fix). STRICT args (review find #8: the
+    /// old lenient parse silently dropped a bare vendor word and spawned the
+    /// whole wave unfiltered — this endpoint burns real quota); malformed
+    /// input and bridge refusals surface as a wave note. In-flight guarded
+    /// (find #7): a double-fired command must not double-spawn.
     fn dispatch_wave(&mut self, args: String, cx: &mut gpui::Context<Self>) {
+        if self.wave_in_flight {
+            return;
+        }
         let mut parts = args.split_whitespace();
-        let Some(wave) = parts.next().and_then(|w| w.parse::<u32>().ok()) else {
+        let wave = parts.next().and_then(|w| w.parse::<u32>().ok());
+        let vendor_word = parts.next();
+        let extra = parts.next();
+        let agent = vendor_word.and_then(|a| a.strip_prefix('@')).map(str::to_string);
+        let (Some(wave), None) = (wave, extra) else {
+            self.wave_note = Some("usage: /wave <n> [@vendor]".into());
+            cx.notify();
             return;
         };
-        let agent = parts
-            .next()
-            .and_then(|a| a.strip_prefix('@'))
-            .map(str::to_string);
-        let conv = self
-            .store
-            .read(cx)
-            .transcript_conv
-            .clone()
-            .unwrap_or_default();
+        if vendor_word.is_some() && agent.is_none() {
+            // "/wave 2 claude" (missing @) must not silently run ALL agents.
+            self.wave_note = Some("usage: /wave <n> [@vendor] — vendor needs the @".into());
+            cx.notify();
+            return;
+        }
+        if agent.as_deref() == Some("") {
+            self.wave_note = Some("usage: /wave <n> [@vendor]".into());
+            cx.notify();
+            return;
+        }
+        // The conversation whose PLAN is on screen — never a bare
+        // transcript_conv fallback (find #4's sibling: an empty conv resolves
+        // server-side to the most-recent conversation, wrong plan, real
+        // spend). plan_conv tracks the plan even when nothing is followed.
+        let conv = {
+            let store = self.store.read(cx);
+            let plan_conv = store.plan_conv.clone();
+            if plan_conv.is_empty() {
+                store.transcript_conv.clone()
+            } else {
+                Some(plan_conv)
+            }
+        };
+        let Some(conv) = conv else {
+            self.wave_note = Some("no plan conversation to spawn into".into());
+            cx.notify();
+            return;
+        };
+        self.wave_in_flight = true;
+        self.wave_note = None;
+        cx.notify();
         let http_client = cx.http_client();
         let store = self.store.clone();
-        cx.spawn(async move |_this, cx| {
-            let _ = cx
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
                 .background_spawn(async move {
                     let mut body = serde_json::json!({ "wave": wave, "conv": conv });
                     if let Some(agent) = agent {
@@ -191,6 +227,14 @@ impl OrchestratorPanel {
                     .await
                 })
                 .await;
+            let _ = this.update(cx, |this, cx| {
+                this.wave_in_flight = false;
+                if let Err(error) = outcome {
+                    // The bridge's refusal verbatim (409 no-plan, 404 conv…).
+                    this.wave_note = Some(error.to_string().into());
+                }
+                cx.notify();
+            });
             // The spawned runs + linkage land via the plan/transcript polls.
             let _ = store.update(cx, |store, cx| store.refetch_transcript_soon(cx));
         })

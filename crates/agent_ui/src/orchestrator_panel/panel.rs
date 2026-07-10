@@ -70,6 +70,12 @@ pub struct OrchestratorPanel {
     /// thumbs-up). Session-local render state; the durable record is the
     /// bridge's vault ledger (POST /feedback, dogfood 2026-07-08).
     pub(super) feedback: std::collections::HashMap<u64, bool>,
+    /// A `/wave` submission is in flight — double-fires must not
+    /// double-spawn real runs (2026-07-10 review find #7).
+    pub(super) wave_in_flight: bool,
+    /// The last `/wave` refusal (usage hint or the bridge's error verbatim),
+    /// rendered above the composer deck until the next submission.
+    pub(super) wave_note: Option<gpui::SharedString>,
     /// The `/` command registry (S0) — the source the typeahead + `/help`
     /// render from. Shared entity, built at panel construction.
     pub(super) registry: Entity<CommandRegistry>,
@@ -128,6 +134,8 @@ impl OrchestratorPanel {
             tasks_island: TasksIsland::new(cx),
             notif_stack,
             feedback: std::collections::HashMap::new(),
+            wave_in_flight: false,
+            wave_note: None,
             registry,
             typeahead: TypeaheadMenu::new(),
             busy: false,

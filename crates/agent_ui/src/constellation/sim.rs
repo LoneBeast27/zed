@@ -39,7 +39,7 @@ pub const WAKE_MS: f32 = 1500.;
 pub const MASS_WAKE_MS: f32 = 900.;
 /// Momentum-only hot cap (ms): residual momentum with no wake/tween/drag
 /// alive past this is a collide-floor limit cycle, not a settle in progress
-/// — the field freezes (see `Sim::momentum_only_since`).
+/// — the field freezes (see `ConvSim::momentum_only_since`).
 pub const MOMENTUM_CAP_MS: f32 = 4000.;
 /// Anchor re-slot threshold (px): closer than this stays put.
 const RESLOT_EPS: f32 = 2.;
@@ -182,6 +182,11 @@ pub struct ConvSim {
     /// (compaction) — pruned as they finish.
     pub pulses: Vec<f32>,
     pub exhales: Vec<f32>,
+    /// Sim-ms since THIS conv has been hot on residual momentum alone. Was a
+    /// single Sim-level field — any cold sibling conv reset it every frame,
+    /// so the limit-cycle cap never fired on multi-conversation boards
+    /// (2026-07-10 review find #3).
+    pub momentum_only_since: Option<f32>,
 }
 
 impl ConvSim {
@@ -229,12 +234,6 @@ pub struct Sim {
     absorbed: HashSet<String>,
     /// Physics sleep gate: the field runs only while hot.
     pub(super) wake_until: f32,
-    /// Sim-ms since the field has been hot on residual MOMENTUM alone (no
-    /// wake window, no tween, no drag). A dense sibling cluster can sustain
-    /// a collide-floor limit cycle above the sleep threshold forever (the
-    /// user-observed bistable alternation, 2026-07-10) — past
-    /// [`MOMENTUM_CAP_MS`] the field freezes where it stands.
-    pub(super) momentum_only_since: Option<f32>,
     pub(super) dragging: Option<String>,
     /// Scratch physics buffer (reused every frame — no per-frame allocation
     /// in the hot loop).
@@ -254,7 +253,6 @@ impl Default for Sim {
             completed_at: HashMap::new(),
             absorbed: HashSet::new(),
             wake_until: 0.,
-            momentum_only_since: None,
             dragging: None,
             scratch: Vec::new(),
         }
@@ -340,6 +338,7 @@ impl Sim {
                 gulp_at: None,
                 pulses: Vec::new(),
                 exhales: Vec::new(),
+                momentum_only_since: None,
             });
             conv.title = title;
             if conv.layout_key != layout_key {
