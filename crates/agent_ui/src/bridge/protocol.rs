@@ -208,6 +208,41 @@ pub struct PoolRow {
     pub vendor_429_observed: bool,
 }
 
+/// One pending runtime approval from `GET /approvals` / the SSE `permission`
+/// frame (Phase-2 permissions §5.2 — the bridge PermissionEngine's pending
+/// registry, rows shaped by `bridge/features/permissions/routes.py`). Liberal
+/// like the rest of the protocol: every field defaults, and unknown fields
+/// (a future grant-scope enum, say) are dropped silently — pinned by test.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct ApprovalRow {
+    /// Approval id (`"ap_9f2c1e"`) — the allow/deny endpoints key on it.
+    #[serde(default)]
+    pub id: String,
+    /// The gated run (already on the board as `awaiting_approval`).
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub conv: String,
+    #[serde(default)]
+    pub agent: String,
+    /// First ≤200 chars of the gated spawn's task.
+    #[serde(default)]
+    pub task_head: String,
+    #[serde(default)]
+    pub cwd: String,
+    /// Effective permission mode at evaluation time (`readonly|auto|full`).
+    #[serde(default)]
+    pub mode: String,
+    /// The matched rule, rendered (`"ask: agent=* cwd_outside_roots"`).
+    #[serde(default)]
+    pub rule: String,
+    #[serde(default)]
+    pub created_ts: f64,
+    /// TTL deadline (unix seconds) — expiry denies bridge-side, fail closed.
+    #[serde(default)]
+    pub expires_ts: f64,
+}
+
 /// A typed event off the `/sse` stream. The bridge writes the discriminant
 /// both as the SSE `event:` field and as `"type"` inside the data payload —
 /// we parse the payload only.
@@ -236,6 +271,14 @@ pub enum BridgeEvent {
     Channels {
         #[serde(default)]
         channels: Vec<ChannelRow>,
+    },
+    /// Pending runtime approvals (Phase-2 permissions §5.2), pushed on the
+    /// bridge's digest-diff loop whenever the pending set changes. REPLACE
+    /// semantics: every frame carries the FULL pending list, so an empty
+    /// frame retires the last held row (a resolve needs no tombstone).
+    Permission {
+        #[serde(default)]
+        pending: Vec<ApprovalRow>,
     },
     /// Forward compat: unknown event types deserialize (and are dropped by
     /// the client) instead of erroring the stream.
@@ -670,6 +713,79 @@ mod tests {
         let event: BridgeEvent =
             serde_json::from_str(r#"{"type": "transcript", "lines": []}"#).unwrap();
         assert!(matches!(event, BridgeEvent::Unknown));
+    }
+
+    #[test]
+    fn permission_event_full_row_deserializes() {
+        // Fixture truth: the SSE `permission` frame + GET /approvals pending
+        // row shape (bridge/features/permissions/routes.py, live through
+        // bridge commit 54c6c8d).
+        let event: BridgeEvent = serde_json::from_str(
+            r#"{"type": "permission", "pending": [
+                {"id": "ap_9f2c1e", "run_id": "codex-71ac95fd03", "conv": "c-9",
+                 "agent": "codex", "task_head": "deploy the arr stack",
+                 "cwd": "L:\\Projects\\other", "mode": "auto",
+                 "rule": "ask: agent=* cwd_outside_roots",
+                 "created_ts": 1783100000.5, "expires_ts": 1783100300.5}
+            ]}"#,
+        )
+        .unwrap();
+        let BridgeEvent::Permission { pending } = event else {
+            panic!("expected Permission, got {event:?}");
+        };
+        assert_eq!(pending.len(), 1);
+        let row = &pending[0];
+        assert_eq!(row.id, "ap_9f2c1e");
+        assert_eq!(row.run_id, "codex-71ac95fd03");
+        assert_eq!(row.conv, "c-9");
+        assert_eq!(row.agent, "codex");
+        assert_eq!(row.task_head, "deploy the arr stack");
+        assert_eq!(row.cwd, r"L:\Projects\other");
+        assert_eq!(row.mode, "auto");
+        assert_eq!(row.rule, "ask: agent=* cwd_outside_roots");
+        assert_eq!(row.created_ts, 1783100000.5);
+        assert_eq!(row.expires_ts, 1783100300.5);
+    }
+
+    #[test]
+    fn permission_event_minimal_row_defaults() {
+        // Liberal decode: a row carrying only an id defaults every other
+        // field instead of erroring the stream.
+        let event: BridgeEvent =
+            serde_json::from_str(r#"{"type": "permission", "pending": [{"id": "ap_1"}]}"#).unwrap();
+        let BridgeEvent::Permission { pending } = event else {
+            panic!("expected Permission");
+        };
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "ap_1");
+        assert_eq!(pending[0].agent, "");
+        assert_eq!(pending[0].expires_ts, 0.0);
+        // A pending-less frame is the empty set, not an error.
+        let event: BridgeEvent = serde_json::from_str(r#"{"type": "permission"}"#).unwrap();
+        let BridgeEvent::Permission { pending } = event else {
+            panic!("expected Permission");
+        };
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn approval_row_unknown_fields_drop_silently() {
+        // PINNED: bridge-side schema growth (the reserved wave-4 grant-scope
+        // enum, say) must never break the decode — unknown fields on the row
+        // AND next to `pending` drop silently, the tolerance law.
+        let event: BridgeEvent = serde_json::from_str(
+            r#"{"type": "permission", "digest": "ap_1|3", "pending": [
+                {"id": "ap_1", "agent": "claude", "scope": "once",
+                 "grant_options": ["once", "run"], "nested": {"future": true}}
+            ]}"#,
+        )
+        .unwrap();
+        let BridgeEvent::Permission { pending } = event else {
+            panic!("expected Permission, got {event:?}");
+        };
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "ap_1");
+        assert_eq!(pending[0].agent, "claude");
     }
 
     #[test]

@@ -13,8 +13,8 @@ use super::client::{
     connection_loop, fetch_and_apply_transcript, plan_poll_loop, transcript_poll_loop,
 };
 use super::protocol::{
-    BridgeEvent, ChannelRow, ConversationRow, PlanSnapshot, PoolRow, ProjectRow, RunRow,
-    TranscriptSnapshot, UsageMeta, pools_from_object, usage_meta_from_object,
+    ApprovalRow, BridgeEvent, ChannelRow, ConversationRow, PlanSnapshot, PoolRow, ProjectRow,
+    RunRow, TranscriptSnapshot, UsageMeta, pools_from_object, usage_meta_from_object,
 };
 
 /// Local elapsed-tick cadence while any run is `running`.
@@ -92,6 +92,17 @@ pub struct BridgeStore {
     plan_watchers: Arc<AtomicUsize>,
     /// The `/plan` poll task — replaced on every 0→1 watcher transition.
     plan_task: Option<Task<()>>,
+    /// Pending runtime approvals (Phase-2 permissions §5.2) — fed by the SSE
+    /// `permission` frame and the watch-gated `/approvals` poll fallback.
+    /// REPLACE-on-frame: every frame carries the full pending set, so an
+    /// empty frame retires the last row (a resolve needs no tombstone).
+    pub pending_approvals: Vec<ApprovalRow>,
+    /// Live [`super::approvals::ApprovalWatch`] count — the `/approvals` poll
+    /// reads it each wake and exits at zero (a held toast / visible panel
+    /// gates the poll, the [`TranscriptWatch`] law).
+    pub(super) approval_watchers: Arc<AtomicUsize>,
+    /// The `/approvals` poll task — replaced on every 0→1 watcher transition.
+    pub(super) approval_task: Option<Task<()>>,
 }
 
 impl Default for BridgeStore {
@@ -116,6 +127,9 @@ impl Default for BridgeStore {
             transcript_refetch: None,
             plan_watchers: Arc::new(AtomicUsize::new(0)),
             plan_task: None,
+            pending_approvals: Vec::new(),
+            approval_watchers: Arc::new(AtomicUsize::new(0)),
+            approval_task: None,
         }
     }
 }
@@ -239,6 +253,14 @@ impl BridgeStore {
             BridgeEvent::Channels { channels } => {
                 if self.channels != channels {
                     self.channels = channels;
+                    changed = true;
+                }
+            }
+            BridgeEvent::Permission { pending } => {
+                // Replace-on-frame (the frame carries the FULL pending set),
+                // change-gated like every other arm.
+                if self.pending_approvals != pending {
+                    self.pending_approvals = pending;
                     changed = true;
                 }
             }

@@ -18,8 +18,11 @@
 //! - [`client`] — the connection/fallback loop.
 //! - [`adversary`] — broadcast jobs (`POST /adversary` + the watch-gated
 //!   job poll, Z4).
+//! - [`approvals`] — pending-approval transport (Phase-2 permissions §5.2:
+//!   the watch-gated `/approvals` poll + allow/deny POSTs).
 
 pub mod adversary;
+pub mod approvals;
 pub mod client;
 pub mod demo;
 pub mod protocol;
@@ -32,11 +35,12 @@ pub use adversary::{
     AdversaryJobs, AdversaryPhase, AdversaryResult, AdversaryWatch, SynthesisSections,
     VENDOR_COLUMNS, parse_synthesis_sections,
 };
+pub use approvals::{ApprovalWatch, post_approval_allow, post_approval_deny};
 pub use client::{BRIDGE_BASE_URL, error_message, fetch_json, post_json, post_json_status};
 pub use demo::is_agentic_demo;
 pub use protocol::{
-    BridgeEvent, ChannelEventRow, ChannelRow, ConversationRow, OverlapRow, PlanSnapshot,
-    PlanSubtask, PoolRow, ProjectRow, RunRow, RunTokens, ScrapeMeta, TranscriptMessage,
-    TranscriptRun, TranscriptSnapshot, UnlinkedRun, UsageMeta, VendorLiveness,
+    ApprovalRow, BridgeEvent, ChannelEventRow, ChannelRow, ConversationRow, OverlapRow,
+    PlanSnapshot, PlanSubtask, PoolRow, ProjectRow, RunRow, RunTokens, ScrapeMeta,
+    TranscriptMessage, TranscriptRun, TranscriptSnapshot, UnlinkedRun, UsageMeta, VendorLiveness,
 };
 pub use store::{BridgeStore, PlanWatch, Transport, TranscriptWatch, global_store, init};

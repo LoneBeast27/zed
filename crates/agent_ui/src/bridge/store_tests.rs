@@ -309,6 +309,82 @@ fn poll_path_shares_the_accept_fold_and_records_conv(cx: &mut gpui::TestAppConte
     });
 }
 
+fn approval(id: &str) -> super::super::protocol::ApprovalRow {
+    super::super::protocol::ApprovalRow {
+        id: id.to_string(),
+        agent: "codex".into(),
+        rule: "ask: agent=*".into(),
+        ..Default::default()
+    }
+}
+
+#[gpui::test]
+fn permission_frame_replaces_pending_approvals_and_change_gates(cx: &mut gpui::TestAppContext) {
+    // The SSE `permission` arm: every frame carries the FULL pending set —
+    // replace, never merge — and an identical frame must not notify.
+    let store = cx.new(|_| BridgeStore::default());
+    let notifies = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let _subscription = cx.update(|cx| {
+        cx.observe(&store, {
+            let notifies = notifies.clone();
+            move |_, _| notifies.set(notifies.get() + 1)
+        })
+    });
+
+    store.update(cx, |store, cx| {
+        store.apply_event(
+            BridgeEvent::Permission {
+                pending: vec![approval("ap_1"), approval("ap_2")],
+            },
+            cx,
+        );
+        assert_eq!(store.pending_approvals.len(), 2);
+    });
+    cx.run_until_parked();
+    let after_first = notifies.get();
+    assert!(after_first >= 1, "a new pending set notifies");
+
+    // ap_1 resolves bridge-side: the next frame REPLACES (no merge, no
+    // tombstone) — only ap_2 remains.
+    store.update(cx, |store, cx| {
+        store.apply_event(
+            BridgeEvent::Permission {
+                pending: vec![approval("ap_2")],
+            },
+            cx,
+        );
+        assert_eq!(store.pending_approvals.len(), 1);
+        assert_eq!(store.pending_approvals[0].id, "ap_2");
+    });
+    cx.run_until_parked();
+    let after_replace = notifies.get();
+    assert!(after_replace > after_first);
+
+    // An identical frame is a no-op (the change gate).
+    store.update(cx, |store, cx| {
+        store.apply_event(
+            BridgeEvent::Permission {
+                pending: vec![approval("ap_2")],
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        notifies.get(),
+        after_replace,
+        "an unchanged pending set must not notify"
+    );
+
+    // The empty frame clears the last row (a resolve retires the toast).
+    store.update(cx, |store, cx| {
+        store.apply_event(BridgeEvent::Permission { pending: vec![] }, cx);
+        assert!(store.pending_approvals.is_empty());
+    });
+    cx.run_until_parked();
+    assert!(notifies.get() > after_replace, "clearing notifies");
+}
+
 #[gpui::test]
 fn ticker_lives_only_while_a_run_is_running(cx: &mut gpui::TestAppContext) {
     let store = cx.new(|_| BridgeStore::default());
