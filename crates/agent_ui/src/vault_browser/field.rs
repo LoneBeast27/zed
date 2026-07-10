@@ -239,9 +239,20 @@ impl VaultField {
             cell_h = cell_h.max(extent);
         }
 
-        // Grid the clusters: columns wrap so the field stays roughly square.
+        // Grid the clusters: columns wrap so the field stays roughly square —
+        // EXCEPT when floor-respecting cells outgrow a dock-shaped viewport
+        // (2026-07-10 verdict: 13/40 nodes visible, connected clusters
+        // clipped off-screen). Past the dock budget the grid goes single
+        // column: the field turns into a vertical feed the dock scrolls
+        // naturally, instead of sprawling sideways into the void.
+        const DOCK_W_BUDGET: f32 = 430.;
         let cluster_count = order.len().max(1);
-        let cols = (cluster_count as f32).sqrt().ceil().max(1.) as usize;
+        let cols = if cell_w > DOCK_W_BUDGET {
+            1
+        } else {
+            ((cluster_count as f32).sqrt().ceil().max(1.) as usize)
+                .min((DOCK_W_BUDGET / cell_w).floor().max(1.) as usize)
+        };
 
         self.nodes.clear();
         self.clusters.clear();

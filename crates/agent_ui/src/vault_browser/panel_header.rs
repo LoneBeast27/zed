@@ -204,8 +204,11 @@ impl VaultBrowserPanel {
     ) -> gpui::Div {
         let colors = cx.theme().colors();
         let on_bg: Hsla = SURFACE_1.into();
+        // flex_wrap: six view segments outgrew the dock width and clipped
+        // Writeback/Import out of reach (2026-07-10 verdict) — pills flow
+        // onto a second line inside the control instead of vanishing.
         let mut row = h_flex()
-            .flex_none()
+            .flex_wrap()
             .border_1()
             .border_color(colors.border)
             .rounded(px(8.))
