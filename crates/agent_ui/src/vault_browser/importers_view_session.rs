@@ -1,12 +1,13 @@
 //! The IMPORT view's SESSION-STORES half (split from `importers_view.rs` to
-//! hold the 500-line ceiling — single concern: the documented, NOT-wired
-//! cards) + the small shared card/label/action builders both halves use.
+//! hold the 500-line ceiling) + the small shared card/label/action builders
+//! both halves use.
 //!
 //! These four parsers (`core/importers`: claude_code / codex / vscode /
-//! antigravity) are server-ready but CLI-only — the bridge exposes NO
-//! session-import endpoint (documented choice, see `importers.rs`). The
-//! honest surface is therefore: store hint + copyable CLI invocation, with
-//! the Import actions DISABLED and the reason in the tooltip. No faked wire.
+//! antigravity) are server-ready and — since bridge 60cc040 (2026-07-10) —
+//! bridge-triggered: POST /import/run spawns the standalone `import` CLI as
+//! a board-riding job (the importer itself stays uncoupled from the bridge).
+//! The cards fire that endpoint; the copyable CLI lines remain as the direct
+//! path. A missing binary surfaces the bridge's honest 501 remedy verbatim.
 
 use gpui::{Context, Div, ElementId, FontWeight, SharedString};
 use settings::Settings as _;
@@ -20,9 +21,6 @@ use super::importers::{IMPORT_ALL_CLI, SESSION_VENDORS, session_cli};
 use super::index::VaultRoot;
 use super::panel::VaultBrowserPanel;
 use super::style::SURFACE_1;
-
-const NO_ENDPOINT_TOOLTIP: &str =
-    "The bridge exposes no session-import endpoint (CLI-only by design) — click the command to copy it";
 
 impl VaultBrowserPanel {
     /// The "Session stores → staging" section: the four documented vendor
@@ -41,13 +39,18 @@ impl VaultBrowserPanel {
                 .gap(px(8.))
                 .child(section_label("Session stores → staging", cx))
                 .child(div().flex_1())
-                .child(disabled_action("import-run-all", "Import all", cx)),
+                .child(live_action(
+                    "import-run-all",
+                    "Import all",
+                    cx.listener(|this, _, _, cx| this.start_session_import(None, cx)),
+                    cx,
+                )),
         );
         section = section.child(
             div()
                 .text_size(px(11.))
                 .text_color(colors.text_placeholder)
-                .child("Local vendor session stores stage OKF bundles for review — parsers are server-ready, triggered by the `import` CLI (no bridge endpoint yet)."),
+                .child("Local vendor session stores stage OKF bundles for review — POST /import/run spawns the standalone `import` CLI as a board-riding job (the CLI lines below stay usable directly)."),
         );
         section = section.child(self.cli_row("all", IMPORT_ALL_CLI.to_string(), cx));
 
@@ -110,9 +113,12 @@ impl VaultBrowserPanel {
                             .child(label),
                     )
                     .child(div().flex_1())
-                    .child(disabled_action(
+                    .child(live_action(
                         ElementId::Name(format!("import-session-{vendor}").into()),
                         "Import",
+                        cx.listener(move |this, _, _, cx| {
+                            this.start_session_import(Some(vendor), cx)
+                        }),
                         cx,
                     )),
             )
@@ -189,9 +195,12 @@ pub(super) fn section_label(text: &'static str, cx: &App) -> Div {
 
 /// A bordered action that is honestly DISABLED (no endpoint) — the tooltip
 /// carries the reason; the cursor never lies.
-pub(super) fn disabled_action(
+/// The live session-import pill (was `disabled_action` until the bridge grew
+/// POST /import/run, 2026-07-10 — the honest-fallback branch retired).
+pub(super) fn live_action(
     id: impl Into<ElementId>,
     label: &'static str,
+    listener: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let colors = cx.theme().colors();
@@ -203,8 +212,10 @@ pub(super) fn disabled_action(
         .border_1()
         .border_color(colors.border)
         .text_size(px(12.))
-        .text_color(colors.text_placeholder)
-        .tooltip(ui::Tooltip::text(NO_ENDPOINT_TOOLTIP))
+        .text_color(colors.text_muted)
+        .cursor_pointer()
+        .hover(|s| s.bg(colors.element_hover))
+        .on_click(listener)
         .child(label)
 }
 

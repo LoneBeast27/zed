@@ -246,6 +246,59 @@ impl VaultBrowserPanel {
         .detach();
     }
 
+    /// USER-gated `POST /import/run {vendor?}` — the Family-A session-store
+    /// staging trigger (bridge 60cc040: the standalone `import` CLI spawned
+    /// as a board-riding job). `None` = all four stores. The returned job
+    /// polls through the SAME /importers/job/<id> watch as an export import;
+    /// the bridge's 400/404/409/501 messages (e.g. the honest "binary not
+    /// built" remedy) land VERBATIM.
+    pub(super) fn start_session_import(
+        &mut self,
+        vendor: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.importers.start_in_flight {
+            return;
+        }
+        self.importers.start_in_flight = true;
+        self.importers.error = None;
+        cx.notify();
+        let client = cx.http_client();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move {
+                    let url = format!("{BRIDGE_BASE_URL}/import/run");
+                    let body = match vendor {
+                        Some(vendor) => serde_json::json!({ "vendor": vendor }),
+                        None => serde_json::json!({}),
+                    }
+                    .to_string();
+                    let raw = post_verbatim(client.as_ref(), &url, body).await?;
+                    anyhow::Ok(serde_json::from_str::<StartedImport>(&raw)?)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.importers.start_in_flight = false;
+                match outcome {
+                    Ok(started) if !started.job.is_empty() => {
+                        this.importers.job = None;
+                        this.watch_import_job(started.job, cx);
+                    }
+                    Ok(_) => {
+                        this.importers.error = Some(
+                            "Bridge accepted the import but returned no job id."
+                                .to_string(),
+                        );
+                    }
+                    Err(error) => this.importers.error = Some(error.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// USER-gated `POST /importers/job/<id>/cancel` — cooperative
     /// (watch-then-cancel: partial files persist, a re-import heals). The
     /// job stays "running" until its thread polls the event; the watch loop
