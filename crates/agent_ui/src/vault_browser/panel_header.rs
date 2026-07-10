@@ -80,14 +80,22 @@ impl VaultBrowserPanel {
                     .gap(px(8.))
                     .child(self.render_root_switcher(cx))
                     // Contextual control (galaxy backlog 2026-07-08): the
-                    // LIST view sorts, the GRAPH view filters edges.
+                    // LIST view sorts, the GRAPH view filters edges, the
+                    // AXIOMS view has none (bridge review list — nothing to
+                    // sort or filter yet).
                     .child(match self.view() {
                         VaultView::List => self.render_sort_toggle(cx),
                         VaultView::Graph => self.render_edges_toggle(cx),
+                        VaultView::Axioms => div(),
                     })
                     .child(self.render_view_toggle(cx)),
             )
-            .child(self.render_filter(cx))
+            // The filter box searches the INDEXED VAULT (title/tag) — it does
+            // not apply to the bridge axioms list, so it hides there rather
+            // than sit dead (honest chrome).
+            .when(self.view() != VaultView::Axioms, |this| {
+                this.child(self.render_filter(cx))
+            })
     }
 
     /// LIST sort toggle: grouped OKF kinds ⇄ one recency stream.
@@ -146,7 +154,7 @@ impl VaultBrowserPanel {
         )
     }
 
-    /// The List/Graph view toggle (mirrors the board seg-toggle).
+    /// The List/Graph/Axioms view toggle (mirrors the board seg-toggle).
     fn render_view_toggle(&self, cx: &mut Context<Self>) -> gpui::Div {
         let view = self.view();
         self.segmented(
@@ -154,6 +162,11 @@ impl VaultBrowserPanel {
             &[
                 ("List", view == VaultView::List, RootOrView::View(VaultView::List)),
                 ("Graph", view == VaultView::Graph, RootOrView::View(VaultView::Graph)),
+                (
+                    "Axioms",
+                    view == VaultView::Axioms,
+                    RootOrView::View(VaultView::Axioms),
+                ),
             ],
             cx,
         )

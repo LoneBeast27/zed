@@ -14,15 +14,18 @@
 use std::collections::HashMap;
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, Context, Entity, FocusHandle, Focusable,
-    FontWeight, SharedString, Subscription, Window, actions,
+    Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Entity, FocusHandle,
+    Focusable, FontWeight, SharedString, Subscription, Task, Window, actions,
 };
 use ui::prelude::*;
 
 use crate::agent_accents::STATUS_BLOCKED;
-use crate::bridge::{self, BridgeStore, PoolRow, UsageMeta};
+use crate::bridge::{self, BRIDGE_BASE_URL, BridgeStore, PoolRow, UsageMeta, fetch_json};
 use crate::task_board::motion::{EFFECTS, RollValue, StateFade};
 use crate::usage_panel_groups::group_pools;
+use crate::usage_panel_history::{
+    HistoryState, parse_delta, parse_summary, render_history_section,
+};
 use crate::usage_panel_meter::MeterState;
 use crate::usage_panel_render::render_vendor_cluster;
 
@@ -53,6 +56,12 @@ pub struct UsagePanel {
     /// (usage rows, scrape meta, connectivity) change, the same discipline
     /// as the islands.
     last_seen: Option<(Vec<PoolRow>, UsageMeta, bool)>,
+    /// The run-ledger History SECTION (below the pool cards, zero new rail
+    /// slots): `GET /usage-history` + `/usage-history/delta`, fetched
+    /// visibility-gated (the briefing-panel idiom). Last-known rows survive
+    /// a dead bridge — the section degrades to stale, never vanishes.
+    history: HistoryState,
+    _history_fetch: Option<Task<()>>,
     _store_subscription: Subscription,
 }
 
@@ -75,8 +84,55 @@ impl UsagePanel {
             was_connected: false,
             connected_fade: StateFade::default(),
             last_seen: None,
+            history: HistoryState::default(),
+            _history_fetch: None,
             _store_subscription,
         }
+    }
+
+    /// One-shot `GET /usage-history` + `/usage-history/delta` (visibility-
+    /// gated: fired on tab activation — the briefing-panel fetch idiom).
+    /// Each leg degrades independently: a failed leg keeps its last-known
+    /// rows and flips the stale flag; the section never blanks on the fetch.
+    fn fetch_history(&mut self, cx: &mut Context<Self>) {
+        let client = cx.http_client();
+        self._history_fetch = Some(cx.spawn(async move |this, cx| {
+            let (summary, delta) = cx
+                .background_spawn(async move {
+                    let summary_url =
+                        format!("{BRIDGE_BASE_URL}/usage-history?by=vendor&limit=50");
+                    let delta_url =
+                        format!("{BRIDGE_BASE_URL}/usage-history/delta?by=harness_sha&limit=20");
+                    let summary = match fetch_json(client.as_ref(), &summary_url).await {
+                        Ok(raw) => parse_summary(&raw),
+                        Err(e) => Err(e),
+                    };
+                    let delta = match fetch_json(client.as_ref(), &delta_url).await {
+                        Ok(raw) => parse_delta(&raw),
+                        Err(e) => Err(e),
+                    };
+                    (summary, delta)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.history.attempted = true;
+                let mut stale = false;
+                match summary {
+                    Ok((count, rows)) => {
+                        this.history.count = count;
+                        this.history.summary = rows;
+                    }
+                    Err(_) => stale = true,
+                }
+                match delta {
+                    Ok(rows) => this.history.delta = rows,
+                    Err(_) => stale = true,
+                }
+                this.history.stale = stale;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// `.panel-head`: "Usage" 18px/500 + the `_source` sub-line with scrape
@@ -179,14 +235,20 @@ impl Render for UsagePanel {
         self.meters.retain(|name, _| live.contains(name.as_str()));
         self.pct_rolls.retain(|name, _| live.contains(name.as_str()));
 
-        let body: AnyElement = if pools.is_empty() {
-            crate::task_board::style::empty_state(
-                IconName::SignalHigh,
-                "No usage data yet",
-                "Pool meters appear when the bridge reports usage.",
-                cx,
-            )
-            .into_any_element()
+        let pools_block: AnyElement = if pools.is_empty() {
+            // The pools empty-state keeps its centered read inside a bounded
+            // block so the History SECTION below it never vanishes with the
+            // meters (§4.4 never-vanish).
+            div()
+                .w_full()
+                .h(px(320.))
+                .child(crate::task_board::style::empty_state(
+                    IconName::SignalHigh,
+                    "No usage data yet",
+                    "Pool meters appear when the bridge reports usage.",
+                    cx,
+                ))
+                .into_any_element()
         } else {
             // Fold the flat pool rows into vendor clusters ONCE per frame
             // (Amendment 2026-07-04 (4) item 1; I/O-first — a render-side fold
@@ -205,29 +267,32 @@ impl Render for UsagePanel {
                     )
                 })
                 .collect();
-            // `.usage-scroll` padding 20/28/32; the clusters live in a bounded,
-            // centered column (the surface-centering discipline — usage's grid
-            // is now a vendor stack, so it reads as a centered column like the
-            // other converted surfaces).
-            div()
-                .id("usage-pools")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .px(px(28.))
-                .pt(px(20.))
-                .pb(px(32.))
-                .child(
-                    h_flex().w_full().justify_center().child(
-                        v_flex()
-                            .w_full()
-                            .max_w(px(720.))
-                            .gap(px(16.))
-                            .children(clusters),
-                    ),
-                )
-                .into_any_element()
+            v_flex().w_full().gap(px(16.)).children(clusters).into_any_element()
         };
+        // `.usage-scroll` padding 20/28/32; the clusters live in a bounded,
+        // centered column (the surface-centering discipline — usage's grid
+        // is now a vendor stack, so it reads as a centered column like the
+        // other converted surfaces). The run-ledger History SECTION trails
+        // the pool cards (zero new rail slots).
+        let body: AnyElement = div()
+            .id("usage-pools")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(px(28.))
+            .pt(px(20.))
+            .pb(px(32.))
+            .child(
+                h_flex().w_full().justify_center().child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(720.))
+                        .gap(px(16.))
+                        .child(pools_block)
+                        .child(render_history_section(&self.history, cx)),
+                ),
+            )
+            .into_any_element();
 
         // Bridge offline → grey out the kept snapshot, eased 200ms both
         // directions (same §8.7a treatment as the task board).
@@ -279,13 +344,22 @@ impl Focusable for UsagePanel {
 
 impl crate::mode_item::ModeSurface for UsagePanel {
     // Center-pane surface (Amendment 2026-07-04 (2)) — the dock `Panel`
-    // era is retired. Push-fed via the shared store; no visibility-gated
-    // watch, so the default `set_surface_active` no-op is correct.
+    // era is retired. Pool meters stay push-fed via the shared store; the
+    // History section is the panel's one visibility-gated fetch (below).
     fn fallback_tab_title() -> SharedString {
         "Usage".into()
     }
 
     fn fallback_tab_icon() -> IconName {
         IconName::Sliders
+    }
+
+    fn set_surface_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        // Visibility-gated one-shot: refresh the run-ledger History section
+        // each time the tab comes on screen (the briefing-panel idiom — no
+        // poll; the ledger only grows when runs finish).
+        if active {
+            self.fetch_history(cx);
+        }
     }
 }

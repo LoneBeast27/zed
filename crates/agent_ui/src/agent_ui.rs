@@ -56,6 +56,7 @@ mod terminal_codegen;
 pub mod usage_panel;
 mod usage_panel_demo;
 mod usage_panel_groups;
+mod usage_panel_history;
 mod usage_panel_meter;
 mod usage_panel_render;
 pub mod vault_browser;

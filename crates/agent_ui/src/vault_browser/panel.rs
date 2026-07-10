@@ -24,6 +24,7 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
 };
 
+use super::axioms::AxiomsState;
 use super::field::VaultField;
 use super::index::{VaultIndex, VaultRoot, build_index};
 use super::promote::{self, BundleState, PromoteState};
@@ -41,10 +42,12 @@ actions!(
 const STALE_AFTER: Duration = Duration::from_secs(60);
 
 /// Which body is showing — mirrors the board's Graph/Grid seg-toggle.
+/// AXIOMS is the third segment (bridge-fed candidate review, not vault fs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VaultView {
     List,
     Graph,
+    Axioms,
 }
 
 /// LIST sort (galaxy backlog 2026-07-08): grouped-by-kind (the OKF section
@@ -82,6 +85,9 @@ pub struct VaultBrowserPanel {
     filter_editor: Entity<Editor>,
     /// Per-bundle promote UI state.
     promote: PromoteState,
+    /// AXIOMS view state (bridge snapshot + fetch lifecycle + in-flight
+    /// approve/reject marks) — owned by `axioms.rs`, stored here.
+    pub(super) axioms: AxiomsState,
     /// GRAPH view scroll position.
     graph_scroll: gpui::ScrollHandle,
     /// Field sim-clock origin (ms are measured from here).
@@ -142,6 +148,7 @@ impl VaultBrowserPanel {
             edges: EdgeMode::All,
             filter_editor,
             promote: PromoteState::default(),
+            axioms: AxiomsState::default(),
             graph_scroll: gpui::ScrollHandle::new(),
             field_epoch: Instant::now(),
             graph_field: VaultField::default(),
@@ -178,9 +185,13 @@ impl VaultBrowserPanel {
         self._index_task = Some(task);
     }
 
-    /// Manual refresh (header button) — always rebuilds.
+    /// Manual refresh (header button) — always rebuilds (and refetches the
+    /// bridge axioms when that view is up, so refresh means refresh there too).
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.start_index(cx);
+        if self.view == VaultView::Axioms {
+            self.fetch_axioms(cx);
+        }
         cx.notify();
     }
 
@@ -208,6 +219,13 @@ impl VaultBrowserPanel {
     pub(super) fn set_view(&mut self, view: VaultView, cx: &mut Context<Self>) {
         if self.view != view {
             self.view = view;
+            // Flip-to-Axioms refreshes the candidate list — a visibility-gated
+            // one-shot, same as the briefing panel. §11-safe from the seg
+            // listener: `fetch_axioms` is a state flip + `cx.spawn` (schedules,
+            // never re-enters this update).
+            if view == VaultView::Axioms {
+                self.fetch_axioms(cx);
+            }
             cx.notify();
         }
     }
@@ -477,6 +495,11 @@ impl VaultBrowserPanel {
     /// needed, and whether the graph is the active surface — for drag wiring).
     /// The indexing placeholder shows until the first walk lands.
     fn render_body_element(&mut self, cx: &mut Context<Self>) -> (gpui::AnyElement, bool, bool) {
+        // AXIOMS is bridge-fed, not vault-fs — it renders regardless of the
+        // index state (an unindexed vault must not blank the axioms review).
+        if self.view == VaultView::Axioms {
+            return (self.axioms_view(cx), false, false);
+        }
         let filter = self.filter_editor.read(cx).text(cx);
         // Take the index out to sever the `&self.index` borrow across the
         // `&mut self` body-building call, then put it back (a cheap swap).
@@ -538,6 +561,9 @@ impl VaultBrowserPanel {
         }
 
         match self.view {
+            // Handled before the index gate in `render_body_element` (bridge
+            // data, not vault fs) — kept here for match exhaustiveness.
+            VaultView::Axioms => (self.axioms_view(cx), false, false),
             VaultView::List => {
                 let reveal = self.take_graph_reveal();
                 let weak = cx.weak_entity();
@@ -622,9 +648,13 @@ impl Panel for VaultBrowserPanel {
 
     fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
         // On re-open (becoming active), re-index if the last build is stale
-        // (>60s) — spec §5. No fs watcher in v1.
+        // (>60s) — spec §5. No fs watcher in v1. The AXIOMS view refetches on
+        // the same visibility edge (its data lives on the bridge, not the fs).
         if active {
             self.reindex_if_stale(cx);
+            if self.view == VaultView::Axioms {
+                self.fetch_axioms(cx);
+            }
         }
     }
 
