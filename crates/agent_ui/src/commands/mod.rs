@@ -4,15 +4,18 @@
 //! - [`types`]       — the [`CommandEntry`] data model + enums.
 //! - [`static_seed`] — the curated static fold of the four vendor inventories.
 //! - [`discovery`]   — background walk of the user's LOCAL commands + skills.
+//! - [`google_lane`] — the bridge-served gemini/agy rows (S5): the
+//!                     `GET /commands/help` wire fold.
 //! - [`registry`]    — the runtime registry entity + the pure scoping/filter
 //!                     fold both the `/` typeahead and `/help` render from.
 //! - [`help`]        — the `/help [vendor]` transient-buffer markdown builder.
 //!
-//! The composer typeahead (S1) and the dispatch/routing (S2/S4) live in
-//! `orchestrator_panel::typeahead` / `orchestrator_panel::dispatch`, reading
-//! this registry.
+//! The composer typeahead (S1) and the dispatch/routing (S2/S4/S5) live in
+//! `orchestrator_panel::typeahead` / `orchestrator_panel::dispatch` /
+//! `orchestrator_panel::command_note`, reading this registry.
 
 pub mod discovery;
+pub mod google_lane;
 pub mod help;
 pub mod registry;
 pub mod static_seed;

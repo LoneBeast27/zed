@@ -70,6 +70,10 @@ pub struct OrchestratorPanel {
     /// thumbs-up). Session-local render state; the durable record is the
     /// bridge's vault ledger (POST /feedback, dogfood 2026-07-08).
     pub(super) feedback: std::collections::HashMap<u64, bool>,
+    /// The last executed google-lane command's outcome (S5) — a system row
+    /// rendered in the chat column until dismissed or replaced. Success
+    /// output / the bridge's verbatim refusal, per the error-body law.
+    pub(super) command_note: Option<super::command_note::CommandNote>,
     /// A `/wave` submission is in flight — double-fires must not
     /// double-spawn real runs (2026-07-10 review find #7).
     pub(super) wave_in_flight: bool,
@@ -134,6 +138,7 @@ impl OrchestratorPanel {
             tasks_island: TasksIsland::new(cx),
             notif_stack,
             feedback: std::collections::HashMap::new(),
+            command_note: None,
             wave_in_flight: false,
             wave_note: None,
             registry,
@@ -411,6 +416,9 @@ impl Render for OrchestratorPanel {
                     .pb(px(8.))
                     .child(self.render_body(cx)),
             )
+            // S5: the last executed google command's outcome — a system row
+            // in the conversation surface, between transcript and deck.
+            .children(self.render_command_note(cx))
             .child(self.render_composer(window, cx));
         // The single frame pump for every Instant-clocked motion value the
         // panel renders bare (the §8.7a stable-identity rule: animated

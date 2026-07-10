@@ -9,8 +9,10 @@
 //!    via `-p` prefix expansion (`claude/command-surface.md` §2), which fire
 //!    through the verified [`Mechanism::ClaudePrefix`] path today (S2).
 //! 3. **Notable N/A-by-design + not-yet-built rows** for `/help` honesty
-//!    (never silently absent) — codex/gemini/agy passthrough rows carried with
-//!    their real future mechanism but marked unbuilt until S3/S5.
+//!    (never silently absent) — codex passthrough rows carried with their
+//!    real future mechanism but marked unbuilt until S3, and two google
+//!    OFFLINE stubs the bridge-served lane (S5, [`super::google_lane`])
+//!    overrides the moment `GET /commands/help` answers.
 //!
 //! Each row cites its source doc + section in a trailing comment. Dynamic
 //! discovery ([`super::discovery`]) folds the user's LOCAL skills/commands on
@@ -265,8 +267,11 @@ fn codex_rows() -> Vec<CommandEntry> {
     ]
 }
 
-/// Band 3b — notable GOOGLE (gemini + agy) rows. The real relay is a CLI
-/// subcommand / ACP; carried Unbuilt-disabled until the google lane (S5).
+/// Band 3b — the GOOGLE (gemini + agy) OFFLINE stubs. The live lane is
+/// bridge-served (S5, `GET /commands/help` → [`super::registry`]'s google
+/// band) and overrides these on (name, vendor) as soon as the fetch lands;
+/// until then these two representatives stay visible-and-greyed so the lane
+/// is never silently absent while the bridge is down.
 fn google_rows() -> Vec<CommandEntry> {
     vec![
         unbuilt(
@@ -276,8 +281,8 @@ fn google_rows() -> Vec<CommandEntry> {
             Classification::Passthrough,
             Mechanism::AgySubcommand("agy plugin list".into()),
             "Browse loaded Agent Skills (agy plugin surface).",
-            "Google lane (S5) not wired yet — relays via agy CLI.",
-        ), // antigravity §1 + §2
+            "Bridge offline — the live google rows load from GET /commands.",
+        ), // antigravity §1 + §2 (live row: bridge static_seed.py)
         unbuilt(
             "goal",
             Vendor::Agy,
@@ -285,8 +290,8 @@ fn google_rows() -> Vec<CommandEntry> {
             Classification::polyfill("afk goal-mode"),
             Mechanism::AgySubcommand("agy /goal".into()),
             "Long-running goal mode (runs until done/cancelled).",
-            "Google lane (S5) not wired yet — orchestrator goal-mode polyfill.",
-        ), // antigravity §2
+            "Bridge offline — the live google rows load from GET /commands.",
+        ), // antigravity §2 (bridge row stays honest-unbuilt server-side too)
     ]
 }
 

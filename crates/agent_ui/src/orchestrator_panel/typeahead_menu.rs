@@ -17,7 +17,7 @@ use gpui::{AnyElement, Entity, Focusable as _, Hsla};
 use settings::Settings as _;
 use ui::prelude::*;
 
-use crate::commands::CommandEntry;
+use crate::commands::{CommandEntry, Mechanism};
 use crate::task_board::style::{HAIRLINE_HI, SURFACE_2, SURFACE_2B};
 
 use super::panel::OrchestratorPanel;
@@ -114,15 +114,26 @@ impl OrchestratorPanel {
         true
     }
 
-    /// Splice a chosen row's `/name ` into the editor at the live slash-token
-    /// range (re-parsed here so a click never uses a stale offset). No-op when
-    /// the menu isn't actually open on the live text.
+    /// Accept a chosen row. An EXECUTABLE google-lane row (S5,
+    /// [`Mechanism::GoogleExec`]) FIRES on selection: the `/token` is dropped
+    /// from the editor (the dismiss splice — any `@vendor` force stays) and
+    /// the bridge execute endpoint is POSTed; the outcome lands as the
+    /// conversation surface's system row ([`super::command_note`]). Every
+    /// other row splices `/name ` into the editor at the live slash-token
+    /// range (re-parsed here so a click never uses a stale offset). No-op
+    /// when the menu isn't actually open on the live text.
     pub(super) fn accept_row(
         &mut self,
         row: &CommandEntry,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) {
+        if matches!(row.mechanism, Mechanism::GoogleExec { .. }) {
+            if self.typeahead_dismiss(window, cx) {
+                self.execute_google_command(row, String::new(), cx);
+            }
+            return;
+        }
         let (text, cursor) = composer_text_cursor(&self.composer.editor, cx);
         let Some(ctx) = slash_context(&text, cursor) else {
             return;

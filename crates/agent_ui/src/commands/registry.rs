@@ -1,11 +1,14 @@
 //! The runtime command registry (S0) — the single source both the `/`
 //! typeahead (S1) and `/help` (S4) render from.
 //!
-//! Folds the curated static seed ([`super::static_seed`]) with the user's
-//! LOCAL commands + skills discovered on disk ([`super::discovery`]). Discovery
-//! runs on a background task at build + on manual refresh; static rows are
-//! available synchronously from the first frame (the menu is never empty while
-//! the walk is in flight).
+//! Folds the curated static seed ([`super::static_seed`]) with the bridge's
+//! google command lane ([`super::google_lane`], S5 — fetched from
+//! `GET /commands/help`) and the user's LOCAL commands + skills discovered on
+//! disk ([`super::discovery`]). Discovery + the lane fetch run on background
+//! tasks at build + on manual refresh; static rows are available synchronously
+//! from the first frame (the menu is never empty while the walk is in flight,
+//! and the static google stubs stand in — honestly disabled — until the
+//! bridge answers).
 //!
 //! Filtering + scoping ([`Self::visible`]) is PURE (no cx) so the typeahead
 //! fold is unit-tested directly against fixtures.
@@ -26,6 +29,11 @@ use super::types::{Classification, CommandEntry, CommandKind, Mechanism, Vendor}
 pub struct CommandRegistry {
     /// The curated static seed — always present from construction.
     static_rows: Vec<CommandEntry>,
+    /// The bridge's live google lane (S5, `GET /commands/help`): gemini + agy
+    /// rows carrying the BRIDGE's classifications. Empty until the fetch
+    /// lands (the static stubs stand in, honestly disabled); overrides the
+    /// stubs on (name, vendor) once it does.
+    google_rows: Vec<CommandEntry>,
     /// The user's local commands/skills — populated by the background walk.
     dynamic_rows: Vec<CommandEntry>,
     /// Whether the first (or a manual-refresh) discovery walk is in flight.
@@ -38,6 +46,7 @@ pub struct CommandRegistry {
     /// panics per RUST_PORT_NOTES §11).
     workspace: WeakEntity<Workspace>,
     _discovery_task: Option<Task<()>>,
+    _google_task: Option<Task<()>>,
 }
 
 impl CommandRegistry {
@@ -52,12 +61,14 @@ impl CommandRegistry {
     ) -> Self {
         let mut this = Self {
             static_rows: static_entries(),
+            google_rows: Vec::new(),
             dynamic_rows: Vec::new(),
             discovering: false,
             fs,
             home,
             workspace,
             _discovery_task: None,
+            _google_task: None,
         };
         this.refresh(cx);
         this
@@ -94,7 +105,38 @@ impl CommandRegistry {
             })
             .ok();
         }));
+        self.fetch_google_lane(cx);
         cx.notify();
+    }
+
+    /// Fetch the bridge's S5 google lane (`GET /commands/help` — the full
+    /// documented row set, N/A reasons included) on a background task. A
+    /// failed fetch or an empty body keeps the previous rows — offline, the
+    /// static stubs stay visible and honestly disabled; a stale-but-live
+    /// lane beats a blanked one.
+    fn fetch_google_lane(&mut self, cx: &mut Context<Self>) {
+        let http_client = cx.http_client();
+        self._google_task = Some(cx.spawn(async move |this, cx| {
+            let rows = cx
+                .background_spawn(async move {
+                    let url =
+                        format!("{}/commands/help", crate::bridge::BRIDGE_BASE_URL);
+                    let raw = crate::bridge::fetch_json(http_client.as_ref(), &url).await?;
+                    anyhow::Ok(super::google_lane::parse_rows(&raw))
+                })
+                .await;
+            if let Ok(rows) = rows
+                && !rows.is_empty()
+            {
+                this.update(cx, |this, cx| {
+                    if this.google_rows != rows {
+                        this.google_rows = rows;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        }));
     }
 
     /// True while the first/refresh walk is running (a header spinner hook).
@@ -102,22 +144,24 @@ impl CommandRegistry {
         self.discovering
     }
 
-    /// Every row (static + dynamic), for `/help` and count reporting. Dynamic
-    /// rows override same-named static rows (a user skill named like a built-in
-    /// is the user's — new outranks old, the workspace's own rule).
+    /// Every row (static + google lane + dynamic), for `/help` and count
+    /// reporting. Later bands override same-(name, vendor) earlier rows — the
+    /// bridge's live google rows replace the static offline stubs, and a user
+    /// skill named like a built-in is the user's (new outranks old, the
+    /// workspace's own rule).
     pub fn all_rows(&self) -> Vec<CommandEntry> {
-        let mut rows: Vec<CommandEntry> = Vec::new();
-        for row in self.static_rows.iter().chain(self.dynamic_rows.iter()) {
-            if let Some(slot) = rows
-                .iter_mut()
-                .find(|existing| existing.name == row.name && existing.vendor == row.vendor)
-            {
-                *slot = row.clone();
-            } else {
-                rows.push(row.clone());
-            }
-        }
-        rows
+        fold_bands(
+            self.static_rows
+                .iter()
+                .chain(self.google_rows.iter())
+                .chain(self.dynamic_rows.iter()),
+        )
+    }
+
+    /// Test seam: inject a fetched google lane without a live bridge.
+    #[cfg(test)]
+    pub(crate) fn set_google_rows_for_test(&mut self, rows: Vec<CommandEntry>) {
+        self.google_rows = rows;
     }
 
     /// The typeahead's filtered + scoped rows for the current composer text.
@@ -126,6 +170,25 @@ impl CommandRegistry {
     pub fn visible(&self, query: &str, forced_vendor: Option<Vendor>) -> Vec<CommandEntry> {
         visible(&self.all_rows(), query, forced_vendor)
     }
+}
+
+/// The band fold (pure — unit-tested directly): rows in band order, a later
+/// row REPLACING any earlier row with the same (name, vendor). New outranks
+/// old — the bridge's live google rows replace the static offline stubs the
+/// same way a discovered user skill replaces a built-in.
+fn fold_bands<'a>(bands: impl Iterator<Item = &'a CommandEntry>) -> Vec<CommandEntry> {
+    let mut rows: Vec<CommandEntry> = Vec::new();
+    for row in bands {
+        if let Some(slot) = rows
+            .iter_mut()
+            .find(|existing| existing.name == row.name && existing.vendor == row.vendor)
+        {
+            *slot = row.clone();
+        } else {
+            rows.push(row.clone());
+        }
+    }
+    rows
 }
 
 /// The scoping + filter fold (contract §2, resolved collision rule):
@@ -362,6 +425,51 @@ mod tests {
         let vis = visible(&rows, "review", None);
         assert_eq!(vis[0].name, "review", "prefix match ranks first");
         assert_eq!(vis[1].name, "code-review");
+    }
+
+    #[test]
+    fn google_lane_rows_override_the_static_stubs() {
+        // S5: the bridge's live agy `/skills` row replaces the static seed's
+        // Unbuilt stub on (name, vendor) — the fold's new-outranks-old law.
+        let live = CommandEntry {
+            name: "skills".into(),
+            vendor: Some(Vendor::Agy),
+            kind: CommandKind::Builtin,
+            classification: Classification::Passthrough,
+            mechanism: Mechanism::GoogleExec { mech: "agy-subcommand".into() },
+            description: "Browse loaded Agent Skills (agy plugin surface).".into(),
+        };
+        let statics = seed();
+        let stub = statics
+            .iter()
+            .find(|r| r.name == "skills" && r.vendor == Some(Vendor::Agy))
+            .expect("the static seed carries the offline /skills stub");
+        assert!(stub.is_disabled(), "offline (pre-fetch) the stub is greyed");
+
+        let folded = fold_bands(statics.iter().chain(std::iter::once(&live)));
+        let skills: Vec<_> = folded
+            .iter()
+            .filter(|r| r.name == "skills" && r.vendor == Some(Vendor::Agy))
+            .collect();
+        assert_eq!(skills.len(), 1, "override, never a duplicate row");
+        assert!(!skills[0].is_disabled(), "the live bridge row wins");
+        assert!(matches!(skills[0].mechanism, Mechanism::GoogleExec { .. }));
+
+        // And the live row JOINS the menu under either google force token
+        // (one lane: @gemini and @agy scope to both vendors' rows).
+        for force in [Vendor::Gemini, Vendor::Agy] {
+            let vis = visible(&folded, "skills", Some(force));
+            assert!(
+                vis.iter().any(|r| r.name == "skills"
+                    && r.vendor == Some(Vendor::Agy)
+                    && !r.is_disabled()),
+                "live /skills visible under {force:?}"
+            );
+        }
+        // …and never unforced (vendor built-ins stay scoped).
+        assert!(!visible(&folded, "skills", None)
+            .iter()
+            .any(|r| r.vendor == Some(Vendor::Agy)));
     }
 
     #[test]

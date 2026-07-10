@@ -215,6 +215,54 @@ async fn typing_more_of_the_slash_token_narrows_the_menu(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+async fn accepting_a_live_google_row_fires_the_bridge_execute_post(cx: &mut TestAppContext) {
+    // S5 (parity gap #9): an EXECUTABLE google row fires POST
+    // /commands/<vendor>/<name> on selection instead of splicing text, and
+    // the outcome renders honestly. The harness http client 404s every
+    // request, so the note must land as the error-body-law message — the
+    // full loop (accept → token drop → POST → honest render) minus a live
+    // bridge.
+    use crate::commands::{Classification, CommandEntry, CommandKind, Mechanism, Vendor};
+
+    let (panel, cx) = panel_window(cx).await;
+    // Inject the fetched lane (no bridge in-test): one LIVE agy row, as
+    // `GET /commands/help` would serve it.
+    panel.update(cx, |panel, cx| {
+        panel.registry.update(cx, |registry, _| {
+            registry.set_google_rows_for_test(vec![CommandEntry {
+                name: "models".into(),
+                vendor: Some(Vendor::Agy),
+                kind: CommandKind::Builtin,
+                classification: Classification::Passthrough,
+                mechanism: Mechanism::GoogleExec { mech: "agy-subcommand".into() },
+                description: "List agy's available models.".into(),
+            }]);
+        });
+    });
+
+    // Forcing the lane's DISPLAY name (@gemini) joins the agy row (one lane).
+    type_into_composer(&panel, "@gemini /models", cx);
+    assert_eq!(menu_row_count(&panel, cx), 1, "the live bridge row joined the menu");
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    // The /token was dropped (the @vendor force stays) — never spliced, never
+    // sent as a chat message.
+    assert_eq!(composer_text(&panel, cx), "@gemini ");
+    let (title, body, error) = panel.read_with(cx, |panel, _| {
+        let note = panel.command_note.as_ref().expect("the outcome note landed");
+        (note.title.to_string(), note.body.to_string(), note.error)
+    });
+    assert_eq!(title, "/models · agy", "the row's OWN vendor names the POST");
+    assert!(error, "a refusal renders as an error note, verbatim");
+    assert_eq!(
+        body, "bridge returned 404",
+        "the honest status line (the 404 stub carries no {{\"error\"}} body)"
+    );
+}
+
+#[gpui::test]
 async fn enter_with_menu_closed_does_not_accept(cx: &mut TestAppContext) {
     let (panel, cx) = panel_window(cx).await;
     // A plain message (no `/token`) — the menu is closed. Enter routes to Send

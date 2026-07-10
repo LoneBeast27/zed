@@ -16,7 +16,10 @@
 //!   prose, worked-for collapsibles, the hover meta trio.
 //! - [`composer`] — the two-layer composer deck; its send⇄stop island
 //!   morph lives in [`send_circle`].
+//! - [`command_note`] — S5 google-lane execution: the bridge POST + the
+//!   honest system-row outcome render.
 
+mod command_note;
 mod composer;
 mod dispatch;
 mod message;

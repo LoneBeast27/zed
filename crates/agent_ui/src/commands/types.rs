@@ -136,6 +136,13 @@ pub enum Mechanism {
     CodexRpc(SharedString),
     /// An `agy`/gemini CLI subcommand relay (S5). Carried for `/help` honesty.
     AgySubcommand(SharedString),
+    /// A LIVE google-lane row served by the bridge (S5): selecting it fires
+    /// `POST /commands/<vendor>/<name>` — the bridge owns dispatch,
+    /// classification, and the spend policy (its quota guards are
+    /// server-side). Carries the bridge row's mechanism kind
+    /// (`agy-subcommand` / `config-read` / `orch-endpoint` / …) so `/help`
+    /// stays truthful about HOW the row fires.
+    GoogleExec { mech: SharedString },
     /// Orchestrator-native: hit a bridge endpoint or open an in-app surface.
     OrchEndpoint(OrchTarget),
     /// Real in principle, but no working trigger today → disabled-with-tooltip.
