@@ -133,6 +133,29 @@ fn physics_separates_crowded_nodes_then_the_field_sleeps() {
 }
 
 #[test]
+fn settled_field_is_perfectly_still_no_ambient_drift() {
+    // User report 2026-07-10 ("brownian motion in slowmotion"): the Lissajous
+    // ambience must NOT ride a cold field. Once settled, two reads at
+    // different times give IDENTICAL positions.
+    let mut sim = Sim::default();
+    let board: Vec<RunRow> = (0..3).map(|i| run(&format!("r{i}"), "running")).collect();
+    sim.fold(&board, &[], 900., 0.);
+    pump(&mut sim, 0., 8000.); // well past every wake/tween/cap
+    let snap_a: Vec<(f32, f32)> = sim.convs[0]
+        .nodes
+        .iter()
+        .map(|n| (n.out_x, n.out_y))
+        .collect();
+    pump(&mut sim, 8000., 9000.);
+    let snap_b: Vec<(f32, f32)> = sim.convs[0]
+        .nodes
+        .iter()
+        .map(|n| (n.out_x, n.out_y))
+        .collect();
+    assert_eq!(snap_a, snap_b, "a settled constellation does not wander");
+}
+
+#[test]
 fn momentum_only_limit_cycle_freezes_at_the_cap() {
     // THE user-reported constellation bug (2026-07-10): a dense sibling
     // cluster sustains a collide-floor oscillation above the sleep threshold

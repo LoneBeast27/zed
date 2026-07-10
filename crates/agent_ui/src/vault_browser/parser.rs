@@ -109,7 +109,7 @@ pub fn parse_frontmatter(source: &str) -> Frontmatter {
         } else if let Some(items) = parse_inline_list(value) {
             fm.lists.insert(key, items);
         } else {
-            fm.fields.insert(key, unquote(value).to_string());
+            fm.fields.insert(key, unquote(value));
         }
     }
 
@@ -142,7 +142,7 @@ fn as_sequence_item(line: &str) -> Option<String> {
     let item = body.strip_prefix("- ").or_else(|| body.strip_prefix("-"))?;
     // A map-shaped sequence item (`- key: val`) reduces to its whole text for
     // v1 — we only need scalar list members (tags, kinds).
-    Some(unquote(item.trim()).to_string())
+    Some(unquote(item.trim()))
 }
 
 /// Split `key: value` at the FIRST colon-space (or trailing colon). Returns
@@ -180,22 +180,67 @@ fn parse_inline_list(value: &str) -> Option<Vec<String>> {
     Some(
         inner
             .split(',')
-            .map(|item| unquote(item.trim()).to_string())
+            .map(|item| unquote(item.trim()))
             .filter(|item| !item.is_empty())
             .collect(),
     )
 }
 
-/// Strip a single pair of matching surrounding quotes.
-fn unquote(value: &str) -> &str {
+/// Strip a single pair of matching surrounding quotes AND decode the
+/// double-quoted style's escapes. The bridge's writer used to emit
+/// `json.dumps` defaults, so titles landed as `"Morning brief — …"` —
+/// valid YAML the old byte-slice unquote rendered literally in the tree
+/// (user-visible bug, 2026-07-10). New docs carry real UTF-8, but the vault
+/// keeps years of history: decode `\uXXXX`, `\"`, `\\`, `\n`, `\t` here.
+/// Malformed escapes pass through verbatim (never eat a title).
+fn unquote(value: &str) -> String {
     let bytes = value.as_bytes();
     if bytes.len() >= 2 {
         let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
-        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-            return &value[1..value.len() - 1];
+        let inner = &value[1..value.len() - 1];
+        if first == b'\'' && last == b'\'' {
+            // Single-quoted style: '' is the only escape (a literal ').
+            return inner.replace("''", "'");
+        }
+        if first == b'"' && last == b'"' {
+            return decode_double_quoted(inner);
         }
     }
-    value
+    value.to_string()
+}
+
+fn decode_double_quoted(inner: &str) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('u') => {
+                let hex: String = chars.by_ref().take(4).collect();
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(decoded) if hex.len() == 4 => out.push(decoded),
+                    _ => {
+                        // Malformed — keep the original bytes verbatim.
+                        out.push_str("\\u");
+                        out.push_str(&hex);
+                    }
+                }
+            }
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// An extracted outbound link target from a note body.
@@ -349,6 +394,28 @@ mod tests {
     use super::*;
 
     // ── frontmatter ──
+
+    #[test]
+    fn double_quoted_unicode_escapes_decode() {
+        // The live bug (2026-07-10): the bridge's old writer emitted
+        // json.dumps defaults, so brief titles carried — literally and
+        // the vault tree rendered "Morning brief — 2026-07-10".
+        let fm = parse_frontmatter(
+            "---\ntitle: \"Morning brief \\u2014 2026-07-10 00:14 UTC\"\n---\n",
+        );
+        assert_eq!(
+            fm.get("title"),
+            Some("Morning brief \u{2014} 2026-07-10 00:14 UTC")
+        );
+        // The other double-quoted escapes + malformed passthrough.
+        let fm = parse_frontmatter(
+            "---\na: \"tab\\there\"\nb: \"q\\\"q\"\nc: \"bad\\u12\"\nd: 'it''s'\n---\n",
+        );
+        assert_eq!(fm.get("a"), Some("tab\there"));
+        assert_eq!(fm.get("b"), Some("q\"q"));
+        assert_eq!(fm.get("c"), Some("bad\\u12")); // malformed stays verbatim
+        assert_eq!(fm.get("d"), Some("it's"));
+    }
 
     #[test]
     fn parses_the_real_session_frontmatter() {

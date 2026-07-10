@@ -212,9 +212,14 @@ impl Sim {
             // Outputs: anchor + physics + drift + spawn flight offset. A
             // dragged or absorbing node holds still (no drift); a spawning
             // node's position tracks the FLIGHT so its edge stretches with
-            // the dot.
+            // the dot. The Lissajous drift rides ONLY while the field is hot
+            // (user report 2026-07-10: perpetual ambient drift reads as
+            // "brownian motion in slow motion" — settled must mean STILL;
+            // the ≤3.6px offset snap at the hot→cold edge is sub-perceptual).
             for node in conv.nodes.iter_mut() {
-                let still = dragging == Some(node.run_id.as_str()) || node.absorbing.is_some();
+                let still = !hot
+                    || dragging == Some(node.run_id.as_str())
+                    || node.absorbing.is_some();
                 let (drift_x, drift_y) = if still {
                     (0., 0.)
                 } else {
