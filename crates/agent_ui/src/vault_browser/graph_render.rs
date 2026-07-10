@@ -210,6 +210,7 @@ pub(super) fn field_view(
 
     // Ctrl+wheel = zoom (plain wheel stays the scroll surface's pan).
     let wheel_panel = panel.clone();
+    let pan_panel = panel.clone();
     // "Fit" chip — back to the whole-field view whenever zoomed in.
     let fit_chip = nav.zoomed.then(|| {
         let colors = cx.theme().colors();
@@ -246,20 +247,28 @@ pub(super) fn field_view(
                 .size_full()
                 .overflow_scroll()
                 .track_scroll(scroll)
+                // PLAIN wheel zooms (Q9 ruling 2026-07-11 — the Obsidian
+                // grammar; ctrl+wheel still lands here too). Panning when
+                // zoomed = background drag (`begin_graph_pan` below).
                 .on_scroll_wheel(move |event, _, cx| {
-                    if event.modifiers.control {
-                        let dy = match event.delta {
-                            gpui::ScrollDelta::Lines(delta) => delta.y,
-                            gpui::ScrollDelta::Pixels(delta) => delta.y.as_f32() / 40.,
-                        };
-                        if dy != 0. {
-                            let factor = if dy > 0. { 1.15 } else { 1. / 1.15 };
-                            wheel_panel
-                                .update(cx, |panel, cx| panel.zoom_graph(factor, cx))
-                                .ok();
-                            cx.stop_propagation();
-                        }
+                    let dy = match event.delta {
+                        gpui::ScrollDelta::Lines(delta) => delta.y,
+                        gpui::ScrollDelta::Pixels(delta) => delta.y.as_f32() / 40.,
+                    };
+                    if dy != 0. {
+                        let factor = if dy > 0. { 1.15 } else { 1. / 1.15 };
+                        wheel_panel
+                            .update(cx, |panel, cx| panel.zoom_graph(factor, cx))
+                            .ok();
+                        cx.stop_propagation();
                     }
+                })
+                .on_mouse_down(gpui::MouseButton::Left, move |event, _, cx| {
+                    // Background pan-begin — a node hit already set its drag
+                    // (child listeners fire first), so this no-ops there.
+                    pan_panel
+                        .update(cx, |panel, cx| panel.begin_graph_pan(event.position, cx))
+                        .ok();
                 })
                 .child(
                     div()

@@ -33,7 +33,7 @@ use super::field::VaultField;
 use super::importers_ops::ImportersState;
 use super::index::{VaultIndex, VaultRoot, build_index};
 use super::new_note::NewNoteState;
-use super::panel_graph::GraphDrag;
+use super::panel_graph::{GraphDrag, GraphPan};
 use super::promote::PromoteState;
 use super::routines::RoutinesState;
 use super::writeback_state::WritebackState;
@@ -135,14 +135,17 @@ pub struct VaultBrowserPanel {
     /// The doc id whose graph hover card is up.
     pub(super) graph_hovered: Option<SharedString>,
     /// GRAPH zoom multiplier over the fit-to-viewport base scale (1 = fit —
-    /// the whole field visible; ctrl+wheel and caption-clicks move it;
-    /// user ask 2026-07-10: bounded by the window, zoom into clusters).
+    /// the whole field visible; plain wheel (Q9 ruling) and caption-clicks
+    /// move it; user ask 2026-07-10: bounded by the window, zoom clusters).
     pub(super) graph_zoom: f32,
     /// The EFFECTIVE render scale of the last graph frame (fit × zoom) —
     /// drag handlers divide pointer deltas by it.
     pub(super) graph_scale: f32,
     /// An in-flight graph node drag (pointer re-aims the anchor 1:1).
     pub(super) graph_drag: Option<GraphDrag>,
+    /// An in-flight background pan (Obsidian grammar, Q9 ruling 2026-07-11:
+    /// plain wheel zooms, so dragging empty graph space pans the viewport).
+    pub(super) graph_pan: Option<GraphPan>,
     /// A drag that moved suppresses the click it lands on.
     pub(super) graph_suppress_click: bool,
     /// A pending "reveal in list": a session id to select after the view flips.
@@ -195,6 +198,7 @@ impl VaultBrowserPanel {
             graph_zoom: 1.,
             graph_scale: 1.,
             graph_drag: None,
+            graph_pan: None,
             graph_suppress_click: false,
             graph_reveal: None,
             _index_task: None,
@@ -346,16 +350,23 @@ impl Render for VaultBrowserPanel {
             .size_full()
             .bg(panel_bg);
         // Graph drag: pointer deltas re-aim the anchor while the button holds.
+        // Background pan rides the same listeners (node drag wins — pan only
+        // begins when no node drag is live; see `begin_graph_pan`).
         if graph_active {
             root = root
                 .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
                     if this.graph_drag.is_some() {
                         this.graph_drag_moved(event.position, cx);
+                    } else if this.graph_pan.is_some() {
+                        this.graph_pan_moved(event.position, cx);
                     }
                 }))
                 .on_mouse_up(
                     MouseButton::Left,
-                    cx.listener(|this, _, _, cx| this.graph_drag_ended(cx)),
+                    cx.listener(|this, _, _, cx| {
+                        this.graph_drag_ended(cx);
+                        this.graph_pan_ended(cx);
+                    }),
                 );
         }
         root.child(header)

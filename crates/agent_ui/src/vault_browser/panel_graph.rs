@@ -16,6 +16,13 @@ pub(super) struct GraphDrag {
     moved: bool,
 }
 
+/// An in-flight background pan (Q9 ruling 2026-07-11: plain wheel zooms, so
+/// dragging empty graph space pans the viewport — the Obsidian grammar).
+pub(super) struct GraphPan {
+    start_mouse: Point<Pixels>,
+    start_offset: Point<Pixels>,
+}
+
 impl VaultBrowserPanel {
     /// Begin dragging a graph node — record its current anchor so pointer
     /// deltas re-aim it 1:1 (constellation drag idiom). Pure state flip.
@@ -63,9 +70,10 @@ impl VaultBrowserPanel {
         cx.notify();
     }
 
-    /// Ctrl+wheel zoom: multiply the fit-relative zoom, clamped [1, 6] — 1 is
-    /// always "the whole field visible" (the window bound the user asked
-    /// for); plain wheel stays the scroll surface's pan.
+    /// Wheel zoom (PLAIN wheel — Q9 ruling 2026-07-11, Obsidian grammar):
+    /// multiply the fit-relative zoom, clamped [1, 6] — 1 is always "the
+    /// whole field visible" (the window bound the user asked for). Panning
+    /// when zoomed = background drag (`begin_graph_pan`).
     pub(super) fn zoom_graph(&mut self, factor: f32, cx: &mut Context<Self>) {
         let next = (self.graph_zoom * factor).clamp(1., 6.);
         if (next - self.graph_zoom).abs() > f32::EPSILON {
@@ -129,6 +137,41 @@ impl VaultBrowserPanel {
         if let Some(drag) = self.graph_drag.take() {
             self.graph_suppress_click = drag.moved;
             self.graph_field.end_drag(self.field_now());
+            cx.notify();
+        }
+    }
+
+    /// Begin a background pan — no-ops when a node drag is live (node
+    /// mouse-down fires first in the bubble phase, so `graph_drag` is already
+    /// set for node hits by the time the container's listener runs).
+    pub fn begin_graph_pan(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.graph_drag.is_some() {
+            return;
+        }
+        self.graph_pan = Some(GraphPan {
+            start_mouse: position,
+            start_offset: self.graph_scroll.offset(),
+        });
+        cx.notify();
+    }
+
+    /// Pan: content follows the cursor 1:1 in VIEW pixels (offsets are
+    /// negative content displacement; the scroll handle clamps to the
+    /// scrollable range on paint, so out-of-range sets are safe).
+    pub(super) fn graph_pan_moved(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(pan) = &self.graph_pan else {
+            return;
+        };
+        let off = gpui::point(
+            pan.start_offset.x + (position.x - pan.start_mouse.x),
+            pan.start_offset.y + (position.y - pan.start_mouse.y),
+        );
+        self.graph_scroll.set_offset(off);
+        cx.notify();
+    }
+
+    pub(super) fn graph_pan_ended(&mut self, cx: &mut Context<Self>) {
+        if self.graph_pan.take().is_some() {
             cx.notify();
         }
     }
