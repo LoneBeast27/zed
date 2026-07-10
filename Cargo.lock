@@ -419,6 +419,7 @@ dependencies = [
  "log",
  "lsp",
  "markdown",
+ "markdown_preview",
  "menu",
  "multi_buffer",
  "node_runtime",
