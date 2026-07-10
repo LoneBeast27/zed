@@ -18,10 +18,10 @@
 //! took the pane) and `Item::on_removed` (tab closed) — both drop the
 //! surface's poll watch while the entity itself survives in the registry.
 
-use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Window};
+use gpui::{App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, SharedString, Window};
 use ui::prelude::*;
 use workspace::Workspace;
-use workspace::item::{Item, ItemEvent};
+use workspace::item::{Item, ItemEvent, ItemHandle};
 
 use crate::activity_bar::ActivityBar;
 use crate::adversary_panel::AdversaryPanel;
@@ -213,9 +213,52 @@ pub fn workspace_surfaces(workspace: &Workspace, cx: &App) -> Option<ModeSurface
         .and_then(|bar| bar.read(cx).surfaces().cloned())
 }
 
+/// True when `item` hosts ANY mode surface — the replace-in-place pass must
+/// only ever touch mode-owned tabs, never user-opened editor tabs.
+fn is_mode_item(item: &dyn ItemHandle) -> bool {
+    item.downcast::<ModeItem<ArtifactSurface>>().is_some()
+        || item.downcast::<ModeItem<BriefingPanel>>().is_some()
+        || item.downcast::<ModeItem<OrchestratorPanel>>().is_some()
+        || item.downcast::<ModeItem<TaskBoardPanel>>().is_some()
+        || item.downcast::<ModeItem<SymphonyPanel>>().is_some()
+        || item.downcast::<ModeItem<AdversaryPanel>>().is_some()
+        || item.downcast::<ModeItem<UsagePanel>>().is_some()
+        || item.downcast::<ModeItem<SettingsStatusPanel>>().is_some()
+}
+
+/// Close every mode-owned center tab except `keep` (the just-activated
+/// mode's item): mode surfaces REPLACE each other on activation instead of
+/// accumulating one tab per visited mode (design ruling 2026-07-10).
+/// User-opened tabs are untouched ([`is_mode_item`] gates), and closing a
+/// `ModeItem` only drops the host — the surface entity survives in the
+/// registry with its state intact.
+fn close_other_mode_items(
+    keep: EntityId,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    for pane in workspace.panes().to_vec() {
+        let doomed: Vec<EntityId> = pane
+            .read(cx)
+            .items()
+            .filter(|item| item.item_id() != keep && is_mode_item(item.as_ref()))
+            .map(|item| item.item_id())
+            .collect();
+        pane.update(cx, |pane, cx| {
+            for item_id in doomed {
+                pane.remove_item(item_id, false, true, window, cx);
+            }
+        });
+    }
+}
+
 /// Open-or-activate the center item hosting `inner` — IDEMPOTENT: an
 /// existing `ModeItem<S>` anywhere in the workspace is activated in place
-/// (never a duplicate tab); otherwise one is added to the active pane.
+/// (never a duplicate tab). Otherwise one is added where the previously
+/// active mode's tab sat (same pane, same index — replace-in-place), or at
+/// the end of the active pane when no mode tab is open. Either way, every
+/// OTHER mode-owned tab is closed afterwards — one mode tab at a time.
 /// `tab` carries the mode's display name + icon; `None` falls back to the
 /// surface defaults.
 pub fn open_center_item<S: ModeSurface>(
@@ -237,18 +280,36 @@ pub fn open_center_item<S: ModeSurface>(
                     .find_map(|item| item.downcast::<ModeItem<S>>())
             })
         });
-    match existing {
+    let keep = match existing {
         Some(existing) => {
             if let Some((title, icon)) = tab {
                 existing.update(cx, |item, cx| item.set_tab(title, icon, cx));
             }
             workspace.activate_item(&existing, true, true, window, cx);
+            existing.item_id()
         }
         None => {
+            // Replace-in-place: the previous mode's tab yields its slot.
+            let slot = workspace.panes().iter().find_map(|pane| {
+                pane.read(cx)
+                    .items()
+                    .position(|item| is_mode_item(item.as_ref()))
+                    .map(|ix| (pane.clone(), ix))
+            });
             let item = cx.new(|_| ModeItem::new(inner.clone(), tab));
-            workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+            let item_id = item.item_id();
+            match slot {
+                Some((pane, ix)) => {
+                    workspace.add_item(pane, Box::new(item), Some(ix), true, true, window, cx)
+                }
+                None => {
+                    workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx)
+                }
+            }
+            item_id
         }
-    }
+    };
+    close_other_mode_items(keep, workspace, window, cx);
 }
 
 /// Route to the task board and open `run_id`'s drawer — the web's

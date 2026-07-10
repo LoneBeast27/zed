@@ -366,3 +366,7 @@ mod tests;
 #[cfg(test)]
 #[path = "workspace_mode_switcher_layout_tests.rs"]
 mod layout_tests;
+
+#[cfg(test)]
+#[path = "workspace_mode_switcher_launch_tests.rs"]
+mod launch_tests;

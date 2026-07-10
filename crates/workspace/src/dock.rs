@@ -24,6 +24,14 @@ use util::ResultExt as _;
 
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
 
+/// A dock never takes more than this fraction of the workspace along its
+/// axis — width for left/right, height for the bottom dock (design ruling
+/// 2026-07-10: a persisted 630px vault dock restored onto a 975px window
+/// must not squeeze the center pane to a sliver). Applied where dock sizes
+/// land on the layout (`Workspace::render_dock`) and re-applied to stored
+/// sizes whenever the workspace bounds change (the resize canvas).
+pub(crate) const MAX_DOCK_SIZE_FRACTION: f32 = 0.5;
+
 pub enum PanelEvent {
     ZoomIn,
     ZoomOut,

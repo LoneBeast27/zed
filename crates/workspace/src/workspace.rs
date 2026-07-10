@@ -48,7 +48,9 @@ use client::{
     proto::{self, ErrorCode, PanelId, PeerId},
 };
 use collections::{HashMap, HashSet, hash_map};
-use dock::{Dock, DockPosition, PanelButtons, PanelHandle, RESIZE_HANDLE_SIZE};
+use dock::{
+    Dock, DockPosition, MAX_DOCK_SIZE_FRACTION, PanelButtons, PanelHandle, RESIZE_HANDLE_SIZE,
+};
 use fs::Fs;
 use futures::{
     Future, FutureExt, StreamExt,
@@ -7876,7 +7878,7 @@ impl Workspace {
                     let size = size_state
                         .and_then(|state| state.size)
                         .unwrap_or_else(|| panel.default_size(window, cx));
-                    container = container.w(size);
+                    container = container.w(self.clamped_dock_size(position, size));
                 }
                 if let Some(min) = min_size {
                     container = container.min_w(min);
@@ -7885,11 +7887,29 @@ impl Workspace {
                 let size = size_state
                     .and_then(|state| state.size)
                     .unwrap_or_else(|| panel.default_size(window, cx));
-                container = container.h(size);
+                container = container.h(self.clamped_dock_size(position, size));
             }
         }
 
         Some(container)
+    }
+
+    /// Cap an applied dock size at [`MAX_DOCK_SIZE_FRACTION`] of the
+    /// workspace bounds along the dock's axis, so an oversized persisted or
+    /// programmatic size renders clamped and the clamp re-applies on every
+    /// window resize (`self.bounds` tracks the workspace canvas; render_dock
+    /// runs each frame). Until real bounds land (zero-sized first frame)
+    /// the size passes through untouched — never a collapsed dock flash.
+    fn clamped_dock_size(&self, position: DockPosition, size: Pixels) -> Pixels {
+        let extent = match position.axis() {
+            Axis::Horizontal => self.bounds.size.width,
+            Axis::Vertical => self.bounds.size.height,
+        };
+        if extent > Pixels::ZERO {
+            size.min(extent * MAX_DOCK_SIZE_FRACTION)
+        } else {
+            size
+        }
     }
 
     pub fn for_window(window: &Window, cx: &App) -> Option<Entity<Workspace>> {
@@ -8568,9 +8588,16 @@ impl Render for Workspace {
                                             this.bounds = bounds;
 
                                             if bounds_changed {
+                                                // Docks are capped at a fraction
+                                                // of the workspace (not the full
+                                                // extent) so a persisted oversize
+                                                // never squeezes out the center
+                                                // pane; re-applied on every
+                                                // bounds change (window resize).
                                                 this.left_dock.update(cx, |dock, cx| {
                                                     dock.clamp_panel_size(
-                                                        bounds.size.width,
+                                                        bounds.size.width
+                                                            * MAX_DOCK_SIZE_FRACTION,
                                                         window,
                                                         cx,
                                                     )
@@ -8578,7 +8605,8 @@ impl Render for Workspace {
 
                                                 this.right_dock.update(cx, |dock, cx| {
                                                     dock.clamp_panel_size(
-                                                        bounds.size.width,
+                                                        bounds.size.width
+                                                            * MAX_DOCK_SIZE_FRACTION,
                                                         window,
                                                         cx,
                                                     )
@@ -8586,7 +8614,8 @@ impl Render for Workspace {
 
                                                 this.bottom_dock.update(cx, |dock, cx| {
                                                     dock.clamp_panel_size(
-                                                        bounds.size.height,
+                                                        bounds.size.height
+                                                            * MAX_DOCK_SIZE_FRACTION,
                                                         window,
                                                         cx,
                                                     )
