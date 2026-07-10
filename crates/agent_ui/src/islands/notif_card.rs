@@ -19,13 +19,15 @@ use std::time::{Duration, Instant};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, FontWeight, SharedString, Task, canvas,
 };
+use settings::Settings as _;
+use theme_settings::ThemeSettings;
 use ui::prelude::*;
 
-use crate::agent_accents::{STATUS_BLOCKED, STATUS_ERROR, accent_for_agent};
+use crate::agent_accents::{ACCENT_FILL, STATUS_BLOCKED, STATUS_ERROR, accent_for_agent};
 use crate::task_board::motion::{AnimatedValue, SPATIAL};
-use crate::task_board::style::{HAIRLINE_HI, SURFACE_1};
+use crate::task_board::style::{HAIRLINE_HI, SURFACE_1, tabular_nums};
 
-use super::notif_logic::ToastKind;
+use super::notif_logic::{ApprovalMeta, ToastKind, expiry_countdown, unix_now};
 use super::notif_stack::NotifStack;
 use super::usage_island::SURFACE_FLOAT;
 
@@ -60,6 +62,15 @@ pub(super) struct Toast {
     pub(super) title: SharedString,
     pub(super) agent: String,
     pub(super) run_id: Option<SharedString>,
+    /// Present only on held [`ToastKind::Approval`] toasts — the inline
+    /// Allow/Deny + countdown render from it (Phase-2 §5.2).
+    pub(super) approval: Option<ApprovalMeta>,
+    /// An allow/deny POST is in flight (or landed and the retiring frame
+    /// hasn't arrived yet) — collapses the buttons, one POST at a time.
+    pub(super) deciding: bool,
+    /// The last decision POST's refusal — the bridge's `{"error"}` VERBATIM
+    /// (a 409 "already resolved: deny" reads as a refusal, not offline).
+    pub(super) decide_error: Option<SharedString>,
     /// The §4.9 emergence scalar (web `--emerge`: 1 = tucked past the right
     /// edge, 0 = fully out), ONE retargetable value reused by both
     /// directions — DECEL/500ms in, exit-spline/400ms out — so a mid-emerge
@@ -154,12 +165,120 @@ pub(super) fn render_toast(toast: &Toast, width: f32, cx: &mut Context<NotifStac
     }
 }
 
+/// The held-approval anatomy under the title (§5.2): matched rule + cwd
+/// meta, then the decision row — inline Allow / Deny (in-flight collapse) +
+/// the TTL countdown — and the last refusal VERBATIM. Buttons stop
+/// propagation so the card's click-through (open the run drawer) stays a
+/// separate gesture; NOTHING here touches focus (the no-focus-theft law).
+fn approval_rows(
+    toast: &Toast,
+    meta: &ApprovalMeta,
+    cx: &Context<NotifStack>,
+) -> AnyElement {
+    let colors = cx.theme().colors();
+    let mono = ThemeSettings::get_global(cx).buffer_font.family.clone();
+    let countdown: SharedString =
+        format!("expires {}", expiry_countdown(meta.expires_ts, unix_now())).into();
+
+    let decision_button = |label: &'static str, allow: bool, cx: &Context<NotifStack>| {
+        let id = toast.id.clone();
+        div()
+            .id(ElementId::Name(format!("toast-{label}-{}", toast.id).into()))
+            .px(px(10.))
+            .py(px(3.))
+            .rounded_full()
+            .text_size(px(11.))
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .when(allow, |x| {
+                // Allow = the filled action (ACCENT_FILL, dark glyph — the
+                // send-circle grammar).
+                x.bg(gpui::Hsla::from(ACCENT_FILL)).text_color(gpui::black())
+            })
+            .when(!allow, |x| {
+                x.border_1()
+                    .border_color(colors.border)
+                    .text_color(colors.text_muted)
+                    .hover(|x| x.bg(colors.element_hover))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.decide(&id, allow, cx);
+            }))
+            .child(label)
+    };
+
+    let mut rows = v_flex().gap(px(6.));
+    if !meta.rule.is_empty() {
+        rows = rows.child(
+            div()
+                .text_size(px(11.5))
+                .text_color(colors.text_muted)
+                .line_clamp(1)
+                .child(SharedString::from(meta.rule.clone())),
+        );
+    }
+    if !meta.cwd.is_empty() {
+        rows = rows.child(
+            div()
+                .font_family(mono.clone())
+                .text_size(px(11.))
+                .text_color(colors.text_placeholder)
+                .truncate()
+                .child(SharedString::from(meta.cwd.clone())),
+        );
+    }
+    let decision_row = h_flex()
+        .items_center()
+        .gap(px(8.))
+        .when(!toast.deciding, |row| {
+            row.child(decision_button("Allow", true, cx))
+                .child(decision_button("Deny", false, cx))
+        })
+        .when(toast.deciding, |row| {
+            // In-flight collapse — one POST at a time; the pending frame
+            // retires the toast on success.
+            row.child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(colors.text_placeholder)
+                    .child("deciding…"),
+            )
+        })
+        .child(div().flex_1())
+        .child(
+            // The TTL countdown, ticking on the stack's 1s held ticker.
+            div()
+                .font_family(mono)
+                .text_size(px(11.))
+                .font_features(tabular_nums())
+                .text_color(gpui::Hsla::from(STATUS_BLOCKED).opacity(0.9))
+                .child(countdown),
+        );
+    rows = rows.child(decision_row);
+    if let Some(error) = &toast.decide_error {
+        rows = rows.child(
+            div()
+                .text_size(px(11.5))
+                .text_color(gpui::Hsla::from(STATUS_ERROR))
+                .child(error.clone()),
+        );
+    }
+    rows.into_any_element()
+}
+
 fn render_card(toast: &Toast, width: f32, cx: &mut Context<NotifStack>) -> AnyElement {
+    let approval_section = toast
+        .approval
+        .clone()
+        .map(|meta| approval_rows(toast, &meta, cx));
     let colors = cx.theme().colors();
     let id = toast.id.clone();
     let border = match toast.kind {
         ToastKind::Error => gpui::Hsla::from(STATUS_ERROR).opacity(0.34),
-        ToastKind::Stale => gpui::Hsla::from(STATUS_BLOCKED).opacity(0.30),
+        ToastKind::Stale | ToastKind::Approval => {
+            gpui::Hsla::from(STATUS_BLOCKED).opacity(0.30)
+        }
         ToastKind::Done => HAIRLINE_HI.into(),
     };
     let retracting = toast.retracting.is_some();
@@ -281,7 +400,8 @@ fn render_card(toast: &Toast, width: f32, cx: &mut Context<NotifStack>) -> AnyEl
                         .line_clamp(2)
                         .child(toast.title.clone()),
                 )
-                .children(chip),
+                .children(chip)
+                .children(approval_section),
         )
         .child(dismiss);
 

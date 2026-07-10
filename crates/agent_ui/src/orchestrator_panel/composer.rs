@@ -500,6 +500,11 @@ impl OrchestratorPanel {
                             ))
                             .child(note)
                     }))
+                    // Phase-2 §5.2 layer 3: the slim approval banner sits in
+                    // flow DIRECTLY above the deck while the active
+                    // conversation has pending approvals — attention link
+                    // only, never focus-stealing, never modal.
+                    .children(self.render_approval_banner(cx))
                     .child(deck),
             )
             .into_any_element()

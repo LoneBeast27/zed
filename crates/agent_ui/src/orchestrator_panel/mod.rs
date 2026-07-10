@@ -18,7 +18,10 @@
 //!   morph lives in [`send_circle`].
 //! - [`command_note`] — S5 google-lane execution: the bridge POST + the
 //!   honest system-row outcome render.
+//! - [`approval_banner`] — the slim above-composer strip while the active
+//!   conversation has pending runtime approvals (Phase-2 §5.2, layer 3).
 
+mod approval_banner;
 mod command_note;
 mod composer;
 mod dispatch;

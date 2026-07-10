@@ -112,7 +112,13 @@ pub(super) fn node_el(
 fn checkpoint_dot(agent: &str, status: &str, size: f32, now: f32) -> AnyElement {
     let color = constellation_node_color(agent, status);
     let mut shadows: Vec<BoxShadow> = Vec::with_capacity(2);
-    if matches!(status, "running" | "completed" | "failed" | "killed") {
+    // `awaiting_approval` (Phase-2 §5.2) blooms too: the held amber glow —
+    // [`constellation_node_color`] already resolved awaiting_* to the amber
+    // safety hue, and the SHAPE below stays hollow (nothing runs, nothing
+    // settled) — the constellation's held-state grammar.
+    if matches!(status, "running" | "completed" | "failed" | "killed")
+        || status.starts_with("awaiting")
+    {
         shadows.push(BoxShadow {
             color: color.opacity(0.25),
             offset: point(px(0.), px(0.)),

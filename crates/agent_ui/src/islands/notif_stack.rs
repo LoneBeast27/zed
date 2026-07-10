@@ -12,15 +12,17 @@
 //! host comparison lives in `islands/mod.rs`).
 
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, Context, Entity, SharedString, Subscription, WeakEntity, Window,
+    AnyElement, Context, Entity, SharedString, Subscription, Task, WeakEntity, Window,
 };
 use ui::prelude::*;
 use workspace::Workspace;
 
-use crate::bridge::{self, BridgeStore};
+use crate::bridge::{
+    self, ApprovalWatch, BridgeStore, post_approval_allow, post_approval_deny,
+};
 use crate::task_board::motion::{AnimatedValue, DECEL, EFFECTS, MotionCurve};
 
 use super::notif_card::{
@@ -28,7 +30,12 @@ use super::notif_card::{
 };
 use super::notif_logic::{
     MAX_VISIBLE, StaleLatch, TOAST_TIMEOUT, ToastPayload, diff_board, stale_payload,
+    sync_approvals,
 };
+
+/// Countdown repaint cadence while an approval toast is held (the drawer's
+/// worked-for tick idiom — alive ONLY while a held toast shows a deadline).
+const COUNTDOWN_TICK: Duration = Duration::from_secs(1);
 
 /// Stack width — web `#notif-stack { width: 332px }`.
 pub const STACK_W: f32 = 332.;
@@ -46,10 +53,20 @@ pub struct NotifStack {
     prev_runs: HashMap<String, String>,
     primed: bool,
     stale_latch: StaleLatch,
-    /// Dedupe: stable ids already surfaced never double-fire.
+    /// Dedupe: stable ids already surfaced never double-fire. For approval
+    /// toasts this doubles as the dismissed-but-still-pending memory (pruned
+    /// by [`sync_approvals`] when an approval resolves or the feed goes
+    /// stale).
     seen: HashSet<String>,
     /// Newest first (top of the top-right stack).
     toasts: Vec<Toast>,
+    /// Held while ≥1 approval toast is up — keeps the `/approvals` poll
+    /// fallback alive so the toast retires even without SSE (§5.2: the poll
+    /// runs ONLY while a toast is held or the panel visible).
+    approval_watch: Option<ApprovalWatch>,
+    /// 1s repaint driver for the held toasts' expiry countdown — `Some` only
+    /// while an approval toast is up (no idle timers).
+    countdown_ticker: Option<Task<()>>,
     _store_subscription: Subscription,
 }
 
@@ -66,6 +83,8 @@ impl NotifStack {
             stale_latch: StaleLatch::default(),
             seen: HashSet::new(),
             toasts: Vec::new(),
+            approval_watch: None,
+            countdown_ticker: None,
             _store_subscription,
         }
     }
@@ -75,6 +94,8 @@ impl NotifStack {
         let board = store.board.clone();
         let stale = store.usage_meta.stale();
         let scrape = store.usage_meta.scraped.clone();
+        let connected = store.connected;
+        let pending = store.pending_approvals.clone();
         let payloads = diff_board(&mut self.prev_runs, &mut self.primed, &board);
         let mut changed = false;
         for payload in payloads {
@@ -83,11 +104,124 @@ impl NotifStack {
         if self.stale_latch.flip(stale) {
             changed |= self.surface(stale_payload(scrape.as_ref()), cx);
         }
+        // Held approval toasts (Phase-2 §5.2): reconcile against the live
+        // pending set — replace semantics retire on the empty frame, the
+        // fresh→stale latch retires on disconnect.
+        let held: Vec<String> = self
+            .toasts
+            .iter()
+            .filter(|toast| toast.kind.held() && toast.retracting.is_none())
+            .map(|toast| toast.id.to_string())
+            .collect();
+        let (surface, retire) = sync_approvals(connected, &pending, &held, &mut self.seen);
+        for payload in surface {
+            changed |= self.surface(payload, cx);
+        }
+        for id in retire {
+            self.retract(&SharedString::from(id), cx);
+            changed = true;
+        }
+        self.sync_approval_lifelines(cx);
         // The store notifies every second while a run ticks — only repaint
         // the stack when a toast actually surfaced (§8 idle cost).
         if changed {
             cx.notify();
         }
+    }
+
+    /// Acquire/drop the `/approvals` poll watch + the 1s countdown repaint
+    /// with held-toast presence (Lightness: both live ONLY while a held
+    /// approval toast is up).
+    fn sync_approval_lifelines(&mut self, cx: &mut Context<Self>) {
+        let any_held = self
+            .toasts
+            .iter()
+            .any(|toast| toast.kind.held() && toast.retracting.is_none());
+        if any_held {
+            if self.approval_watch.is_none() {
+                self.approval_watch =
+                    Some(self.store.update(cx, |store, cx| store.watch_approvals(cx)));
+            }
+            if self.countdown_ticker.is_none() {
+                self.countdown_ticker = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor().timer(COUNTDOWN_TICK).await;
+                        let live = this.update(cx, |this, cx| {
+                            let held = this
+                                .toasts
+                                .iter()
+                                .any(|toast| toast.kind.held() && toast.retracting.is_none());
+                            if held {
+                                cx.notify();
+                            } else {
+                                this.countdown_ticker = None;
+                            }
+                            held
+                        });
+                        if !matches!(live, Ok(true)) {
+                            return;
+                        }
+                    }
+                }));
+            }
+        } else {
+            self.approval_watch = None;
+            self.countdown_ticker = None;
+        }
+    }
+
+    /// POST the inline toast decision (§5.2: in-flight collapse, the
+    /// bridge's `{"error"}` refusal VERBATIM on failure, and NO local
+    /// retirement on success — the pending frame's replace semantics retire
+    /// the toast, server truth only).
+    pub(super) fn decide(&mut self, id: &SharedString, allow: bool, cx: &mut Context<Self>) {
+        let Some(toast) = self.toast_mut(id) else {
+            return;
+        };
+        if toast.deciding || toast.retracting.is_some() {
+            return; // in-flight collapse: one POST at a time
+        }
+        let Some(approval_id) = toast
+            .approval
+            .as_ref()
+            .map(|meta| meta.approval_id.clone())
+        else {
+            return;
+        };
+        toast.deciding = true;
+        toast.decide_error = None;
+        cx.notify();
+        let toast_id = id.clone();
+        let http_client = cx.http_client();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if allow {
+                        post_approval_allow(http_client.as_ref(), &approval_id, None).await
+                    } else {
+                        post_approval_deny(http_client.as_ref(), &approval_id, None).await
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(toast) = this.toast_mut(&toast_id) {
+                    match result {
+                        // Success: stay collapsed — the next pending frame
+                        // (SSE or the held watch's poll) retires the toast.
+                        Ok(_) => {}
+                        Err(error) => {
+                            // 404/409 refusal or transport error — verbatim,
+                            // and the buttons re-arm for a retry.
+                            toast.deciding = false;
+                            toast.decide_error = Some(format!("{error}").into());
+                        }
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Surface a payload as a new toast (newest first). Returns whether
@@ -97,6 +231,7 @@ impl NotifStack {
             return false;
         }
         let id = SharedString::from(payload.id);
+        let held = payload.kind.held();
         // §4.9 emergence: slide in from past the edge (1 → 0) on decel-in
         // while opacity rises on effects — concurrent from frame one.
         let mut slide = AnimatedValue::settled(1.0, DECEL, EMERGE);
@@ -111,6 +246,9 @@ impl NotifStack {
                 title: SharedString::from(payload.title),
                 agent: payload.agent,
                 run_id: payload.run_id.map(SharedString::from),
+                approval: payload.approval,
+                deciding: false,
+                decide_error: None,
                 slide,
                 fade,
                 expire: super::notif_logic::ExpireTimer::armed(TOAST_TIMEOUT),
@@ -122,12 +260,18 @@ impl NotifStack {
                 x_reveal: AnimatedValue::settled(0.0, EFFECTS, X_REVEAL),
             },
         );
-        self.arm_expire(&id, cx);
-        // §8 bounded DOM: retract the oldest beyond the cap.
+        // Held toasts (approvals) never arm the auto-retract clock — they
+        // retire on decision / stale, not on time (§5.2 "no ExpireTimer").
+        if !held {
+            self.arm_expire(&id, cx);
+        }
+        // §8 bounded DOM: retract the oldest beyond the cap. Held approval
+        // toasts are exempt in both directions (never evicted by transient
+        // toasts — they're a safety surface, and the bridge TTL bounds them).
         let beyond: Vec<SharedString> = self
             .toasts
             .iter()
-            .filter(|toast| toast.retracting.is_none())
+            .filter(|toast| toast.retracting.is_none() && !toast.kind.held())
             .skip(MAX_VISIBLE)
             .map(|toast| toast.id.clone())
             .collect();
@@ -142,11 +286,15 @@ impl NotifStack {
     }
 
     /// (Re)arm the expiry task for whatever time the pausable clock has
-    /// left.
+    /// left. Held toasts never arm (no auto-retract on approvals — a
+    /// hover-out on one must not start a clock that was never running).
     fn arm_expire(&mut self, id: &SharedString, cx: &mut Context<Self>) {
         let Some(toast) = self.toast_mut(id) else {
             return;
         };
+        if toast.kind.held() {
+            return;
+        }
         toast.expire.resume();
         let remaining = toast.expire.remaining();
         let id = id.clone();
@@ -180,6 +328,9 @@ impl NotifStack {
             cx.background_executor().timer(RETRACT).await;
             this.update(cx, |this, cx| {
                 this.toasts.retain(|toast| toast.id != id);
+                // A retracted held toast releases the `/approvals` watch +
+                // countdown tick if it was the last one (no idle lifelines).
+                this.sync_approval_lifelines(cx);
                 cx.notify();
             })
             .ok();

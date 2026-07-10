@@ -4,11 +4,11 @@
 //! the whole lifecycle is CPU-testable. The entity (notif_stack.rs) owns the
 //! real tasks and rendering.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::agent_accents::{STATUS_BLOCKED, STATUS_DONE, STATUS_ERROR};
-use crate::bridge::{RunRow, ScrapeMeta};
+use crate::bridge::{ApprovalRow, RunRow, ScrapeMeta};
 
 /// Toast auto-retract timeout (Caelestia notifsconfig: 5000ms, hover pauses).
 pub const TOAST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -20,6 +20,10 @@ pub enum ToastKind {
     Done,
     Error,
     Stale,
+    /// A pending runtime approval (Phase-2 permissions §5.2): HELD — no
+    /// expiry clock; retired only by a decision (the pending frame's replace
+    /// semantics) or the connection's fresh→stale latch.
+    Approval,
 }
 
 impl ToastKind {
@@ -28,21 +32,44 @@ impl ToastKind {
         match self {
             ToastKind::Done => STATUS_DONE.into(),
             ToastKind::Error => STATUS_ERROR.into(),
-            ToastKind::Stale => STATUS_BLOCKED.into(),
+            // Approval = blocked-on-YOU: the amber safety hue (MONO ruling).
+            ToastKind::Stale | ToastKind::Approval => STATUS_BLOCKED.into(),
         }
     }
+
+    /// Held toasts never arm the auto-retract clock — a pending approval
+    /// stays up until decided/expired bridge-side (design §5.2: no
+    /// `ExpireTimer`).
+    pub fn held(self) -> bool {
+        matches!(self, ToastKind::Approval)
+    }
+}
+
+/// The approval-specific payload riding a [`ToastKind::Approval`] toast —
+/// what the inline Allow/Deny + countdown render from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalMeta {
+    /// The bridge approval id (`"ap_9f2c1e"`) — the decision endpoints key.
+    pub approval_id: String,
+    /// The matched rule, rendered (`"ask: agent=* cwd_outside_roots"`).
+    pub rule: String,
+    pub cwd: String,
+    /// TTL deadline (unix seconds) — the countdown's anchor.
+    pub expires_ts: f64,
 }
 
 /// The one payload shape every source produces.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToastPayload {
-    /// Stable dedupe id (`run:<id>:<status>` / `stale:<age>`): the same
-    /// event never double-fires.
+    /// Stable dedupe id (`run:<id>:<status>` / `stale:<age>` /
+    /// `approval:<id>`): the same event never double-fires.
     pub id: String,
     pub kind: ToastKind,
     pub title: String,
     pub agent: String,
     pub run_id: Option<String>,
+    /// Present only on [`ToastKind::Approval`] toasts.
+    pub approval: Option<ApprovalMeta>,
 }
 
 /// `terminalKind()` — which run-status transitions toast.
@@ -50,6 +77,10 @@ pub fn terminal_kind(status: &str) -> Option<ToastKind> {
     match status {
         "completed" => Some(ToastKind::Done),
         "failed" | "killed" => Some(ToastKind::Error),
+        // Explicitly NON-terminal (Phase-2 §5.2): an awaiting run is held,
+        // not settled — it resumes on allow or finishes FAILED on deny, and
+        // THAT transition toasts. Never a Done/Error toast here.
+        "awaiting_approval" => None,
         _ => None,
     }
 }
@@ -71,6 +102,7 @@ pub fn board_payload(run: &RunRow, kind: ToastKind) -> ToastPayload {
         title: format!("{task}{suffix}"),
         agent: run.agent.clone(),
         run_id: Some(run.run_id.clone()),
+        approval: None,
     }
 }
 
@@ -87,6 +119,106 @@ pub fn stale_payload(scrape: Option<&ScrapeMeta>) -> ToastPayload {
         title: format!("Usage scrape went stale{age_label}"),
         agent: String::new(),
         run_id: None,
+        approval: None,
+    }
+}
+
+/// The stable toast id for a pending approval — ONE id per approval (not
+/// per frame), so the dedupe set is also the "user dismissed it, don't
+/// pester" memory while the approval stays pending.
+pub fn approval_toast_id(approval_id: &str) -> String {
+    format!("approval:{approval_id}")
+}
+
+/// `approvalPayload()` — a held [`ToastKind::Approval`] toast from one
+/// pending row (§5.2 body: agent + task_head + matched rule).
+pub fn approval_payload(row: &ApprovalRow) -> ToastPayload {
+    let title = if row.task_head.trim().is_empty() {
+        "Subagent spawn awaiting approval".to_string()
+    } else {
+        row.task_head.clone()
+    };
+    ToastPayload {
+        id: approval_toast_id(&row.id),
+        kind: ToastKind::Approval,
+        title,
+        agent: row.agent.clone(),
+        run_id: (!row.run_id.is_empty()).then(|| row.run_id.clone()),
+        approval: Some(ApprovalMeta {
+            approval_id: row.id.clone(),
+            rule: row.rule.clone(),
+            cwd: row.cwd.clone(),
+            expires_ts: row.expires_ts,
+        }),
+    }
+}
+
+/// One reconcile of the held approval toasts against the live pending set
+/// (replace-on-frame semantics — the frame IS the truth):
+///
+/// - **surface**: pending rows not yet surfaced (`seen` is the dedupe AND
+///   the dismissed-but-still-pending memory: a toast the user retracted by
+///   hand is NOT re-raised while its approval stays pending).
+/// - **retire**: held toast ids whose approval left the pending set — a
+///   decision or TTL expiry landed; the empty frame carries the signal, no
+///   tombstone needed. Their `seen` slots are pruned so the ids are free.
+/// - **disconnect** (`connected == false`): every held approval toast
+///   retires (the pending registry is process-lifetime bridge-side — a
+///   stale connection can't vouch for it) and every approval `seen` slot is
+///   cleared, so a reconnect re-raises whatever is genuinely still pending.
+///   This is the fresh→stale retirement latch of §6 "bridge restart".
+pub fn sync_approvals(
+    connected: bool,
+    pending: &[ApprovalRow],
+    held: &[String],
+    seen: &mut HashSet<String>,
+) -> (Vec<ToastPayload>, Vec<String>) {
+    if !connected {
+        seen.retain(|id| !id.starts_with("approval:"));
+        return (Vec::new(), held.to_vec());
+    }
+    let live: HashSet<String> = pending
+        .iter()
+        .map(|row| approval_toast_id(&row.id))
+        .collect();
+    let surface = pending
+        .iter()
+        .filter(|row| !seen.contains(&approval_toast_id(&row.id)))
+        .map(approval_payload)
+        .collect();
+    let retire = held
+        .iter()
+        .filter(|id| !live.contains(*id))
+        .cloned()
+        .collect();
+    // Prune resolved approvals out of the dedupe set (their ids never
+    // recur bridge-side, but the set must not grow unbounded).
+    seen.retain(|id| !id.starts_with("approval:") || live.contains(id));
+    (surface, retire)
+}
+
+/// Unix-seconds "now" (the `ago_now` idiom) — the approval countdown's
+/// clock, shared by the toast card and the run drawer.
+pub fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|epoch| epoch.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Compact countdown text for the approval TTL ("34s" / "4m32s"); an
+/// elapsed deadline reads "expired" (the bridge denies fail-closed — the
+/// next frame retires the toast).
+pub fn expiry_countdown(expires_ts: f64, now_unix: f64) -> String {
+    let left = expires_ts - now_unix;
+    if left <= 0.0 {
+        return "expired".to_string();
+    }
+    let left = left.ceil() as i64;
+    if left < 60 {
+        format!("{left}s")
+    } else {
+        format!("{}m{:02}s", left / 60, left % 60)
     }
 }
 
@@ -178,126 +310,5 @@ impl ExpireTimer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn run(id: &str, status: &str, task: &str) -> RunRow {
-        RunRow {
-            run_id: id.to_string(),
-            status: status.to_string(),
-            task: Some(task.to_string()),
-            agent: "claude".to_string(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn terminal_kind_maps_statuses() {
-        assert_eq!(terminal_kind("completed"), Some(ToastKind::Done));
-        assert_eq!(terminal_kind("failed"), Some(ToastKind::Error));
-        assert_eq!(terminal_kind("killed"), Some(ToastKind::Error));
-        assert_eq!(terminal_kind("running"), None);
-        assert_eq!(terminal_kind("pending"), None);
-    }
-
-    #[test]
-    fn first_snapshot_seeds_without_toasting() {
-        let mut prev = HashMap::new();
-        let mut primed = false;
-        // Pre-existing completed runs on connect must NOT storm.
-        let toasts = diff_board(
-            &mut prev,
-            &mut primed,
-            &[run("r-1", "completed", "old work"), run("r-2", "running", "live")],
-        );
-        assert!(toasts.is_empty());
-        assert!(primed);
-
-        // The live run completing IS a transition.
-        let toasts = diff_board(
-            &mut prev,
-            &mut primed,
-            &[run("r-1", "completed", "old work"), run("r-2", "completed", "live")],
-        );
-        assert_eq!(toasts.len(), 1);
-        assert_eq!(toasts[0].id, "run:r-2:completed");
-        assert_eq!(toasts[0].kind, ToastKind::Done);
-        assert_eq!(toasts[0].title, "live — done");
-        assert_eq!(toasts[0].run_id.as_deref(), Some("r-2"));
-
-        // Staying completed never re-toasts.
-        let toasts = diff_board(
-            &mut prev,
-            &mut primed,
-            &[run("r-2", "completed", "live")],
-        );
-        assert!(toasts.is_empty());
-    }
-
-    #[test]
-    fn post_prime_appearing_terminal_run_toasts() {
-        let mut prev = HashMap::new();
-        let mut primed = false;
-        diff_board(&mut prev, &mut primed, &[]);
-        // A run that appears already failed completed between frames.
-        let toasts = diff_board(&mut prev, &mut primed, &[run("r-9", "failed", "broke")]);
-        assert_eq!(toasts.len(), 1);
-        assert_eq!(toasts[0].kind, ToastKind::Error);
-        assert_eq!(toasts[0].title, "broke — blocked");
-    }
-
-    #[test]
-    fn untitled_runs_get_the_fallback_title() {
-        let mut row = run("r-1", "completed", "");
-        row.task = None;
-        assert_eq!(
-            board_payload(&row, ToastKind::Done).title,
-            "untitled task — done"
-        );
-    }
-
-    #[test]
-    fn stale_latch_fires_only_on_fresh_to_stale() {
-        let mut latch = StaleLatch::default();
-        assert!(!latch.flip(true), "first observation stale: seed only");
-        assert!(!latch.flip(true));
-        assert!(!latch.flip(false), "recovery never toasts");
-        assert!(latch.flip(true), "fresh→stale fires");
-        assert!(!latch.flip(true), "…once");
-    }
-
-    #[test]
-    fn stale_payload_carries_age() {
-        let scrape = ScrapeMeta {
-            stale: true,
-            age_h: Some(36.2),
-            ..Default::default()
-        };
-        let payload = stale_payload(Some(&scrape));
-        assert_eq!(payload.id, "stale:36.2");
-        assert_eq!(payload.title, "Usage scrape went stale (36.2h old)");
-        assert_eq!(payload.kind, ToastKind::Stale);
-        assert_eq!(stale_payload(None).id, "stale:?");
-    }
-
-    #[test]
-    fn expire_timer_banks_remaining_across_pauses() {
-        let mut timer = ExpireTimer::armed(Duration::from_secs(5));
-        assert!(!timer.paused());
-        assert!(timer.remaining() <= Duration::from_secs(5));
-
-        timer.pause();
-        assert!(timer.paused());
-        let banked = timer.remaining();
-        std::thread::sleep(Duration::from_millis(15));
-        // Paused clocks don't tick.
-        assert_eq!(timer.remaining(), banked);
-
-        timer.resume();
-        assert!(!timer.paused());
-        assert!(timer.remaining() <= banked);
-        // Double-resume is a no-op (web queue.resume guards rec.t).
-        timer.resume();
-        assert!(timer.remaining() <= banked);
-    }
-}
+#[path = "notif_logic_tests.rs"]
+mod tests;

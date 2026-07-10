@@ -87,6 +87,11 @@ pub fn status_label(status: &str) -> String {
         "completed" => "Done".to_string(),
         "failed" => "Failed".to_string(),
         "killed" => "Killed".to_string(),
+        // Phase-2 §5.2 non-terminal map: the run is held on YOUR decision —
+        // an amber word for the amber bucket (word/color agreement, P1).
+        // Distinct from "Running" (nothing executes) and "Failed" (nothing
+        // is lost yet).
+        "awaiting_approval" => "Awaiting approval".to_string(),
         "pending" | "idle" => "Idle".to_string(),
         other => other.to_string(),
     }
@@ -102,6 +107,9 @@ pub fn status_phrase(status: &str, elapsed_s: f64) -> String {
         // P1: red status → red word ("Failed"), never the amber "Blocked".
         "failed" => format!("Failed · {t}"),
         "killed" => "Killed".to_string(),
+        // Phase-2 §5.2: held on the user's decision — amber word, amber
+        // bucket; elapsed keeps ticking honestly (the wait costs time).
+        "awaiting_approval" => format!("Awaiting approval · {t}"),
         "pending" | "idle" => "Queued".to_string(),
         other => other.to_string(),
     }
@@ -415,6 +423,25 @@ mod tests {
         assert_eq!(status_phrase("failed", 10.0), "Failed · 10s");
         assert_eq!(status_phrase("killed", 10.0), "Killed");
         assert_eq!(status_phrase("pending", 0.0), "Queued");
+        // Phase-2 §5.2: the held state reads as itself — never "Working…",
+        // never "Failed".
+        assert_eq!(
+            status_phrase("awaiting_approval", 34.0),
+            "Awaiting approval · 34s"
+        );
+    }
+
+    #[test]
+    fn awaiting_approval_word_agrees_with_the_amber_bucket() {
+        // Phase-2 §5.2 status map (P1 word/color agreement): the awaiting
+        // pill is an AMBER word on the AMBER bucket — the safety hue for
+        // blocked-on-you, distinct from running green and failed red.
+        use crate::agent_accents::{STATUS_BLOCKED, color_for_status};
+        assert_eq!(status_label("awaiting_approval"), "Awaiting approval");
+        assert_eq!(
+            color_for_status("awaiting_approval"),
+            STATUS_BLOCKED.into()
+        );
     }
 
     #[test]

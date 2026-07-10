@@ -75,6 +75,11 @@ pub fn constellation_node_color(agent: &str, status: &str) -> Hsla {
     if matches!(status.as_str(), "error" | "failed" | "dead" | "killed") {
         return STATUS_ERROR.into();
     }
+    // Blocked-on-YOU is a safety state too (Phase-2 §5.2): an awaiting-
+    // approval run holds the amber regardless of vendor — the held glow.
+    if status.starts_with("awaiting") {
+        return STATUS_BLOCKED.into();
+    }
     accent_for_agent(agent)
 }
 
@@ -141,6 +146,11 @@ pub fn color_for_status(status: &str) -> Hsla {
     let rgba = match status.as_str() {
         "running" | "active" | "working" => STATUS_RUNNING,
         "blocked" | "warn" | "warning" | "waiting" | "stalled" => STATUS_BLOCKED,
+        // `awaiting_approval` + the channel `awaiting_*` family (Phase-2
+        // §5.2): blocked-on-YOU — the amber safety bucket, prefix-matched
+        // like the constellation's held-glow grammar. NOT running (nothing
+        // is executing), NOT failed (nothing is lost yet).
+        s if s.starts_with("awaiting") => STATUS_BLOCKED,
         "error" | "failed" | "dead" | "killed" => STATUS_ERROR,
         "done" | "complete" | "completed" | "success" | "merged" => STATUS_DONE,
         _ => STATUS_IDLE,
@@ -186,6 +196,13 @@ mod tests {
             constellation_node_color("agy", "killed"),
             STATUS_ERROR.into()
         );
+        // Phase-2 §5.2: awaiting-approval is the OTHER loud state — amber
+        // held glow beats the vendor hue (blocked-on-you must read at a
+        // glance, MONO ruling: safety states keep hue).
+        assert_eq!(
+            constellation_node_color("codex", "awaiting_approval"),
+            STATUS_BLOCKED.into()
+        );
     }
 
     #[test]
@@ -196,6 +213,11 @@ mod tests {
         assert_eq!(color_for_status("done"), STATUS_DONE.into());
         assert_eq!(color_for_status("idle"), STATUS_IDLE.into());
         assert_eq!(color_for_status("???"), STATUS_IDLE.into());
+        // Phase-2 §5.2 non-terminal map: awaiting_* is AMBER (blocked-on-
+        // you) — never the running green, never the error red, never idle.
+        assert_eq!(color_for_status("awaiting_approval"), STATUS_BLOCKED.into());
+        assert_eq!(color_for_status("AWAITING_APPROVAL"), STATUS_BLOCKED.into());
+        assert_eq!(color_for_status("awaiting_a"), STATUS_BLOCKED.into());
     }
 
     #[test]

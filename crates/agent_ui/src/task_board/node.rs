@@ -27,7 +27,11 @@ use super::graph::{ROOTY, X0};
 /// = open-circle spinner arc rotating on the rim.
 pub(super) fn status_dot(run_id: &str, status: &str) -> AnyElement {
     let color = color_for_status(status);
-    let glowing = matches!(status, "running" | "completed" | "failed" | "killed");
+    // `awaiting_approval` (Phase-2 §5.2) joins the glow set: the held amber
+    // bloom — hollow center (nothing runs, nothing settled), never the
+    // spinner, never a fill.
+    let glowing = matches!(status, "running" | "completed" | "failed" | "killed")
+        || status.starts_with("awaiting");
     let dot = div()
         .relative()
         .flex_none()

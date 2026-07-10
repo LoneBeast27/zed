@@ -13,14 +13,16 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, KeyDownEvent, Pixels, SharedString, Task, Window, canvas, relative,
+    Focusable, KeyDownEvent, Pixels, SharedString, Subscription, Task, Window, canvas, relative,
 };
 use http_client::HttpClient;
 use markdown::Markdown;
 use serde::Deserialize;
 use ui::prelude::*;
 
-use crate::bridge::{BRIDGE_BASE_URL, fetch_json, post_json};
+use crate::bridge::{
+    ApprovalWatch, BRIDGE_BASE_URL, BridgeStore, fetch_json, post_json, try_global_store,
+};
 
 use super::motion::{DECEL, EFFECTS, StateFade};
 use super::style::HAIRLINE_HI;
@@ -52,6 +54,14 @@ const SHEET_MAX_WIDTH: f32 = 560.;
 /// the §8.7(b) gate failure).
 fn slide_offset(panel_width: f32, out: f32) -> f32 {
     -(panel_width * SHEET_FRACTION).min(SHEET_MAX_WIDTH) * 1.02 * out
+}
+
+/// Non-settled statuses the drawer keeps tailing: `running` and the held
+/// `awaiting_*` family (Phase-2 §5.2). An awaiting run resumes on allow or
+/// finishes FAILED on deny/expiry — stopping the poll at the held state
+/// would freeze the drawer on it forever.
+pub(super) fn is_live_status(status: &str) -> bool {
+    status == "running" || status.starts_with("awaiting")
 }
 
 /// `GET /run/<id>` payload. Liberal: everything defaults.
@@ -159,12 +169,28 @@ pub struct RunDrawer {
     pub(super) reassigning: bool,
     /// The steer input row (codex mid-turn control) — present while open.
     pub(super) steer_editor: Option<Entity<editor::Editor>>,
-    /// One-line error from the last reassign/steer/rollback POST — honest
-    /// 404/409s from the bridge land here, never silently swallowed.
+    /// One-line error from the last reassign/steer/rollback/approval POST —
+    /// honest 404/409s from the bridge land here, never silently swallowed.
     pub(super) action_error: Option<SharedString>,
+    /// The shared bridge store, when one exists (bridge-fed drawers only) —
+    /// the approval section reads `pending_approvals` from it (Phase-2
+    /// §5.2). `None` for local/demo drawers and store-less tests.
+    pub(super) store: Option<Entity<BridgeStore>>,
+    /// Held ONLY while the run sits in `awaiting_*` — keeps the
+    /// `/approvals` poll fallback alive so the pending row (and this
+    /// drawer's Allow/Deny) stays fresh without SSE (§5.2 watch law).
+    approval_watch: Option<ApprovalWatch>,
+    /// The approval id whose allow/deny POST is in flight (or landed,
+    /// awaiting server truth) — collapses the buttons; self-cleans when the
+    /// pending row it referred to leaves the set.
+    pub(super) deciding_approval: Option<String>,
+    /// The optional deny-note input row (the steer-editor idiom) — the note
+    /// lands verbatim in the run's failure text bridge-side.
+    pub(super) deny_editor: Option<Entity<editor::Editor>>,
     _poll: Task<()>,
     _abort: Option<Task<()>>,
-    _action: Option<Task<()>>,
+    pub(super) _action: Option<Task<()>>,
+    _store_subscription: Option<Subscription>,
 }
 
 impl RunDrawer {
@@ -194,7 +220,10 @@ impl RunDrawer {
                 let running = match fetched {
                     Ok(detail) => {
                         failures = 0;
-                        let running = detail.status == "running";
+                        // Live = running OR held awaiting_* (§5.2): the poll
+                        // must outlast the approval wait to land the resume/
+                        // FAILED transition.
+                        let running = is_live_status(&detail.status);
                         if this
                             .update(cx, |this, cx| this.set_detail(detail, cx))
                             .is_err()
@@ -227,7 +256,7 @@ impl RunDrawer {
                             Some(
                                 this.detail
                                     .as_ref()
-                                    .is_none_or(|detail| detail.status == "running"),
+                                    .is_none_or(|detail| is_live_status(&detail.status)),
                             )
                         });
                         match state {
@@ -267,6 +296,14 @@ impl RunDrawer {
     }
 
     fn empty(run_id: SharedString, poll: Task<()>, local: bool, cx: &mut Context<Self>) -> Self {
+        // Bridge-fed drawers pick up the shared store IF a panel already
+        // built it (always true in the app — the drawer opens FROM a panel;
+        // read-only accessor, never boots the connection loop). Local/demo
+        // drawers stay store-less: no bridge, no approvals.
+        let store = if local { None } else { try_global_store(cx) };
+        let _store_subscription = store
+            .as_ref()
+            .map(|store| cx.observe(store, |_, _, cx| cx.notify()));
         Self {
             run_id,
             detail: None,
@@ -290,9 +327,14 @@ impl RunDrawer {
             reassigning: false,
             steer_editor: None,
             action_error: None,
+            store,
+            approval_watch: None,
+            deciding_approval: None,
+            deny_editor: None,
             _poll: poll,
             _abort: None,
             _action: None,
+            _store_subscription,
         }
     }
 
@@ -306,6 +348,9 @@ impl RunDrawer {
         self.result_md = None;
         self.log_rows.clear();
         self.aborting = false;
+        self.approval_watch = None;
+        self.deciding_approval = None;
+        self.deny_editor = None;
         self._poll = Self::spawn_poll(new_run_id, cx);
         cx.notify();
     }
@@ -452,7 +497,14 @@ impl RunDrawer {
         let Some(detail) = self.detail.as_ref() else {
             return;
         };
-        if self.local || self.aborting || detail.status != "running" || detail.run_id.is_empty() {
+        // Live includes `awaiting_*` (§5.2): killing an awaiting run is
+        // sanctioned — the bridge's abort route resolves the pending
+        // approval as deny("killed") so the gate wakes instantly.
+        if self.local
+            || self.aborting
+            || !is_live_status(&detail.status)
+            || detail.run_id.is_empty()
+        {
             return;
         }
         self.aborting = true;
@@ -479,6 +531,22 @@ impl RunDrawer {
     }
 
     fn set_detail(&mut self, detail: RunDetail, cx: &mut Context<Self>) {
+        // Approval-hold lifecycle (§5.2): the `/approvals` poll watch lives
+        // exactly as long as the run sits in `awaiting_*`; when the run
+        // moves on, the watch, the deny-note row, and the in-flight marker
+        // all release (the pending row they referred to is gone).
+        if detail.status.starts_with("awaiting") {
+            if self.approval_watch.is_none()
+                && let Some(store) = self.store.clone()
+            {
+                self.approval_watch =
+                    Some(store.update(cx, |store, cx| store.watch_approvals(cx)));
+            }
+        } else if self.approval_watch.is_some() {
+            self.approval_watch = None;
+            self.deciding_approval = None;
+            self.deny_editor = None;
+        }
         let task_changed =
             self.detail.as_ref().map(|d| d.task.clone()) != Some(detail.task.clone());
         let text_changed =
@@ -593,6 +661,7 @@ impl Render for RunDrawer {
                 .size_full()
                 .min_h_0()
                 .child(self.render_head(cx))
+                .children(self.render_approval_row(cx))
                 .children(self.render_action_rows(cx))
                 .children(self.render_worked(cx))
                 .child(self.render_tabs(cx))
@@ -651,6 +720,7 @@ impl Render for RunDrawer {
             .border_color(HAIRLINE_HI)
             .occlude()
             .child(self.render_head(cx))
+            .children(self.render_approval_row(cx))
             .children(self.render_action_rows(cx))
             .children(self.render_worked(cx))
             .child(self.render_tabs(cx))
@@ -701,3 +771,7 @@ impl EventEmitter<DismissDrawer> for RunDrawer {}
 #[cfg(test)]
 #[path = "run_detail_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "run_detail_approval_tests.rs"]
+mod approval_tests;

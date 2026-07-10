@@ -129,8 +129,8 @@ fn inbox_row(
     // - failed/killed → a RED stilled hard ring (an unfilled ring in the
     //   error color: the failure signature, distinct from the amber bell,
     //   which means blocked-on-YOU, and from the filled blue done-dot),
-    // - a genuinely blocked-on-you run keeps the amber bell (no inbox status
-    //   rolls up to it today, but the branch stays honest for when one does).
+    // - blocked-on-YOU keeps the amber bell — `awaiting_approval` (Phase-2
+    //   §5.2, the spawn gate waiting on the user) is exactly that state.
     let badge: Option<AnyElement> = match status {
         "failed" | "killed" => Some(
             // Stilled hard ring: a 2px red ring, hollow centre — the run is
@@ -142,7 +142,7 @@ fn inbox_row(
                 .border_color(STATUS_ERROR)
                 .into_any_element(),
         ),
-        "blocked" => Some(
+        "blocked" | "awaiting_approval" => Some(
             Icon::new(IconName::Bell)
                 // 16px (board.css:66 `.badge.bell .ms`) = IconSize::Medium.
                 .size(IconSize::Medium)

@@ -448,6 +448,16 @@ struct GlobalBridgeStore(Entity<BridgeStore>);
 
 impl gpui::Global for GlobalBridgeStore {}
 
+/// The shared store IF a consumer already built it — a read-only accessor
+/// that never boots the connection loop. Late-bound consumers (the run
+/// drawer's approval section) use it: by the time a drawer opens, a Z1
+/// panel has long since built the store; in CPU tests no global means no
+/// background loop to hang `run_until_parked`.
+pub fn try_global_store(cx: &App) -> Option<Entity<BridgeStore>> {
+    cx.try_global::<GlobalBridgeStore>()
+        .map(|global| global.0.clone())
+}
+
 /// The app-wide shared store. Created lazily on first access — the bridge
 /// connection task starts non-blocking when the first consumer (a Z1+ panel)
 /// builds, per the Lightness Mandate's lazy-startup rule.

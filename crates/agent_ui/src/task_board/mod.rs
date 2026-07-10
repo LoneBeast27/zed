@@ -9,6 +9,8 @@
 //! - [`node`] — graph node visuals (status dot, spinner, root ring, label).
 //! - [`paint_cache`] — cached static paint geometry (settled edges, rings).
 //! - [`run_detail`] — the run drawer entity (fetch/poll, slide-over).
+//! - [`run_detail_approval`] — the drawer's pending-approval section
+//!   (Phase-2 §5.2: request meta + inline Allow/Deny + deny note).
 //! - [`run_detail_head`] — the drawer chrome (head, close, worked, tabs).
 //! - [`run_detail_body`] — the drawer's Summary/Result/Logs tab bodies.
 //! - [`motion`] — exact CSS cubic-bezier motion tokens (§4.9).
@@ -22,6 +24,7 @@ mod paint_cache;
 pub mod panel;
 mod reveal_prune;
 pub mod run_detail;
+mod run_detail_approval;
 mod run_detail_body;
 mod run_detail_head;
 pub mod style;

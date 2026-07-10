@@ -43,4 +43,6 @@ pub use protocol::{
     PlanSnapshot, PlanSubtask, PoolRow, ProjectRow, RunRow, RunTokens, ScrapeMeta,
     TranscriptMessage, TranscriptRun, TranscriptSnapshot, UnlinkedRun, UsageMeta, VendorLiveness,
 };
-pub use store::{BridgeStore, PlanWatch, Transport, TranscriptWatch, global_store, init};
+pub use store::{
+    BridgeStore, PlanWatch, Transport, TranscriptWatch, global_store, init, try_global_store,
+};

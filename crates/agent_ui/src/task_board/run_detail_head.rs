@@ -334,12 +334,14 @@ impl RunDrawer {
         rows
     }
 
-    /// The abort button: a 30×30 Stop-glyph control shown only while the run
-    /// is `running`. Click POSTs the abort endpoint; once posted it reads
-    /// disabled (placeholder tint) until the tail-poll lands the killed status.
+    /// The abort button: a 30×30 Stop-glyph control shown while the run is
+    /// LIVE — `running` or held `awaiting_*` (kill-while-awaiting is
+    /// sanctioned: the bridge abort resolves the pending approval as
+    /// deny("killed"), §5.2). Click POSTs the abort endpoint; once posted it
+    /// reads disabled (placeholder tint) until the tail-poll lands killed.
     fn render_abort(&self, status: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Local (demo-fed) drawers have no bridge run to kill.
-        if self.local || status != "running" {
+        if self.local || !super::run_detail::is_live_status(status) {
             return None;
         }
         let colors = cx.theme().colors();
