@@ -46,6 +46,7 @@ mod model_roles;
 mod model_selector;
 pub mod orchestrator_panel;
 mod model_selector_popover;
+pub mod permissions_panel;
 mod profile_selector;
 mod resource_banner;
 pub mod settings_status_panel;
@@ -643,6 +644,7 @@ pub fn init(
         // corner UsageIsland is retired alongside the corner cluster.
         let weak_workspace_islands = cx.weak_entity();
         let notif_stack = cx.new(|cx| islands::NotifStack::new(weak_workspace_islands, cx));
+        let permissions_workspace = cx.weak_entity();
         let surfaces = mode_item::ModeSurfaces {
             artifact: cx.new(|cx| artifact_surface::ArtifactSurface::new(cx)),
             briefing: cx.new(|cx| briefing_panel::BriefingPanel::new(cx)),
@@ -659,6 +661,8 @@ pub fn init(
             adversary: cx.new(|cx| adversary_panel::AdversaryPanel::new(window, cx)),
             usage: cx.new(|cx| usage_panel::UsagePanel::new(cx)),
             settings_status: cx.new(|cx| settings_status_panel::SettingsStatusPanel::new(cx)),
+            permissions: cx
+                .new(|cx| permissions_panel::PermissionsPanel::new(permissions_workspace, cx)),
         };
         bar.update(cx, |bar, _| bar.set_surfaces(surfaces.clone()));
 
@@ -714,6 +718,15 @@ pub fn init(
             let surface = surfaces.usage.clone();
             move |workspace: &mut Workspace,
                   _: &usage_panel::ToggleFocus,
+                  window: &mut Window,
+                  cx: &mut Context<Workspace>| {
+                mode_item::open_center_item(&surface, None, workspace, window, cx);
+            }
+        });
+        workspace.register_action({
+            let surface = surfaces.permissions.clone();
+            move |workspace: &mut Workspace,
+                  _: &permissions_panel::ToggleFocus,
                   window: &mut Window,
                   cx: &mut Context<Workspace>| {
                 mode_item::open_center_item(&surface, None, workspace, window, cx);

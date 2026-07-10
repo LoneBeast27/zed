@@ -153,6 +153,8 @@ fn install_surfaces(
             adversary: cx.new(|cx| AdversaryPanel::new(window, cx)),
             usage: cx.new(|cx| UsagePanel::new(cx)),
             settings_status: cx.new(|cx| SettingsStatusPanel::new(cx)),
+            permissions: cx
+                .new(|cx| crate::permissions_panel::PermissionsPanel::new(weak.clone(), cx)),
         };
         let bar = cx.new(|cx| {
             ActivityBar::new(

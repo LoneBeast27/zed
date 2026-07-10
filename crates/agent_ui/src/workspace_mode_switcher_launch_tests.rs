@@ -44,6 +44,8 @@ fn install_surfaces_from_modes_dir(
             adversary: cx.new(|cx| AdversaryPanel::new(window, cx)),
             usage: cx.new(|cx| UsagePanel::new(cx)),
             settings_status: cx.new(|cx| SettingsStatusPanel::new(cx)),
+            permissions: cx
+                .new(|cx| crate::permissions_panel::PermissionsPanel::new(weak.clone(), cx)),
         };
         let no_workspace: Option<WeakEntity<Workspace>> = None;
         let bar = cx.new(|cx| ActivityBar::new(modes_dir, default_mode, no_workspace, cx));

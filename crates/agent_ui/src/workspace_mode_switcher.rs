@@ -334,6 +334,7 @@ pub(crate) fn resolve_center_surface(raw: &str) -> Option<CenterSurface> {
         "adversary" | "adversarypanel" => Some(CenterSurface::Adversary),
         "usage" | "usagepanel" => Some(CenterSurface::Usage),
         "settings" | "settingspanel" | "settingsstatuspanel" => Some(CenterSurface::SettingsStatus),
+        "permissions" | "permissionspanel" => Some(CenterSurface::Permissions),
         _ => None,
     }
 }

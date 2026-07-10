@@ -28,6 +28,7 @@ use crate::adversary_panel::AdversaryPanel;
 use crate::artifact_surface::ArtifactSurface;
 use crate::briefing_panel::BriefingPanel;
 use crate::orchestrator_panel::OrchestratorPanel;
+use crate::permissions_panel::PermissionsPanel;
 use crate::settings_status_panel::SettingsStatusPanel;
 use crate::symphony_panel::SymphonyPanel;
 use crate::task_board::TaskBoardPanel;
@@ -66,6 +67,7 @@ pub struct ModeSurfaces {
     pub adversary: Entity<AdversaryPanel>,
     pub usage: Entity<UsagePanel>,
     pub settings_status: Entity<SettingsStatusPanel>,
+    pub permissions: Entity<PermissionsPanel>,
 }
 
 /// Which center surface a mode layout names — the switcher resolves the
@@ -81,6 +83,7 @@ pub enum CenterSurface {
     Adversary,
     Usage,
     SettingsStatus,
+    Permissions,
 }
 
 /// The generic center-pane host: owns a clone of the surface entity and
@@ -224,6 +227,7 @@ fn is_mode_item(item: &dyn ItemHandle) -> bool {
         || item.downcast::<ModeItem<AdversaryPanel>>().is_some()
         || item.downcast::<ModeItem<UsagePanel>>().is_some()
         || item.downcast::<ModeItem<SettingsStatusPanel>>().is_some()
+        || item.downcast::<ModeItem<PermissionsPanel>>().is_some()
 }
 
 /// Close every mode-owned center tab except `keep` (the just-activated
@@ -365,6 +369,9 @@ pub fn open_center_surface(
         CenterSurface::Usage => open_center_item(&surfaces.usage, tab, workspace, window, cx),
         CenterSurface::SettingsStatus => {
             open_center_item(&surfaces.settings_status, tab, workspace, window, cx)
+        }
+        CenterSurface::Permissions => {
+            open_center_item(&surfaces.permissions, tab, workspace, window, cx)
         }
     }
     true
