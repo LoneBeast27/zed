@@ -73,6 +73,40 @@ pub struct ChannelRow {
     /// Which endpoint sent the last batch (particle direction).
     #[serde(default)]
     pub last_from: Option<String>,
+    /// Cumulative relayed-envelope tokens (`orchestrator/channels.py` row).
+    #[serde(default)]
+    pub tokens_spent: u64,
+    #[serde(default)]
+    pub token_budget: u64,
+    /// Why a terminal channel closed (empty while open).
+    #[serde(default)]
+    pub close_reason: String,
+}
+
+/// One Tier-0 channel receipt from `GET /channels` (`events` array) — the
+/// open/batch/close feed (`orchestrator/channels.py` `_receipt`, ≤120 tok by
+/// construction). Newest LAST on the wire.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct ChannelEventRow {
+    /// Unix seconds (float on the wire).
+    #[serde(default)]
+    pub ts: f64,
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default)]
+    pub conv: String,
+    /// `open` / `batch` / `close`.
+    #[serde(default)]
+    pub kind: String,
+    /// Sender of a batch receipt (empty for open/close).
+    #[serde(default)]
+    pub frm: String,
+    #[serde(default)]
+    pub k: u64,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub note: String,
 }
 
 /// One overlap venn row from `GET /channels` (`overlap` array, T3) — the

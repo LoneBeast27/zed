@@ -13,19 +13,20 @@ use std::time::Instant;
 
 use gpui::{
     Action, AnimationExt as _, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, MouseButton, Pixels, Point, SharedString, Subscription, Task, Window,
-    actions,
+    Focusable, MouseButton, Pixels, Point, SharedString, Subscription, Task, Window, actions,
 };
 use ui::prelude::*;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
-use crate::bridge::{self, BridgeStore, OverlapRow};
+use crate::bridge::{self, BridgeStore, ChannelEventRow, OverlapRow};
 use crate::task_board::run_detail;
 use crate::task_board::style::empty_state;
 
+use super::channels_section::channels_section;
 use super::demo;
 use super::draw::conv_block;
 use super::feed;
+use super::header::render_header;
 use super::sim::Sim;
 
 actions!(
@@ -47,7 +48,7 @@ struct DragState {
 pub struct ConstellationPanel {
     focus_handle: FocusHandle,
     store: Entity<BridgeStore>,
-    sim: Sim,
+    pub(super) sim: Sim,
     /// Staged-scenario mode (`ZED_CONSTELLATION_DEMO=1`) — no bridge I/O.
     demo: bool,
     demo_start: Instant,
@@ -72,6 +73,15 @@ pub struct ConstellationPanel {
     /// 300ms instead of snapping.
     was_populated: bool,
     populated_fade: crate::task_board::motion::StateFade,
+    /// Channels observe surface (T2): shown in the below-graph detail area
+    /// while no run drawer is open; the header toggle hides/shows it.
+    pub(super) channels_shown: bool,
+    /// The Tier-0 receipt feed off the supplemental `/channels` poll
+    /// (newest LAST, wire order) — display data for the channels section.
+    pub(super) channel_events: Vec<ChannelEventRow>,
+    /// The latest overlap venn rows, kept for DISPLAY (the sim holds its own
+    /// copy for arrange weights).
+    pub(super) overlap_rows: Vec<OverlapRow>,
     position: DockPosition,
     scroll: gpui::ScrollHandle,
     _feed: Option<Task<()>>,
@@ -102,6 +112,9 @@ impl ConstellationPanel {
             last_render_at: Instant::now(),
             was_populated: false,
             populated_fade: crate::task_board::motion::StateFade::default(),
+            channels_shown: true,
+            channel_events: Vec::new(),
+            overlap_rows: Vec::new(),
             position: DockPosition::Right,
             scroll: gpui::ScrollHandle::new(),
             _feed: feed,
@@ -117,11 +130,6 @@ impl ConstellationPanel {
 
     pub(super) fn store(&self) -> Entity<BridgeStore> {
         self.store.clone()
-    }
-
-    /// Latest overlap venn rows from the feed (arrange weights).
-    pub(super) fn set_overlap(&mut self, rows: Vec<OverlapRow>) {
-        self.sim.set_overlap(rows);
     }
 
     // ── interaction plumbing (draw.rs calls these through the weak entity) ──
@@ -235,96 +243,10 @@ impl ConstellationPanel {
         });
     }
 
-    fn arrange_clicked(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn arrange_clicked(&mut self, cx: &mut Context<Self>) {
         let now = self.sim.clock_ms();
         self.sim.auto_arrange(now);
         cx.notify();
-    }
-
-    /// The shared `.panel-head` twin: title · live stats · provider legend ·
-    /// arrange button. The stats + legend land with the first node (an empty
-    /// panel keeps the plain subtitle).
-    fn render_header(&self, has_nodes: bool, cx: &mut Context<Self>) -> Div {
-        let colors = cx.theme().colors();
-        // Live density stats (backlog item: "N nodes · M channels · ctx") —
-        // read off the already-folded sim, no extra derivation.
-        let node_count: usize = self.sim.convs.iter().map(|conv| conv.nodes.len()).sum();
-        let channel_count = self.sim.channels.iter_sorted().len();
-        let ctx_tokens: f64 = self
-            .sim
-            .convs
-            .iter()
-            .filter_map(|conv| conv.root_mass.as_ref())
-            .map(|mass| mass.tokens)
-            .sum();
-        let stats = if has_nodes {
-            let mut s = format!("{node_count} node{}", if node_count == 1 { "" } else { "s" });
-            if channel_count > 0 {
-                s.push_str(&format!(" · {channel_count} channel{}", if channel_count == 1 { "" } else { "s" }));
-            }
-            if ctx_tokens > 0. {
-                s.push_str(&format!(" · {:.1}K ctx", ctx_tokens / 1000.));
-            }
-            SharedString::from(s)
-        } else {
-            "agent relationships and message flow".into()
-        };
-        // The 3-provider legend (user ruling 2026-07-08: hue = WHO) — the
-        // color coding must never need prior knowledge to read.
-        let legend_dot = |accent: gpui::Rgba, label: &'static str| {
-            h_flex()
-                .items_center()
-                .gap(px(4.))
-                .child(div().flex_none().size(px(6.)).rounded_full().bg(accent))
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(colors.text_placeholder)
-                        .child(label),
-                )
-        };
-        h_flex()
-            .flex_none()
-            .items_baseline()
-            .gap(px(12.))
-            .px(px(28.))
-            .pt(px(18.))
-            .pb(px(14.))
-            .border_b_1()
-            .border_color(colors.border)
-            .child(
-                div()
-                    .text_size(px(18.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors.text)
-                    .child("Constellation"),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(colors.text_placeholder)
-                    .child(stats),
-            )
-            .child(div().flex_1())
-            .when(has_nodes, |header| {
-                header
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .child(legend_dot(crate::agent_accents::ACCENT_CLAUDE, "claude"))
-                            .child(legend_dot(crate::agent_accents::ACCENT_CODEX, "codex"))
-                            .child(legend_dot(crate::agent_accents::ACCENT_AGY, "google")),
-                    )
-                    .child(
-                        ui::IconButton::new("constellation-arrange", IconName::GitGraph)
-                            .icon_size(ui::IconSize::Small)
-                            .tooltip(ui::Tooltip::text(
-                                "Auto-arrange the constellation (drags re-pin)",
-                            ))
-                            .on_click(cx.listener(|this, _, _, cx| this.arrange_clicked(cx))),
-                    )
-            })
     }
 }
 
@@ -336,7 +258,13 @@ impl Render for ConstellationPanel {
         // Gather the frame's data: staged scenario or the shared store.
         let (board, convs, channels, connected) = if self.demo {
             let t = self.demo_start.elapsed().as_secs_f64();
-            self.sim.set_overlap(demo::demo_overlap());
+            let overlap = demo::demo_overlap();
+            if self.overlap_rows != overlap {
+                // Mid-render: assign only — a notify here would spin the
+                // frame loop (we are already producing this frame).
+                self.overlap_rows = overlap.clone();
+            }
+            self.sim.set_overlap(overlap);
             (
                 demo::demo_board(t),
                 demo::demo_convs(t),
@@ -456,6 +384,20 @@ impl Render for ConstellationPanel {
             window.request_animation_frame();
         }
 
+        // Channels observe surface (T2): rides the same below-graph detail
+        // area while no run drawer holds it; the header toggle hides it.
+        // Built OUTSIDE the element chain so the section is a pure read of
+        // this frame's already-gathered snapshot (§11: no entity access).
+        let channels_detail = (self.drawer.is_none() && self.channels_shown).then(|| {
+            channels_section(
+                &channels,
+                &self.channel_events,
+                &self.overlap_rows,
+                connected || self.demo,
+                cx,
+            )
+        });
+
         let colors = cx.theme().colors();
         v_flex()
             .key_context("ConstellationPanel")
@@ -473,11 +415,12 @@ impl Render for ConstellationPanel {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.drag_ended(cx)),
             )
-            .child(self.render_header(has_nodes, cx))
+            .child(render_header(self, has_nodes, cx))
             .child(div().relative().flex_1().min_h_0().child(body))
             // Unified surface (PARITY_SPEC amendment 2026-07-04): the agent
             // detail is a section BELOW the graph on the same background —
             // no overlay, no scrim, no seam. Graph keeps the larger share.
+            .children(channels_detail)
             .children(self.drawer.clone().map(|drawer| {
                 div()
                     .id("constellation-detail")

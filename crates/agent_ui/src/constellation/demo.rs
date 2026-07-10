@@ -256,6 +256,9 @@ pub fn demo_channels(t: f64) -> Vec<ChannelRow> {
         } else {
             "demo-tester".into()
         }),
+        // Budget/close fields ride the wire row (channels section display);
+        // the staged scenario leaves them at rest.
+        ..Default::default()
     }]
 }
 
