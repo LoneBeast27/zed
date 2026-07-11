@@ -34,8 +34,19 @@ actions!(
         /// Toggles focus on the orchestrator chat panel.
         ToggleFocus,
         /// Sends the composer's message (Enter via the
-        /// `OrchestratorComposer > Editor` keymap binding).
+        /// `OrchestratorComposer > Editor` keymap binding). While the
+        /// orchestrator is BUSY with text in the composer this becomes a
+        /// STEER (interrupt+redirect the running turn) — the busy-turn law is
+        /// resolved in [`super::steer::enter_action`], not the keymap.
         Send,
+        /// Queues the composer's message as the NEXT turn (Tab while busy —
+        /// temporal order kept, B-T6). Menu-closed Tab only; the `/` typeahead
+        /// binding still owns Tab while its menu is open.
+        Queue,
+        /// Hard-stops the running turn (Esc while busy — POST /abort, B-T4:
+        /// completed edits stay on disk). Menu-closed Esc only; the `/`
+        /// typeahead binding still owns Esc (dismiss) while its menu is open.
+        HardStop,
         /// Move the `/` typeahead selection up (Up arrow while the menu is
         /// open; ignored otherwise so the caret moves normally).
         TypeaheadUp,
@@ -88,6 +99,14 @@ pub struct OrchestratorPanel {
     pub(super) typeahead: TypeaheadMenu,
     /// Orchestrator busy flag from the latest snapshot.
     pub(super) busy: bool,
+    /// The transcript view index whose per-turn rewind axis menu is open
+    /// (§C — dual-axis choice: code / conversation / both). `None` = closed;
+    /// one menu at a time.
+    pub(super) rewind_menu_ix: Option<usize>,
+    /// The last landed rewind's outcome — the redo handle (C-T3 "undo this
+    /// later" made literal) + the verbatim untracked warning (C-T4). Shown as
+    /// affordance rows above the composer until the next rewind/redo clears it.
+    pub(super) rewind_outcome: Option<super::rewind::RewindOutcome>,
     /// The 1s rolling-tick task — `Some` only while busy (store ticker
     /// pattern; no idle timers). Repaints so a live trailing reply's
     /// worked-for label (`worked_s + seen_at.elapsed()`) rolls.
@@ -144,6 +163,8 @@ impl OrchestratorPanel {
             registry,
             typeahead: TypeaheadMenu::new(),
             busy: false,
+            rewind_menu_ix: None,
+            rewind_outcome: None,
             busy_ticker: None,
             last_snapshot: None,
             fades: StateFades::new(),
@@ -407,7 +428,8 @@ impl OrchestratorPanel {
                 let content: AnyElement = if let Some(view) = this.transcript.message(ix) {
                     let live = live_ix == Some(ix);
                     let verdict = this.feedback.get(&view.ts.to_bits()).copied();
-                    render_message(view, ix, live, verdict, &this.fades, window, cx)
+                    let rewind_open = this.rewind_menu_ix == Some(ix);
+                    render_message(view, ix, live, verdict, rewind_open, &this.fades, window, cx)
                 } else if ix == message_count {
                     render_shimmer(cx)
                 } else {

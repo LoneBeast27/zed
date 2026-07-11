@@ -271,6 +271,34 @@ impl OrchestratorPanel {
         .detach();
     }
 
+    /// The send⇄stop island click (send_circle.rs). While the orchestrator is
+    /// BUSY the circle has morphed to the Stop square — clicking it is the
+    /// HARD-STOP (POST /conv/<id>/abort, B-T4: keeps completed edits on disk).
+    /// Idle it sends. This is the button half of the Esc=hard-stop keybinding;
+    /// keeping the two paths on the same `abort_turn` idiom is deliberate.
+    pub(super) fn send_circle_click(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        if self.busy {
+            self.abort_turn(cx);
+            return;
+        }
+        self.send_message(window, cx);
+    }
+
+    /// Tab while busy with composer text: QUEUE the message as the NEXT turn
+    /// (B-T6 — temporal order kept). Routes through the same honest steer POST
+    /// as Enter with `queue_intent = true`, so the bridge's `landed` response
+    /// still governs the surfaced note (live vs queued). Idle Tab / empty
+    /// composer is a no-op (the menu-open Tab is owned by the typeahead
+    /// binding and never reaches here).
+    pub(super) fn queue_message(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        let has_text = !self.composer.editor.read(cx).is_empty(cx);
+        if let super::steer::ComposerAction::Queue =
+            super::steer::tab_action(self.busy, has_text)
+        {
+            self.send_steer(true, window, cx);
+        }
+    }
+
     pub(super) fn send_message(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
         // Enter while the `/` typeahead is open ACCEPTS the highlighted command
         // (splices `/name ` into the editor) instead of sending — the menu owns
@@ -279,16 +307,29 @@ impl OrchestratorPanel {
         if self.typeahead_accept(window, cx) {
             return;
         }
-        // A fresh submission clears the previous /wave refusal note.
-        self.wave_note = None;
+        // Busy-turn keybinding scheme (Q14b + sentiment §B): Enter while a
+        // turn is BUSY is no longer a blanket abort. It STEERS the running
+        // turn when the composer has text (the load-bearing in-context
+        // redirect, B-T1/B-T3) and is a no-op on an empty composer (never a
+        // phantom action). The HARD-STOP moved to Esc / the Stop button (both
+        // → [`Self::abort_turn`], B-T4). The pure mapping lives in
+        // [`super::steer::enter_action`] so it is unit-proven.
         if self.busy {
-            // The stop circle (dogfood 2026-07-08): a real turn abort now —
-            // POST /conv/<id>/abort kills the in-flight turn's child runs
-            // (vendor-unified) and stops the loop at its next seam; the busy
-            // transcript poll then lands the "(turn aborted by user)" reply.
-            self.abort_turn(cx);
+            let has_text = !self.composer.editor.read(cx).is_empty(cx);
+            match super::steer::enter_action(self.busy, has_text) {
+                super::steer::ComposerAction::Steer => {
+                    // A fresh steer clears the previous note (send_steer sets a
+                    // fresh honest live-vs-queued note when the POST lands).
+                    self.send_steer(false, window, cx);
+                }
+                // Busy + empty composer: nothing to steer — do NOT abort (that
+                // is Esc's job now), do NOT send. A silent, honest no-op.
+                _ => {}
+            }
             return;
         }
+        // A fresh submission clears the previous /wave refusal note.
+        self.wave_note = None;
         let text = self.composer.editor.read(cx).text(cx);
         let text = text.trim().to_string();
         if text.is_empty() {
@@ -422,6 +463,20 @@ impl OrchestratorPanel {
         let deck = v_flex()
             .key_context(key_context)
             .on_action(cx.listener(|this, _: &Send, window, cx| this.send_message(window, cx)))
+            // Tab (menu closed) = QUEUE while busy with text (B-T6); a no-op
+            // otherwise. The menu-open Tab is TypeaheadAccept (that binding
+            // wins under the `menu_open` context, so this never fires there).
+            .on_action(cx.listener(|this, _: &super::panel::Queue, window, cx| {
+                this.queue_message(window, cx)
+            }))
+            // Esc (menu closed) = HARD-STOP while busy (B-T4 — keeps completed
+            // edits on disk). Idle it's a no-op here; the menu-open Esc is
+            // TypeaheadDismiss (that binding wins under `menu_open`).
+            .on_action(cx.listener(|this, _: &super::panel::HardStop, _, cx| {
+                if this.busy {
+                    this.abort_turn(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &super::panel::TypeaheadUp, _, cx| {
                 this.typeahead_move(-1, cx);
             }))
@@ -500,6 +555,10 @@ impl OrchestratorPanel {
                             ))
                             .child(note)
                     }))
+                    // §C rewind outcome: the non-destructive REDO affordance
+                    // (C-T3 — "undo this later" made literal) + the verbatim
+                    // untracked-change warning (C-T4), in flow above the deck.
+                    .children(self.render_rewind_outcome(cx))
                     // Phase-2 §5.2 layer 3: the slim approval banner sits in
                     // flow DIRECTLY above the deck while the active
                     // conversation has pending approvals — attention link

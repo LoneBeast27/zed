@@ -82,8 +82,10 @@ impl SendCircle {
     }
 
     /// The element. `interactive` mirrors the web's pointer-events rule
-    /// (text present or busy); a click sends — while busy it's the banked
-    /// stop no-op inside `send_message`.
+    /// (text present or busy); a click routes through
+    /// [`OrchestratorPanel::send_circle_click`] — while busy the circle IS the
+    /// Stop button (morphed to the stop square) and hard-stops (POST /abort,
+    /// B-T4); idle it sends.
     pub fn render(
         &self,
         interactive: bool,
@@ -166,7 +168,7 @@ impl SendCircle {
         if interactive {
             circle
                 .cursor_pointer()
-                .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
+                .on_click(cx.listener(|this, _, window, cx| this.send_circle_click(window, cx)))
                 .into_any_element()
         } else {
             // `pointer-events: none` until text is present.

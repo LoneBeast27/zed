@@ -89,6 +89,13 @@ impl TranscriptView {
         self.views.get(ix)
     }
 
+    /// The per-view `user` flags in list order — the substrate for
+    /// [`super::rewind::turn_for_index`] (a rewind's `turn_n` is the user
+    /// message's ordinal). Cheap: one bool per on-screen message (≤60).
+    pub fn user_flags(&self) -> Vec<bool> {
+        self.views.iter().map(|view| view.user).collect()
+    }
+
     pub fn toggle_worked(&mut self, ix: usize) {
         if let Some(view) = self.views.get_mut(ix) {
             view.worked_open = !view.worked_open;

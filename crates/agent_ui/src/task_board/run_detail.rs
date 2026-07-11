@@ -21,7 +21,8 @@ use serde::Deserialize;
 use ui::prelude::*;
 
 use crate::bridge::{
-    ApprovalWatch, BRIDGE_BASE_URL, BridgeStore, fetch_json, post_json, try_global_store,
+    ApprovalWatch, BRIDGE_BASE_URL, BridgeStore, error_message, fetch_json, post_json,
+    post_json_status, try_global_store,
 };
 
 use super::motion::{DECEL, EFFECTS, StateFade};
@@ -172,6 +173,11 @@ pub struct RunDrawer {
     /// One-line error from the last reassign/steer/rollback/approval POST —
     /// honest 404/409s from the bridge land here, never silently swallowed.
     pub(super) action_error: Option<SharedString>,
+    /// The redo handle from the last code-rewind (§C, C-T3) — `Some` while a
+    /// non-destructive REDO is available. The head surfaces a Redo control
+    /// exactly while this is armed; a rewind that returned no redo point leaves
+    /// it `None` (no dead button).
+    pub(super) code_redo_sha: Option<String>,
     /// The shared bridge store, when one exists (bridge-fed drawers only) —
     /// the approval section reads `pending_approvals` from it (Phase-2
     /// §5.2). `None` for local/demo drawers and store-less tests.
@@ -327,6 +333,7 @@ impl RunDrawer {
             reassigning: false,
             steer_editor: None,
             action_error: None,
+            code_redo_sha: None,
             store,
             approval_watch: None,
             deciding_approval: None,
@@ -351,6 +358,7 @@ impl RunDrawer {
         self.approval_watch = None;
         self.deciding_approval = None;
         self.deny_editor = None;
+        self.code_redo_sha = None;
         self._poll = Self::spawn_poll(new_run_id, cx);
         cx.notify();
     }
@@ -475,6 +483,135 @@ impl RunDrawer {
             if let Err(error) = result {
                 this.update(cx, |this, cx| {
                     this.action_error = Some(format!("rollback failed: {error}").into());
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
+    }
+
+    /// CODE-rewind from the drawer (§C, code axis): POST
+    /// `/conv/<conv>/rewind {turn_n, axis:"code"}` — revert the CODE to before
+    /// the most recent prompt while keeping the conversation. `conv`/`turn_n`
+    /// come from the shared store's transcript (the run's own conversation);
+    /// turn_n = the ordinal of the last user prompt (the "undo what just
+    /// happened" case, C-T2's last-prompt target). NON-DESTRUCTIVE: the
+    /// returned `redo_sha` arms the head's Redo control (C-T3), and any
+    /// `untracked_warning` lands VERBATIM on the action line (C-T4). A 409
+    /// (sibling active) / 404 lands the bridge error verbatim.
+    pub(super) fn code_rewind(&mut self, cx: &mut Context<Self>) {
+        if self.local {
+            return;
+        }
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let (conv, turn_n) = {
+            let store = store.read(cx);
+            let conv = store
+                .transcript
+                .as_ref()
+                .map(|s| s.id.clone())
+                .or_else(|| store.transcript_conv.clone());
+            // turn_n = count of user messages (rewind to before the LAST one).
+            let turn_n = store
+                .transcript
+                .as_ref()
+                .map(|s| s.messages.iter().filter(|m| m.is_user()).count() as u32)
+                .unwrap_or(0);
+            (conv, turn_n)
+        };
+        let (Some(conv), true) = (conv, turn_n > 0) else {
+            self.action_error = Some("code-rewind: no prompt to rewind to".into());
+            cx.notify();
+            return;
+        };
+        self.action_error = None;
+        cx.notify();
+        let http_client: Arc<dyn HttpClient> = cx.http_client();
+        self._action = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let url = format!("{BRIDGE_BASE_URL}/conv/{conv}/rewind");
+                    let body =
+                        serde_json::json!({ "turn_n": turn_n, "axis": "code" }).to_string();
+                    post_json_status(http_client.as_ref(), &url, body).await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok((status, raw)) if (200..300).contains(&status) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(&raw).unwrap_or_default();
+                        // C-T3: arm Redo iff a non-empty redo_sha came back.
+                        this.code_redo_sha = value
+                            .get("redo_sha")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
+                        // C-T4: the untracked warning VERBATIM on the action
+                        // line (never swallowed).
+                        this.action_error = value
+                            .get("untracked_warning")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|w| SharedString::from(w.to_string()));
+                    }
+                    // 409 sibling-active / 404 — the bridge error VERBATIM.
+                    Ok((status, raw)) => {
+                        this.action_error =
+                            Some(error_message(status, &raw).into());
+                    }
+                    Err(error) => {
+                        this.action_error = Some(format!("code-rewind failed: {error}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The non-destructive REDO of a code-rewind (§C, C-T3): POST
+    /// `/conv/<conv>/redo {redo_sha}`. Consumes the armed handle; a refusal
+    /// lands verbatim on the action line.
+    pub(super) fn code_redo(&mut self, cx: &mut Context<Self>) {
+        let Some(redo_sha) = self.code_redo_sha.take() else {
+            return;
+        };
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let conv = {
+            let store = store.read(cx);
+            store
+                .transcript
+                .as_ref()
+                .map(|s| s.id.clone())
+                .or_else(|| store.transcript_conv.clone())
+        };
+        let Some(conv) = conv else { return };
+        self.action_error = None;
+        cx.notify();
+        let http_client: Arc<dyn HttpClient> = cx.http_client();
+        self._action = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let url = format!("{BRIDGE_BASE_URL}/conv/{conv}/redo");
+                    let body = serde_json::json!({ "redo_sha": redo_sha }).to_string();
+                    post_json_status(http_client.as_ref(), &url, body).await
+                })
+                .await;
+            // Success is silent (the poll/refetch lands the forward state); a
+            // refusal (409 sibling / 404) or transport error lands VERBATIM.
+            let error: Option<String> = match result {
+                Ok((status, _)) if (200..300).contains(&status) => None,
+                Ok((status, raw)) => Some(error_message(status, &raw)),
+                Err(error) => Some(format!("redo failed: {error}")),
+            };
+            if let Some(error) = error {
+                this.update(cx, |this, cx| {
+                    this.action_error = Some(error.into());
                     cx.notify();
                 })
                 .ok();

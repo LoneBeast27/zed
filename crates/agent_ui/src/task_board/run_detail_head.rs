@@ -210,6 +210,28 @@ impl RunDrawer {
                     .into_any_element(),
             );
         }
+        // Code-rewind (§C, code axis) — beside the codex rollback. Available
+        // for ANY bridge run (not codex-gated: the conv-level code rewind is
+        // vendor-unified), so a claude/agy/gemini run can revert its code too.
+        // POSTs /conv/<conv>/rewind {axis:"code"}; non-destructive (arms Redo).
+        actions.push(
+            button(
+                "drawer-code-rewind",
+                IconName::RotateCcw,
+                "Rewind code to before the last prompt",
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.code_rewind(cx)))
+            .into_any_element(),
+        );
+        // The non-destructive REDO (C-T3) — shown ONLY while a redo_sha is
+        // armed from a landed code-rewind (never a dead button).
+        if self.code_redo_sha.is_some() {
+            actions.push(
+                button("drawer-code-redo", IconName::RotateCw, "Redo the rewind")
+                    .on_click(cx.listener(|this, _, _, cx| this.code_redo(cx)))
+                    .into_any_element(),
+            );
+        }
         actions
     }
 

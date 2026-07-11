@@ -39,12 +39,13 @@ pub(super) fn render_message(
     ix: usize,
     live: bool,
     verdict: Option<bool>,
+    rewind_open: bool,
     fades: &StateFades,
     window: &mut Window,
     cx: &mut Context<OrchestratorPanel>,
 ) -> AnyElement {
     let body = if view.user {
-        render_user_card(view, window, cx)
+        render_user_card(view, ix, rewind_open, fades, window, cx)
     } else {
         let live_extra_s = live.then(|| view.seen_at.elapsed().as_secs_f64());
         render_agent_block(view, ix, live_extra_s, verdict, fades, window, cx)
@@ -78,23 +79,150 @@ pub(super) fn render_message(
 
 /// `.user-card` — full-width tonal card (`--surface-1`, hairline, r12,
 /// p14×16), NOT a right-aligned bubble; the card differentiates the speaker.
+/// Carries the per-turn REWIND affordance (§C): a hover-revealed "rewind to
+/// here" control that opens the dual-axis choice (code / conversation / both).
 fn render_user_card(
     view: &MessageView,
+    ix: usize,
+    rewind_open: bool,
+    fades: &StateFades,
     window: &mut Window,
     cx: &mut Context<OrchestratorPanel>,
 ) -> AnyElement {
     let colors = cx.theme().colors();
-    div()
-        .rounded(px(12.))
+    v_flex()
+        .id(msg_hover_id(ix))
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            this.set_fade(msg_hover_id(ix), *hovered, STATE_FADE, cx);
+        }))
+        .child(
+            div()
+                .rounded(px(12.))
+                .bg(SURFACE_1)
+                .border_1()
+                .border_color(colors.border)
+                .px(px(16.))
+                .py(px(14.))
+                .child(MarkdownElement::new(
+                    view.markdown.clone(),
+                    prose_style(window, cx),
+                )),
+        )
+        .child(render_rewind_row(ix, rewind_open, fades, cx))
+        .into_any_element()
+}
+
+/// The per-turn rewind affordance beneath a user card: a hover-revealed
+/// "Rewind to here" control (§C) that toggles the dual-axis menu. The menu
+/// (code / conversation / both — C-T1 independence) renders inline below when
+/// open for THIS row. Reveal rides the panel's tracked-hover fade (the meta-trio
+/// idiom); the menu, once open, stays visible regardless of hover.
+fn render_rewind_row(
+    ix: usize,
+    open: bool,
+    fades: &StateFades,
+    cx: &mut Context<OrchestratorPanel>,
+) -> AnyElement {
+    let (placeholder, text, hover_bg, border, muted) = {
+        let colors = cx.theme().colors();
+        (
+            colors.text_placeholder,
+            colors.text,
+            colors.element_hover,
+            colors.border,
+            colors.text_muted,
+        )
+    };
+    let control_id = ElementId::NamedInteger("rewind-ctl".into(), ix as u64);
+    let hover_t = fades.t(&control_id);
+
+    // "Rewind to here" pill — hover-revealed (rides the card's tracked hover),
+    // brightens on its own hover.
+    let control = h_flex()
+        .id(control_id.clone())
+        .items_center()
+        .gap(px(5.))
+        .px(px(8.))
+        .py(px(3.))
+        .rounded(px(7.))
+        .bg(hover_bg.opacity(if open { 1.0 } else { hover_t }))
+        .cursor_pointer()
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            this.set_fade(control_id.clone(), *hovered, STATE_FADE, cx);
+        }))
+        .on_click(cx.listener(move |this, _, _, cx| this.toggle_rewind_menu(ix, cx)))
+        .child(
+            Icon::new(IconName::Undo)
+                .size(IconSize::Small)
+                .color(Color::Custom(mix(placeholder, text, if open { 1.0 } else { hover_t }))),
+        )
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(mix(placeholder, text, if open { 1.0 } else { hover_t }))
+                .child("Rewind to here"),
+        );
+
+    // The revealed row: the control fades in on card hover (or stays lit when
+    // its menu is open — a §C affordance the user is mid-interaction with).
+    let reveal_t = if open { 1.0 } else { fades.t(&msg_hover_id(ix)) };
+    let row = h_flex()
+        .mt(px(4.))
+        .justify_end()
+        .opacity(reveal_t)
+        .child(control);
+
+    if !open {
+        return row.into_any_element();
+    }
+
+    // The dual-axis menu (C-T1): three INDEPENDENT restore axes. Each row POSTs
+    // /rewind with its axis; the honest outcome (redo + untracked) lands above
+    // the composer.
+    use super::rewind::RewindAxis;
+    let axis_row = |axis: RewindAxis, cx: &mut Context<OrchestratorPanel>| {
+        let row_id = ElementId::NamedInteger(
+            format!("rewind-axis-{}", axis.wire()).into(),
+            ix as u64,
+        );
+        h_flex()
+            .id(row_id)
+            .w_full()
+            .items_center()
+            .px(px(10.))
+            .py(px(6.))
+            .rounded(px(6.))
+            .text_size(px(12.5))
+            .text_color(muted)
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover_bg))
+            .on_click(cx.listener(move |this, _, window, cx| this.rewind_to(ix, axis, window, cx)))
+            .child(axis.label())
+    };
+    let menu = v_flex()
+        .mt(px(4.))
+        .w(px(220.))
+        .p(px(4.))
+        .rounded(px(10.))
         .bg(SURFACE_1)
         .border_1()
-        .border_color(colors.border)
-        .px(px(16.))
-        .py(px(14.))
-        .child(MarkdownElement::new(
-            view.markdown.clone(),
-            prose_style(window, cx),
-        ))
+        .border_color(border)
+        .child(
+            div()
+                .px(px(10.))
+                .py(px(4.))
+                .text_size(px(11.))
+                .text_color(placeholder)
+                .child("Rewind to before this prompt"),
+        )
+        .child(axis_row(RewindAxis::Code, cx))
+        .child(axis_row(RewindAxis::Conversation, cx))
+        .child(axis_row(RewindAxis::Both, cx));
+
+    v_flex()
+        .items_end()
+        .child(row)
+        .child(menu)
         .into_any_element()
 }
 
