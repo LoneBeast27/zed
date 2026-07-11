@@ -280,6 +280,36 @@ pub enum BridgeEvent {
         #[serde(default)]
         pending: Vec<ApprovalRow>,
     },
+    /// An incremental reply chunk (Wave A: `event: text_delta`). DELTAS ONLY —
+    /// each frame carries just the new characters since the last, digest-keyed
+    /// and coalesced per 500ms bridge tick, ordered by `seq` per
+    /// `(conv, run_id, index)` triple. The store appends it to the live
+    /// in-progress buffer (never a repaint of already-rendered text — the
+    /// FEATURE_SENTIMENT §A-T1 no-flicker invariant); the terminal whole `text`
+    /// still lands on `/transcript` for reconciliation. `seq` is monotonic per
+    /// triple: a stale/duplicate `seq <= last applied` is ignored (idempotent).
+    ///
+    /// Explicit rename: the `rename_all = "lowercase"` on the enum would map
+    /// this to `textdelta`, but the wire discriminant is snake_case
+    /// `text_delta` (the SSE `event: text_delta` + `"type":"text_delta"`).
+    #[serde(rename = "text_delta")]
+    TextDelta {
+        #[serde(default)]
+        conv: String,
+        #[serde(default)]
+        run_id: String,
+        /// Transcript message index this delta paints into (the trailing agent
+        /// reply while streaming). Defaults to 0 on an older/partial frame.
+        #[serde(default)]
+        index: usize,
+        /// Monotonic sequence within the `(conv, run_id, index)` triple — the
+        /// idempotency key. A frame with `seq <= last_seq` is a replay, dropped.
+        #[serde(default)]
+        seq: u64,
+        /// The incremental characters only (NOT the accumulated reply).
+        #[serde(default)]
+        text: String,
+    },
     /// Forward compat: unknown event types deserialize (and are dropped by
     /// the client) instead of erroring the stream.
     #[serde(other)]
@@ -836,6 +866,58 @@ mod tests {
             panic!("expected Channels");
         };
         assert!(channels.is_empty());
+    }
+
+    #[test]
+    fn text_delta_event_tag_deserializes() {
+        // Fixture truth: the Wave A `event: text_delta` frame
+        // (bridge 70c38183) — deltas-only, digest-keyed, seq-ordered per
+        // (conv, run_id, index).
+        let event: BridgeEvent = serde_json::from_str(
+            r#"{"type": "text_delta", "conv": "c-9", "run_id": "claude-1",
+                "index": 3, "seq": 7, "text": " token"}"#,
+        )
+        .unwrap();
+        let BridgeEvent::TextDelta {
+            conv,
+            run_id,
+            index,
+            seq,
+            text,
+        } = event
+        else {
+            panic!("expected TextDelta, got {event:?}");
+        };
+        assert_eq!(conv, "c-9");
+        assert_eq!(run_id, "claude-1");
+        assert_eq!(index, 3);
+        assert_eq!(seq, 7);
+        assert_eq!(text, " token");
+    }
+
+    #[test]
+    fn text_delta_event_is_liberal_and_unknown_fields_drop() {
+        // A partial frame (older bridge / coalesced tick) defaults every
+        // absent field instead of erroring, and a future field drops silently.
+        let event: BridgeEvent = serde_json::from_str(
+            r#"{"type": "text_delta", "text": "hi", "digest": "c|1", "future": true}"#,
+        )
+        .unwrap();
+        let BridgeEvent::TextDelta {
+            conv,
+            run_id,
+            index,
+            seq,
+            text,
+        } = event
+        else {
+            panic!("expected TextDelta");
+        };
+        assert!(conv.is_empty());
+        assert!(run_id.is_empty());
+        assert_eq!(index, 0);
+        assert_eq!(seq, 0);
+        assert_eq!(text, "hi");
     }
 
     #[test]

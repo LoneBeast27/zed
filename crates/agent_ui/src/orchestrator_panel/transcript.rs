@@ -45,6 +45,11 @@ pub(super) struct MessageView {
     /// First-sight clock — entrance animations attach only inside
     /// [`FRESH_WINDOW`] so scroll-culling can never replay them.
     pub seen_at: Instant,
+    /// How many bytes of the LIVE stream buffer have already been appended into
+    /// [`Self::markdown`]. The incremental feed pushes only `buffer[fed..]` so
+    /// already-rendered characters are never repainted (§A-T1 no-flicker
+    /// append). 0 for a settled (non-streaming) view; grows as deltas land.
+    pub streamed_len: usize,
 }
 
 /// The transcript's view state: keyed message views + the virtualized list.
@@ -135,6 +140,28 @@ impl TranscriptView {
         }
 
         let stable = self.views.len();
+        // §A reconciliation (render side): a view that was stream-fed
+        // (`streamed_len > 0`) holds a DRAFT painted from the SSE deltas. When
+        // the terminal whole `text` lands on `/transcript`, replace the draft
+        // with the settled text ONCE and retire the streamed cursor — the
+        // settled text wins, never streamed-on-top (the double-render guard).
+        // Gated so it can't repaint mid-stream: fires only when the snapshot
+        // message carries non-empty terminal text that DIFFERS from the draft
+        // (mid-stream the bridge leaves the transcript text empty — deltas
+        // carry it — so this never fires while streaming). Idempotent: a
+        // matching draft (already reconciled) is skipped.
+        for (view, message) in self.views.iter_mut().zip(messages.iter()) {
+            if view.user || view.streamed_len == 0 || message.text.is_empty() {
+                continue;
+            }
+            if view.markdown.read(cx).source() != message.text {
+                let text = SharedString::from(message.text.clone());
+                view.text = text.clone();
+                view.markdown
+                    .update(cx, |markdown, cx| markdown.replace(text, cx));
+            }
+            view.streamed_len = 0;
+        }
         for message in &messages[stable..] {
             self.views.push(build_view(message, cx));
         }
@@ -146,6 +173,64 @@ impl TranscriptView {
             self.list_state.splice(stable..self.listed, new_count - stable);
             self.listed = new_count;
         }
+    }
+
+    /// The trailing agent reply's view index (the slot a live stream paints
+    /// into) — `None` unless the last message is an agent reply. Mirrors
+    /// [`Self::live_agent_ix`] but is caller-gated on the store's live-stream
+    /// state rather than the transcript's `busy` flag.
+    pub fn trailing_agent_ix(&self) -> Option<usize> {
+        match self.views.last() {
+            Some(view) if !view.user => Some(self.views.len() - 1),
+            _ => None,
+        }
+    }
+
+    /// The trailing agent reply's `run_id` — the stream key's run component
+    /// (the store buffers deltas per `(conv, run_id, index)`). `None` when the
+    /// trailing view carries no run (a brain-only reply / empty runs array).
+    pub fn trailing_run_id(&self) -> Option<(usize, String)> {
+        let ix = self.trailing_agent_ix()?;
+        let run_id = self.views[ix].runs.first().map(|run| run.run_id.clone())?;
+        Some((ix, run_id))
+    }
+
+    /// Paint the live buffer into the trailing agent reply INCREMENTALLY. The
+    /// buffer (the store's `(conv, run_id, index)` accumulator) is the single
+    /// source of truth for a streaming reply's text:
+    /// - first delta (`streamed_len == 0`): `replace` the markdown with the
+    ///   whole buffer, so whatever partial text `build_view` seeded from the
+    ///   snapshot is overwritten ONCE (never streamed-on-top — the §A
+    ///   double-render guard);
+    /// - subsequent deltas: `append` only `buffer[fed..]` — the on-screen
+    ///   characters are never rebuilt or repainted (§A-T1 no-flicker append).
+    ///
+    /// Returns whether the entity changed (so the panel can gate its repaint).
+    /// A non-growing buffer is a no-op (idempotent, and shrink-safe — the
+    /// settled `sync` path owns the terminal replacement).
+    pub fn feed_stream(&mut self, ix: usize, buffer: &str, cx: &mut App) -> bool {
+        let Some(view) = self.views.get_mut(ix) else {
+            return false;
+        };
+        if view.user {
+            return false; // never stream into a user card
+        }
+        if buffer.len() <= view.streamed_len {
+            return false; // no new bytes — idempotent (and shrink-safe)
+        }
+        if view.streamed_len == 0 {
+            // Establish the buffer as the source of truth, overwriting the
+            // snapshot seed exactly once (no double-render).
+            let source = SharedString::from(buffer.to_string());
+            view.markdown
+                .update(cx, |markdown, cx| markdown.replace(source, cx));
+        } else {
+            let tail = &buffer[view.streamed_len..];
+            view.markdown
+                .update(cx, |markdown, cx| markdown.append(tail, cx));
+        }
+        view.streamed_len = buffer.len();
+        true
     }
 }
 
@@ -181,6 +266,7 @@ fn build_view(message: &TranscriptMessage, cx: &mut App) -> MessageView {
         runs: message.runs.clone(),
         worked_open: false,
         seen_at: Instant::now(),
+        streamed_len: 0,
     }
 }
 

@@ -37,10 +37,14 @@ const BOARD_POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(12);
 /// When the bridge is fully offline, back off to slow poll retries.
 const OFFLINE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
-/// `/transcript` cadence while the orchestrator is busy (the web's 900ms
-/// busy poll — SSE carries only board/usage today; transcript-over-SSE is
-/// bridge-side work, deferred).
-const TRANSCRIPT_POLL_BUSY: Duration = Duration::from_millis(900);
+/// `/transcript` RECONCILE-backstop cadence while the orchestrator is busy.
+/// The 900ms busy poll is RETIRED (parity gap #1 last mile): the SSE
+/// `text_delta` frames now PUSH the live reply token-by-token, so the busy
+/// transcript poll no longer drives the visible stream — it only backstops
+/// reconciliation (the terminal whole `text` + any delta the push dropped).
+/// A slow 2.5s reconcile is enough; refetching the whole transcript every
+/// 900ms was the whole-reply-on-a-poll flicker source this wave removes.
+const TRANSCRIPT_POLL_BUSY: Duration = Duration::from_millis(2500);
 /// `/transcript` cadence while idle (web 2.5s).
 const TRANSCRIPT_POLL_IDLE: Duration = Duration::from_millis(2500);
 /// `/plan` poll cadence — the symphony check-off fallback when SSE isn't
@@ -566,10 +570,22 @@ mod tests {
     }
 
     #[test]
-    fn transcript_cadence_is_busy_aware() {
+    fn busy_transcript_poll_is_retired_to_the_reconcile_backstop() {
+        // Parity gap #1 last mile: the 900ms busy poll is RETIRED — the SSE
+        // `text_delta` frames push the live stream now, so the busy cadence is
+        // no longer the flickery 900ms whole-transcript refetch. It collapses
+        // to the idle reconcile rate (a slow backstop, not the live driver).
         assert_eq!(transcript_cadence(true), TRANSCRIPT_POLL_BUSY);
         assert_eq!(transcript_cadence(false), TRANSCRIPT_POLL_IDLE);
-        assert!(transcript_cadence(true) < transcript_cadence(false));
+        assert_eq!(
+            transcript_cadence(true),
+            transcript_cadence(false),
+            "the busy poll no longer runs faster than idle — deltas drive the stream"
+        );
+        assert!(
+            transcript_cadence(true) >= Duration::from_millis(2000),
+            "the retired busy poll must be a slow reconcile backstop, not a 900ms flicker refetch"
+        );
     }
 
     #[test]

@@ -282,6 +282,169 @@ fn routed_turn_meta_keeps_the_brain() {
     );
 }
 
+fn agent_reply_with_run() -> TranscriptMessage {
+    TranscriptMessage {
+        role: "orchestrator".into(),
+        text: String::new(), // streaming reply — text arrives via deltas
+        runs: vec![TranscriptRun {
+            run_id: "claude-1".into(),
+            agent: "claude".into(),
+            chip: None,
+        }],
+        ..Default::default()
+    }
+}
+
+#[gpui::test]
+fn feed_stream_appends_incrementally_without_rebuilding_the_view(
+    cx: &mut gpui::TestAppContext,
+) {
+    // §A-T1 no-flicker append: consecutive deltas grow the trailing reply's
+    // markdown SOURCE while the markdown ENTITY identity is preserved — the
+    // view is never rebuilt (no repaint of already-rendered text).
+    cx.update(|cx| {
+        let mut transcript = TranscriptView::new();
+        transcript.sync(
+            &snapshot(
+                "c-1",
+                true,
+                vec![message("user", "q"), agent_reply_with_run()],
+            ),
+            cx,
+        );
+        let (ix, run_id) = transcript.trailing_run_id().expect("trailing agent run");
+        assert_eq!(ix, 1);
+        assert_eq!(run_id, "claude-1");
+        let entity_id = transcript.message(ix).unwrap().markdown.entity_id();
+
+        // First delta: establishes the buffer as the source (replace-once).
+        assert!(transcript.feed_stream(ix, "Hello", cx));
+        assert_eq!(
+            transcript.message(ix).unwrap().markdown.read(cx).source(),
+            "Hello"
+        );
+        assert_eq!(transcript.message(ix).unwrap().streamed_len, 5);
+
+        // Second delta (buffer grew): only the tail is appended.
+        assert!(transcript.feed_stream(ix, "Hello, world", cx));
+        assert_eq!(
+            transcript.message(ix).unwrap().markdown.read(cx).source(),
+            "Hello, world"
+        );
+
+        // The markdown ENTITY is the SAME across deltas — no rebuild/flicker.
+        assert_eq!(
+            transcript.message(ix).unwrap().markdown.entity_id(),
+            entity_id,
+            "streaming must never rebuild the on-screen markdown entity (§A-T1)"
+        );
+    });
+}
+
+#[gpui::test]
+fn feed_stream_is_idempotent_on_a_non_growing_buffer(cx: &mut gpui::TestAppContext) {
+    // A repeated feed with the same (or shorter) buffer appends nothing — the
+    // seq-idempotency at the store carries through to the render (no double
+    // characters, no repaint).
+    cx.update(|cx| {
+        let mut transcript = TranscriptView::new();
+        transcript.sync(
+            &snapshot(
+                "c-1",
+                true,
+                vec![message("user", "q"), agent_reply_with_run()],
+            ),
+            cx,
+        );
+        let ix = transcript.trailing_agent_ix().unwrap();
+        assert!(transcript.feed_stream(ix, "abc", cx));
+        assert!(
+            !transcript.feed_stream(ix, "abc", cx),
+            "the same buffer feeds nothing (idempotent)"
+        );
+        assert!(
+            !transcript.feed_stream(ix, "ab", cx),
+            "a shorter buffer is shrink-safe — no repaint"
+        );
+        assert_eq!(
+            transcript.message(ix).unwrap().markdown.read(cx).source(),
+            "abc"
+        );
+    });
+}
+
+#[gpui::test]
+fn feed_stream_never_paints_a_user_card(cx: &mut gpui::TestAppContext) {
+    // A trailing USER message is never a stream target (deltas belong to an
+    // agent reply); the feed refuses it.
+    cx.update(|cx| {
+        let mut transcript = TranscriptView::new();
+        transcript.sync(&snapshot("c-1", true, vec![message("user", "q")]), cx);
+        assert_eq!(transcript.trailing_agent_ix(), None);
+        // Even if called directly on the user index, nothing is painted.
+        assert!(!transcript.feed_stream(0, "sneaky", cx));
+        assert_eq!(transcript.message(0).unwrap().markdown.read(cx).source(), "q");
+    });
+}
+
+#[gpui::test]
+fn settled_sync_replaces_the_streamed_view_the_reconcile(cx: &mut gpui::TestAppContext) {
+    // §A reconciliation at the render: after streaming a draft into the
+    // trailing reply, a settled snapshot carrying the terminal whole text
+    // REPLACES the draft (source := settled text) and retires the streamed
+    // cursor — never appends on top (the double-render guard). The markdown
+    // ENTITY is preserved across the reconcile (replace-in-place, not rebuild)
+    // so no flicker even at the settle boundary.
+    cx.update(|cx| {
+        let mut transcript = TranscriptView::new();
+        transcript.sync(
+            &snapshot(
+                "c-1",
+                true,
+                vec![message("user", "q"), agent_reply_with_run()],
+            ),
+            cx,
+        );
+        let ix = transcript.trailing_agent_ix().unwrap();
+        let entity_id = transcript.message(ix).unwrap().markdown.entity_id();
+        transcript.feed_stream(ix, "partial draft", cx);
+        assert_eq!(transcript.message(ix).unwrap().streamed_len, 13);
+
+        // The settled snapshot carries the terminal reply text.
+        transcript.sync(
+            &snapshot(
+                "c-1",
+                false,
+                vec![
+                    message("user", "q"),
+                    message("orchestrator", "the settled full reply"),
+                ],
+            ),
+            cx,
+        );
+        assert_eq!(
+            transcript.message(ix).unwrap().markdown.read(cx).source(),
+            "the settled full reply",
+            "the settled text replaces the streamed draft (no streamed-on-top)"
+        );
+        assert_eq!(
+            transcript.message(ix).unwrap().streamed_len,
+            0,
+            "the reconciled settled view carries no streamed cursor"
+        );
+        assert_eq!(
+            transcript.message(ix).unwrap().text.as_ref(),
+            "the settled full reply",
+            "the copy-payload text is reconciled to the settled reply too"
+        );
+        assert_eq!(
+            transcript.message(ix).unwrap().markdown.entity_id(),
+            entity_id,
+            "reconcile replaces in place — the entity is preserved (no flicker)"
+        );
+    });
+}
+
 #[gpui::test]
 fn growth_while_busy_keeps_the_shimmer_last(cx: &mut gpui::TestAppContext) {
     // Growth with busy held true: the splice past the stable prefix

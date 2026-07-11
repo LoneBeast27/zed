@@ -203,8 +203,42 @@ impl OrchestratorPanel {
             self.last_snapshot = Some(snapshot);
             changed = true;
         }
+
+        // Streaming render (parity gap #1): paint the live SSE `text_delta`
+        // buffer into the trailing agent reply INCREMENTALLY. This runs on
+        // EVERY notify — a delta notifies the store without changing the
+        // transcript snapshot, so it can't ride the change-gated block above.
+        // The feed itself is idempotent (only the un-fed tail is appended), so
+        // a notify with no new delta is a cheap no-op (§A-T1 no-flicker).
+        if self.feed_live_stream(cx) {
+            changed = true;
+        }
+
         if changed {
             cx.notify();
+        }
+    }
+
+    /// Append the store's live stream buffer for the trailing agent reply into
+    /// its markdown entity (no rebuild). Returns whether anything was appended.
+    /// The buffer is keyed by `(conv, run_id, index)`; the trailing agent view
+    /// supplies `run_id`+`index`, the followed transcript id supplies `conv`.
+    fn feed_live_stream(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((ix, run_id)) = self.transcript.trailing_run_id() else {
+            return false;
+        };
+        // Read the buffer under a scoped borrow, then feed (which needs `&mut
+        // App`); clone only the tail-bearing string when a stream is live.
+        let buffer = {
+            let store = self.store.read(cx);
+            let Some(conv) = store.transcript_conv.as_deref() else {
+                return false;
+            };
+            store.stream_text(conv, &run_id, ix).map(str::to_string)
+        };
+        match buffer {
+            Some(buffer) => self.transcript.feed_stream(ix, &buffer, cx),
+            None => false,
         }
     }
 

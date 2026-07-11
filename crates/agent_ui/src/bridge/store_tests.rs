@@ -385,6 +385,144 @@ fn permission_frame_replaces_pending_approvals_and_change_gates(cx: &mut gpui::T
     assert!(notifies.get() > after_replace, "clearing notifies");
 }
 
+fn text_delta(conv: &str, run_id: &str, index: usize, seq: u64, text: &str) -> BridgeEvent {
+    BridgeEvent::TextDelta {
+        conv: conv.to_string(),
+        run_id: run_id.to_string(),
+        index,
+        seq,
+        text: text.to_string(),
+    }
+}
+
+#[gpui::test]
+fn text_deltas_apply_in_seq_order_building_the_buffer_incrementally(
+    cx: &mut gpui::TestAppContext,
+) {
+    // §A-T1/A-T2: consecutive deltas APPEND into the live buffer — the buffer
+    // is the accumulation of every in-order chunk (deltas-only wire), never a
+    // re-send of the whole reply.
+    let store = cx.new(|_| BridgeStore::default());
+    store.update(cx, |store, cx| {
+        assert!(!store.has_live_streams(), "no buffer before any delta");
+        store.apply_event(text_delta("c-1", "claude-1", 2, 0, "Hel"), cx);
+        store.apply_event(text_delta("c-1", "claude-1", 2, 1, "lo, "), cx);
+        store.apply_event(text_delta("c-1", "claude-1", 2, 2, "world"), cx);
+        assert_eq!(
+            store.stream_text("c-1", "claude-1", 2),
+            Some("Hello, world"),
+            "in-order deltas accumulate into the buffer"
+        );
+        assert!(store.has_live_streams());
+        // A different triple has its own buffer (no cross-talk).
+        assert_eq!(store.stream_text("c-1", "claude-1", 3), None);
+        assert_eq!(store.stream_text("c-9", "claude-1", 2), None);
+    });
+}
+
+#[gpui::test]
+fn a_stale_or_repeated_seq_is_idempotent_no_double_append(cx: &mut gpui::TestAppContext) {
+    // §A idempotency: a re-delivered / out-of-order `seq <= last_seq` is a
+    // replay — it must NOT append again (the double-render class).
+    let store = cx.new(|_| BridgeStore::default());
+    let notifies = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let _subscription = cx.update(|cx| {
+        cx.observe(&store, {
+            let notifies = notifies.clone();
+            move |_, _| notifies.set(notifies.get() + 1)
+        })
+    });
+    store.update(cx, |store, cx| {
+        store.apply_event(text_delta("c-1", "r-1", 0, 0, "a"), cx);
+        store.apply_event(text_delta("c-1", "r-1", 0, 1, "b"), cx);
+        assert_eq!(store.stream_text("c-1", "r-1", 0), Some("ab"));
+    });
+    cx.run_until_parked();
+    let after_two = notifies.get();
+
+    store.update(cx, |store, cx| {
+        // Replay of seq 1 (already applied) — dropped.
+        store.apply_event(text_delta("c-1", "r-1", 0, 1, "b"), cx);
+        // An older seq 0 — also dropped.
+        store.apply_event(text_delta("c-1", "r-1", 0, 0, "a"), cx);
+        assert_eq!(
+            store.stream_text("c-1", "r-1", 0),
+            Some("ab"),
+            "a stale/duplicate seq must never double-append"
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        notifies.get(),
+        after_two,
+        "a replayed delta must not notify (no change)"
+    );
+
+    // A fresh higher seq resumes the append.
+    store.update(cx, |store, cx| {
+        store.apply_event(text_delta("c-1", "r-1", 0, 2, "c"), cx);
+        assert_eq!(store.stream_text("c-1", "r-1", 0), Some("abc"));
+    });
+    cx.run_until_parked();
+    assert!(notifies.get() > after_two, "a new delta notifies");
+}
+
+#[gpui::test]
+fn terminal_transcript_text_reconciles_and_replaces_the_streamed_buffer(
+    cx: &mut gpui::TestAppContext,
+) {
+    // §A reconciliation: the streamed buffer is a DRAFT — when the terminal
+    // whole `text` lands on a SETTLED (`busy == false`) `/transcript`, the
+    // buffer is RETIRED so the settled snapshot text renders (replace, never
+    // streamed-on-top — the double-render anti-pattern).
+    let store = cx.new(|_| BridgeStore::default());
+    store.update(cx, |store, cx| {
+        store.transcript_conv = Some("c-1".into());
+        store.apply_event(text_delta("c-1", "r-1", 1, 0, "streamed draft"), cx);
+        assert!(store.has_live_streams(), "buffer live mid-stream");
+
+        // A still-BUSY transcript must NOT reconcile — deltas keep painting.
+        store.apply_transcript(transcript("c-1", true, &["q", "streamed draft"]), cx);
+        assert!(
+            store.has_live_streams(),
+            "a busy transcript leaves the buffer live"
+        );
+
+        // The SETTLED transcript carries the terminal whole text — reconcile.
+        store.apply_transcript(
+            transcript("c-1", false, &["q", "the settled full reply"]),
+            cx,
+        );
+        assert!(
+            !store.has_live_streams(),
+            "a settled transcript retires the streamed buffer (the §A replace)"
+        );
+        assert_eq!(
+            store.stream_text("c-1", "r-1", 1),
+            None,
+            "the buffer is gone — the snapshot text is authoritative now"
+        );
+    });
+}
+
+#[gpui::test]
+fn reconcile_is_conv_scoped(cx: &mut gpui::TestAppContext) {
+    // A settled transcript for conv A retires A's buffers only — a live
+    // stream on conv B is untouched (no cross-conv reconcile).
+    let store = cx.new(|_| BridgeStore::default());
+    store.update(cx, |store, cx| {
+        store.apply_event(text_delta("conv-a", "r-a", 0, 0, "A"), cx);
+        store.apply_event(text_delta("conv-b", "r-b", 0, 0, "B"), cx);
+        store.apply_transcript(transcript("conv-a", false, &["done"]), cx);
+        assert_eq!(store.stream_text("conv-a", "r-a", 0), None, "A retired");
+        assert_eq!(
+            store.stream_text("conv-b", "r-b", 0),
+            Some("B"),
+            "B's live stream survives a conv-A reconcile"
+        );
+    });
+}
+
 #[gpui::test]
 fn ticker_lives_only_while_a_run_is_running(cx: &mut gpui::TestAppContext) {
     let store = cx.new(|_| BridgeStore::default());

@@ -3,6 +3,7 @@
 //! frames (serve.py's board digest ignores `elapsed_s` — clients tick
 //! elapsed locally; RUST_PORT_NOTES §5's worked-for ticker).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -33,6 +34,47 @@ pub enum Transport {
     Polling,
 }
 
+/// The address of one live-streaming reply: a `(conv, run_id, index)` triple.
+/// `index` is the transcript message slot the deltas paint into (the trailing
+/// agent reply while streaming). Deltas ordered by `seq` within a key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StreamKey {
+    pub conv: String,
+    pub run_id: String,
+    pub index: usize,
+}
+
+/// The accumulated in-progress reply for one [`StreamKey`]: the streamed text
+/// so far plus the last applied `seq` (the idempotency high-water mark). The
+/// store APPENDS deltas here; the panel reads [`Self::text`] and pushes only
+/// the un-fed tail into the message's markdown entity — never a repaint of
+/// already-rendered characters (FEATURE_SENTIMENT §A-T1 no-flicker invariant).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamBuffer {
+    /// The reply text accumulated from every in-order delta.
+    pub text: String,
+    /// The highest `seq` applied so far — `None` until the first delta lands.
+    /// A frame whose `seq` is `<= last_seq` is a replay and dropped (a stale
+    /// re-delivery never double-appends — the §A idempotency law).
+    pub last_seq: Option<u64>,
+}
+
+impl StreamBuffer {
+    /// Apply one delta if it advances `seq`; returns whether the buffer grew
+    /// (so the caller can gate `cx.notify()`). A `seq <= last_seq` frame is a
+    /// replay and is dropped without appending (idempotent).
+    fn apply_delta(&mut self, seq: u64, text: &str) -> bool {
+        if let Some(last) = self.last_seq
+            && seq <= last
+        {
+            return false; // stale/duplicate — never double-append
+        }
+        self.last_seq = Some(seq);
+        self.text.push_str(text);
+        true
+    }
+}
+
 /// The bridge snapshot Z1+ panels render from. `connected == false` means the
 /// bridge is offline — the last snapshot is kept so panels can grey-out rather
 /// than blank.
@@ -53,6 +95,14 @@ pub struct BridgeStore {
     /// The conversation the transcript poll follows. `None` = the bridge's
     /// default (latest); the poll canonicalizes it to the served id.
     pub transcript_conv: Option<String>,
+    /// Live in-progress reply buffers keyed by `(conv, run_id, index)` — fed by
+    /// the SSE `text_delta` frames (Wave A). Each buffer accumulates deltas in
+    /// `seq` order; the panel appends only the un-fed tail into the trailing
+    /// reply's markdown entity (no-flicker append, §A-T1). Cleared for a conv
+    /// when the terminal whole `text` lands on `/transcript` (the §A
+    /// reconciliation — the streamed buffer is REPLACED by the settled text,
+    /// never rendered on top of it).
+    stream_buffers: HashMap<StreamKey, StreamBuffer>,
     /// The last plan/wave snapshot (Symphony live check-off) — `None` until
     /// the first `plan` event / `/plan` poll. Fed by SSE when connected and by
     /// the watch-gated `/plan` poll in the polling-fallback window.
@@ -115,6 +165,7 @@ impl Default for BridgeStore {
             transport: Transport::None,
             transcript: None,
             transcript_conv: None,
+            stream_buffers: HashMap::new(),
             plan: None,
             plan_conv: String::new(),
             channels: Vec::new(),
@@ -264,6 +315,33 @@ impl BridgeStore {
                     changed = true;
                 }
             }
+            BridgeEvent::TextDelta {
+                conv,
+                run_id,
+                index,
+                seq,
+                text,
+            } => {
+                // Append the incremental chunk to the live buffer for its
+                // triple, seq-ordered and idempotent (a `seq <= last_seq`
+                // replay is dropped). The panel reads the buffer on the notify
+                // and appends only the un-fed tail into the trailing reply's
+                // markdown entity — never a whole-view repaint (§A-T1). An
+                // empty-text advance still lands (a coalesced keepalive tick).
+                let key = StreamKey {
+                    conv,
+                    run_id,
+                    index,
+                };
+                if self
+                    .stream_buffers
+                    .entry(key)
+                    .or_default()
+                    .apply_delta(seq, &text)
+                {
+                    changed = true;
+                }
+            }
             BridgeEvent::Unknown => {}
         }
         if changed {
@@ -362,6 +440,37 @@ impl BridgeStore {
             .map(|project| project.name.as_str())
     }
 
+    /// The live streamed reply for a `(conv, run_id, index)` triple — the
+    /// panel reads this to append the un-fed tail into the trailing reply's
+    /// markdown entity (no-flicker incremental feed, §A-T1). `None` once the
+    /// buffer has been reconciled away by the terminal `/transcript` text.
+    pub fn stream_text(&self, conv: &str, run_id: &str, index: usize) -> Option<&str> {
+        self.stream_buffers
+            .get(&StreamKey {
+                conv: conv.to_string(),
+                run_id: run_id.to_string(),
+                index,
+            })
+            .map(|buffer| buffer.text.as_str())
+    }
+
+    /// Whether any live stream buffer is currently held (a reply is mid-flight).
+    pub fn has_live_streams(&self) -> bool {
+        !self.stream_buffers.is_empty()
+    }
+
+    /// Drop every live stream buffer for `conv` — the §A reconciliation. When
+    /// the terminal whole `text` lands on `/transcript`, the streamed buffer is
+    /// REPLACED by the settled snapshot text (the view rebuilds/`replace`s from
+    /// the snapshot), so the buffer must be retired — never rendered on top of
+    /// the settled text (the double-render anti-pattern). Idempotent: a
+    /// reconcile with no held buffers is a no-op.
+    fn reconcile_streams_for(&mut self, conv: &str) -> bool {
+        let before = self.stream_buffers.len();
+        self.stream_buffers.retain(|key, _| key.conv != conv);
+        self.stream_buffers.len() != before
+    }
+
     pub(super) fn apply_transcript(
         &mut self,
         snapshot: TranscriptSnapshot,
@@ -372,6 +481,13 @@ impl BridgeStore {
         let mut changed = false;
         if !snapshot.id.is_empty() && self.transcript_conv.as_deref() != Some(&snapshot.id) {
             self.transcript_conv = Some(snapshot.id.clone());
+            changed = true;
+        }
+        // §A reconciliation: a SETTLED transcript (`busy == false`) carries the
+        // terminal whole reply text — retire the conv's streamed buffers so the
+        // view renders the authoritative settled text, never streamed-on-top.
+        // While still busy the buffers stay live (deltas keep painting).
+        if !snapshot.busy && !snapshot.id.is_empty() && self.reconcile_streams_for(&snapshot.id) {
             changed = true;
         }
         if self.transcript.as_ref() != Some(&snapshot) {
